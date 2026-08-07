@@ -69,7 +69,7 @@ import { SubChatsQuickSwitchDialog } from "../components/subchats-quick-switch-d
 import { isDesktopApp } from "../../../lib/utils/platform"
 import { remoteTrpc } from "../../../lib/remote-trpc"
 import { SettingsContent } from "../../settings/settings-content"
-import { AgentsCustomAgentsTab } from "../../../components/dialogs/settings-tabs/agents-custom-agents-tab"
+import { AcpAgentManager } from "../../../components/dialogs/settings-tabs/acp-agent-manager"
 // Desktop mock
 const useIsAdmin = () => false
 
@@ -871,7 +871,7 @@ export function AgentsContent() {
         ) : betaAutomationsEnabled && desktopView === "inbox" ? (
           <InboxView />
         ) : desktopView === "my-agents" ? (
-          <AgentsCustomAgentsTab />
+          <AcpAgentManager />
         ) : mobileViewMode === "chats" ? (
           // Chats List Mode (default) - uses AgentsSidebar in fullscreen
           <AgentsSidebar
