@@ -1,0 +1,994 @@
+"use client"
+
+import { useAtomValue } from "jotai"
+import { Loader2, Plus, RefreshCw, Trash2 } from "lucide-react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { toast } from "sonner"
+import {
+  lastSelectedAgentIdAtom,
+  selectedProjectAtom,
+  settingsMcpSidebarWidthAtom,
+} from "../../../features/agents/atoms"
+import { trpc } from "../../../lib/trpc"
+import { cn } from "../../../lib/utils"
+import { Button } from "../../ui/button"
+import { LoadingDot, OriginalMCPIcon } from "../../ui/icons"
+import { Input } from "../../ui/input"
+import { Label } from "../../ui/label"
+import { ResizableSidebar } from "../../ui/resizable-sidebar"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../../ui/select"
+import { Switch } from "../../ui/switch"
+import {
+  DeleteServerConfirm,
+  getStatusText,
+  type McpServer,
+  type ScopeType,
+} from "./mcp"
+import { useListKeyboardNav } from "./use-list-keyboard-nav"
+
+type McpProvider = "claude-code" | "codex"
+type ProviderSection = {
+  provider: McpProvider
+  title: "CODEX" | "CLAUDE CODE"
+}
+
+type ListedServer = {
+  key: string
+  provider: McpProvider
+  groupName: string
+  projectPath: string | null
+  server: McpServer
+}
+
+// Status indicator dot - exported for reuse in other components
+export function McpStatusDot({
+  status,
+  disabled,
+}: {
+  status: string
+  disabled?: boolean
+}) {
+  if (disabled) {
+    return <span className="w-2 h-2 rounded-full bg-muted-foreground/30 shrink-0" />
+  }
+
+  switch (status) {
+    case "connected":
+      return <span className="w-2 h-2 rounded-full bg-green-500 shrink-0" />
+    case "failed":
+      return <span className="w-2 h-2 rounded-full bg-red-500 shrink-0" />
+    case "needs-auth":
+      return <span className="w-2 h-2 rounded-full bg-yellow-500 shrink-0" />
+    case "pending":
+      return <LoadingDot isLoading={true} className="w-3 h-3 text-muted-foreground shrink-0" />
+    default:
+      return <span className="w-2 h-2 rounded-full bg-muted-foreground/50 shrink-0" />
+  }
+}
+
+
+// Extract connection info from server config
+function getConnectionInfo(config: Record<string, unknown>) {
+  const url = config.url as string | undefined
+  const command = config.command as string | undefined
+  const args = config.args as string[] | undefined
+  const env = config.env as Record<string, string> | undefined
+
+  if (url) {
+    return { type: "HTTP (SSE)" as const, url, command: undefined, args: undefined, env: undefined }
+  }
+  if (command) {
+    return { type: "stdio" as const, url: undefined, command, args, env }
+  }
+  return { type: "unknown" as const, url: undefined, command: undefined, args: undefined, env: undefined }
+}
+
+function isCodexHttpServer(provider: McpProvider, server: McpServer): boolean {
+  if (provider !== "codex") return false
+  const transportType = String((server.config as Record<string, unknown>).transportType || "").toLowerCase()
+  if (transportType === "http" || transportType === "sse" || transportType === "streamable_http") {
+    return true
+  }
+  return typeof (server.config as Record<string, unknown>).url === "string"
+}
+
+function isServerDisabled(server: McpServer): boolean {
+  const config = server.config as Record<string, unknown>
+  return config.disabled === true || config.enabled === false
+}
+
+// --- Detail Panel ---
+function McpServerDetail({
+  provider,
+  server,
+  onAuth,
+  onLogout,
+  onDelete,
+  onToggleEnabled,
+  isEditable,
+  isToggleable,
+  isToggling,
+}: {
+  provider: McpProvider
+  server: McpServer
+  onAuth?: () => void
+  onLogout?: () => void
+  onDelete?: () => void
+  onToggleEnabled?: (enabled: boolean) => void
+  isEditable?: boolean
+  isToggleable?: boolean
+  isToggling?: boolean
+}) {
+  const { tools, needsAuth } = server
+  const hasTools = tools.length > 0
+  const isConnected = server.status === "connected"
+  const isDisabled = isServerDisabled(server)
+  const connection = getConnectionInfo(server.config)
+  const hideToolsCount = isCodexHttpServer(provider, server)
+
+  return (
+    <div className="h-full overflow-y-auto">
+      <div className="max-w-2xl mx-auto p-6 space-y-6">
+        {/* Header */}
+        <div className="flex items-center gap-3">
+          <div className="flex-1 min-w-0">
+            <h3 className="text-sm font-semibold text-foreground truncate">{server.name}</h3>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              {isDisabled
+                ? "Disabled"
+                : isConnected
+                  ? (hideToolsCount ? "Connected" : (hasTools ? `${tools.length} tool${tools.length !== 1 ? "s" : ""}` : "No tools"))
+                  : getStatusText(server.status)}
+              {server.serverInfo?.version && ` \u00B7 v${server.serverInfo.version}`}
+            </p>
+          </div>
+          {needsAuth && onAuth && (
+            <Button variant="secondary" size="sm" className="h-7 px-3 text-xs" onClick={onAuth}>
+              {isConnected ? "Reconnect" : "Authenticate"}
+            </Button>
+          )}
+          {onLogout && (
+            <Button variant="outline" size="sm" className="h-7 px-3 text-xs" onClick={onLogout}>
+              Logout
+            </Button>
+          )}
+          {isEditable && onDelete && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 w-7 p-0 text-red-500 hover:text-red-600 hover:bg-red-500/10"
+              onClick={onDelete}
+              aria-label="Delete server"
+              title="Delete server"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+            </Button>
+          )}
+        </div>
+
+        {/* Enable/Disable Toggle */}
+        {isToggleable && onToggleEnabled && (
+          <div className="flex items-center justify-between">
+            <div>
+              <h5 className="text-xs font-medium text-foreground">Enabled</h5>
+              <p className="text-[11px] text-muted-foreground mt-0.5">
+                Disable to prevent this server from connecting
+              </p>
+            </div>
+            <Switch
+              checked={!isDisabled}
+              onCheckedChange={onToggleEnabled}
+              disabled={isToggling}
+            />
+          </div>
+        )}
+
+        {/* Connection Section */}
+        <div>
+          <h5 className="text-xs font-medium text-foreground mb-2">Connection</h5>
+          <div className="rounded-md border border-border bg-background overflow-hidden">
+            <div className="divide-y divide-border">
+              <div className="flex gap-3 px-3 py-2">
+                <span className="text-xs text-muted-foreground w-16 shrink-0">Type</span>
+                <span className="text-xs text-foreground font-mono select-text">{connection.type}</span>
+              </div>
+              {connection.url && (
+                <div className="flex gap-3 px-3 py-2">
+                  <span className="text-xs text-muted-foreground w-16 shrink-0">URL</span>
+                  <span className="text-xs text-foreground font-mono break-all select-text">{connection.url}</span>
+                </div>
+              )}
+              {connection.command && (
+                <div className="flex gap-3 px-3 py-2">
+                  <span className="text-xs text-muted-foreground w-16 shrink-0">Command</span>
+                  <span className="text-xs text-foreground font-mono break-all select-text">{connection.command}</span>
+                </div>
+              )}
+              {connection.args && connection.args.length > 0 && (
+                <div className="flex gap-3 px-3 py-2">
+                  <span className="text-xs text-muted-foreground w-16 shrink-0">Args</span>
+                  <span className="text-xs text-foreground font-mono break-all select-text">{connection.args.join(" ")}</span>
+                </div>
+              )}
+              {connection.env && Object.keys(connection.env).length > 0 && (
+                <div className="flex gap-3 px-3 py-2">
+                  <span className="text-xs text-muted-foreground w-16 shrink-0">Env</span>
+                  <div className="flex flex-wrap gap-1">
+                    {Object.keys(connection.env).map((key) => (
+                      <span key={key} className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-muted text-muted-foreground select-text">
+                        {key}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Error Section */}
+        {server.error && (
+          <div>
+            <h5 className="text-xs font-medium text-red-500 mb-2">Error</h5>
+            <div className="rounded-md border border-red-500/20 bg-red-500/5 px-3 py-2">
+              <p className="text-xs text-red-400 font-mono break-all select-text">{server.error}</p>
+            </div>
+          </div>
+        )}
+
+        {/* Tools Section */}
+        {hasTools && (
+          <div>
+            <h5 className="text-xs font-medium text-foreground mb-3">
+              {hideToolsCount ? "Tools" : `Tools (${tools.length})`}
+            </h5>
+            <div className="grid gap-2">
+              {tools.map((tool, i) => {
+                const toolName = typeof tool === "string" ? tool : tool.name
+                const toolDesc = typeof tool === "string" ? undefined : tool.description
+                return (
+                  <div key={toolName || i} className="rounded-lg border border-border bg-background px-3.5 py-2.5">
+                    <p className="text-[13px] font-medium text-foreground font-mono">{toolName}</p>
+                    {toolDesc && (
+                      <p className="text-xs text-muted-foreground leading-relaxed mt-1">{toolDesc}</p>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        )}
+
+      </div>
+    </div>
+  )
+}
+
+// --- Create Form ---
+function CreateMcpServerForm({
+  onCreated,
+  onCancel,
+  hasProject,
+  defaultProvider,
+  projectPath,
+  projectName,
+}: {
+  onCreated: () => void
+  onCancel: () => void
+  hasProject: boolean
+  defaultProvider: McpProvider
+  projectPath?: string
+  projectName?: string
+}) {
+  const addClaudeServerMutation = trpc.claude.addMcpServer.useMutation()
+  const addCodexServerMutation = trpc.codex.addMcpServer.useMutation()
+  const [provider, setProvider] = useState<McpProvider>(defaultProvider)
+  const isSaving =
+    provider === "codex"
+      ? addCodexServerMutation.isPending
+      : addClaudeServerMutation.isPending
+  const [name, setName] = useState("")
+  const [type, setType] = useState<"stdio" | "http">("stdio")
+  const [command, setCommand] = useState("")
+  const [args, setArgs] = useState("")
+  const [url, setUrl] = useState("")
+  const [scope, setScope] = useState<"global" | "project">("global")
+  const effectiveScope = provider === "codex" ? "global" : scope
+
+  const canSave = name.trim().length > 0 && (effectiveScope !== "project" || !!projectPath) && (
+    (type === "stdio" && command.trim().length > 0) ||
+    (type === "http" && url.trim().length > 0)
+  )
+
+  const handleSubmit = async () => {
+    const parsedArgs = args.trim() ? args.split(/\s+/) : undefined
+    try {
+      if (provider === "codex") {
+        await addCodexServerMutation.mutateAsync({
+          name: name.trim(),
+          transport: type,
+          command: type === "stdio" ? command.trim() : undefined,
+          args: type === "stdio" ? parsedArgs : undefined,
+          url: type === "http" ? url.trim() : undefined,
+          scope: "global",
+        })
+      } else {
+        await addClaudeServerMutation.mutateAsync({
+          name: name.trim(),
+          transport: type,
+          command: type === "stdio" ? command.trim() : undefined,
+          args: type === "stdio" ? parsedArgs : undefined,
+          url: type === "http" ? url.trim() : undefined,
+          scope: effectiveScope,
+          ...(effectiveScope === "project" && projectPath ? { projectPath } : {}),
+        })
+      }
+      toast.success(`"${name.trim()}" is added, refreshing...`)
+      onCreated()
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to add server"
+      toast.error("Failed to add", { description: message })
+    }
+  }
+
+  return (
+    <div className="h-full overflow-y-auto">
+      <div className="max-w-2xl mx-auto p-6 space-y-5">
+        <div className="flex items-center justify-between">
+          <h3 className="text-sm font-semibold text-foreground">New MCP Server</h3>
+          <div className="flex items-center gap-2">
+            <Button variant="ghost" size="sm" onClick={onCancel}>Cancel</Button>
+            <Button size="sm" onClick={handleSubmit} disabled={!canSave || isSaving}>
+              {isSaving ? "Adding..." : "Add"}
+            </Button>
+          </div>
+        </div>
+
+        <div className="space-y-1.5">
+          <Label>Provider</Label>
+          <Select
+            value={provider}
+            onValueChange={(v) => {
+              const nextProvider = v as McpProvider
+              setProvider(nextProvider)
+              if (nextProvider === "codex") {
+                setScope("global")
+              }
+            }}
+          >
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="codex">OpenAI Codex</SelectItem>
+              <SelectItem value="claude-code">Claude Code</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+
+        <div className="space-y-1.5">
+          <Label>Name</Label>
+          <Input
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="my-server"
+            autoFocus
+          />
+        </div>
+
+        <div className="space-y-1.5">
+          <Label>Transport</Label>
+          <Select value={type} onValueChange={(v) => setType(v as "stdio" | "http")}>
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="stdio">stdio (local command)</SelectItem>
+              <SelectItem value="http">HTTP (SSE)</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+
+        {type === "stdio" ? (
+          <>
+            <div className="space-y-1.5">
+              <Label>Command</Label>
+              <Input
+                value={command}
+                onChange={(e) => setCommand(e.target.value)}
+                placeholder="npx, python, node..."
+                className="font-mono"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label>Arguments</Label>
+              <Input
+                value={args}
+                onChange={(e) => setArgs(e.target.value)}
+                placeholder="-m mcp_server --port 3000"
+                className="font-mono"
+              />
+              <p className="text-[11px] text-muted-foreground">Space-separated arguments</p>
+            </div>
+          </>
+        ) : (
+          <div className="space-y-1.5">
+            <Label>URL</Label>
+            <Input
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+              placeholder="http://localhost:3000/sse"
+              className="font-mono"
+            />
+          </div>
+        )}
+
+        {provider === "codex" ? (
+          <div className="space-y-1.5">
+            <Label>Scope</Label>
+            <Select value="global" disabled>
+              <SelectTrigger disabled>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="global">Global (~/.codex/config.toml)</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+        ) : hasProject && (
+          <div className="space-y-1.5">
+            <Label>Scope</Label>
+            <Select value={scope} onValueChange={(v) => setScope(v as "global" | "project")}>
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="global">Global (~/.claude.json)</SelectItem>
+                <SelectItem value="project">{projectName ? `Project: ${projectName}` : "Project"}</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// --- Main Component ---
+export function AgentsMcpTab() {
+  const lastSelectedAgentId = useAtomValue(lastSelectedAgentIdAtom)
+  const defaultAddProvider: McpProvider =
+    lastSelectedAgentId === "codex" ? "codex" : "claude-code"
+  const [selectedServerKey, setSelectedServerKey] = useState<string | null>(null)
+  const [searchQuery, setSearchQuery] = useState("")
+  const [showAddForm, setShowAddForm] = useState(false)
+  const [deletingServer, setDeletingServer] = useState<{
+    provider: McpProvider
+    server: McpServer
+    scope: ScopeType
+    projectPath?: string | null
+  } | null>(null)
+  const searchInputRef = useRef<HTMLInputElement>(null)
+  const selectedProject = useAtomValue(selectedProjectAtom)
+  const providerSections = useMemo<ProviderSection[]>(
+    () => [
+      { provider: "claude-code", title: "CLAUDE CODE" },
+      { provider: "codex", title: "CODEX" },
+    ],
+    [],
+  )
+
+  // Focus search on "/" hotkey
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "/" && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        const tag = (e.target as HTMLElement)?.tagName
+        if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return
+        e.preventDefault()
+        searchInputRef.current?.focus()
+      }
+    }
+    document.addEventListener("keydown", handler)
+    return () => document.removeEventListener("keydown", handler)
+  }, [])
+
+  const claudeMcpQuery = trpc.claude.getAllMcpConfig.useQuery(undefined, {
+    staleTime: 10 * 60 * 1000,
+  })
+  const codexMcpQuery = trpc.codex.getAllMcpConfig.useQuery(undefined, {
+    staleTime: 10 * 60 * 1000,
+  })
+  const hasAnyData = Boolean(claudeMcpQuery.data || codexMcpQuery.data)
+  const isLoadingConfig =
+    !hasAnyData && (claudeMcpQuery.isLoading || codexMcpQuery.isLoading)
+  const refreshClaudeMcpMutation = trpc.claude.refreshMcpConfig.useMutation()
+  const refreshCodexMcpMutation = trpc.codex.refreshMcpConfig.useMutation()
+  const isRefreshingConfig =
+    claudeMcpQuery.isFetching ||
+    codexMcpQuery.isFetching ||
+    refreshClaudeMcpMutation.isPending ||
+    refreshCodexMcpMutation.isPending
+
+  const startClaudeOAuthMutation = trpc.claude.startMcpOAuth.useMutation()
+  const startCodexOAuthMutation = trpc.codex.startMcpOAuth.useMutation()
+  const logoutCodexMcpMutation = trpc.codex.logoutMcpServer.useMutation()
+  const updateMutation = trpc.claude.updateMcpServer.useMutation()
+  const removeClaudeMcpMutation = trpc.claude.removeMcpServer.useMutation()
+  const removeCodexMcpMutation = trpc.codex.removeMcpServer.useMutation()
+
+  const sortedGroupsByProvider = useMemo(() => {
+    const statusOrder: Record<string, number> = {
+      connected: 0,
+      pending: 1,
+      "needs-auth": 2,
+      failed: 3,
+    }
+
+    const sortGroups = (
+      groups: Array<{ groupName: string; projectPath: string | null; mcpServers: McpServer[] }>,
+    ) =>
+      groups.map((g) => ({
+        ...g,
+        mcpServers: [...g.mcpServers].sort(
+          (a, b) => (statusOrder[a.status] ?? 3) - (statusOrder[b.status] ?? 3),
+        ),
+      }))
+
+    return {
+      codex: sortGroups(codexMcpQuery.data?.groups || []),
+      claudeCode: sortGroups(claudeMcpQuery.data?.groups || []),
+    }
+  }, [codexMcpQuery.data?.groups, claudeMcpQuery.data?.groups])
+
+  const allListedServers = useMemo<ListedServer[]>(() => {
+    return providerSections.flatMap((section) => {
+      const groups =
+        section.provider === "codex"
+          ? sortedGroupsByProvider.codex
+          : sortedGroupsByProvider.claudeCode
+
+      return groups.flatMap((group) =>
+        group.mcpServers.map((server) => ({
+          key: `${section.provider}:${group.groupName}:${server.name}`,
+          provider: section.provider,
+          groupName: group.groupName,
+          projectPath: group.projectPath,
+          server,
+        })),
+      )
+    })
+  }, [providerSections, sortedGroupsByProvider])
+
+  const filteredListedServers = useMemo(() => {
+    if (!searchQuery.trim()) return allListedServers
+    const q = searchQuery.toLowerCase()
+    return allListedServers.filter((item) =>
+      item.server.name.toLowerCase().includes(q),
+    )
+  }, [allListedServers, searchQuery])
+
+  const filteredSections = useMemo(
+    () =>
+      providerSections
+        .map((section) => ({
+          ...section,
+          servers: filteredListedServers.filter(
+            (server) => server.provider === section.provider,
+          ),
+        }))
+        .filter((section) => section.servers.length > 0),
+    [providerSections, filteredListedServers],
+  )
+
+  const totalServers = allListedServers.length
+
+  // Flat list of all server keys for keyboard navigation
+  const allServerKeys = useMemo(
+    () => filteredListedServers.map((server) => server.key),
+    [filteredListedServers],
+  )
+
+  const { containerRef: listRef, onKeyDown: listKeyDown } = useListKeyboardNav({
+    items: allServerKeys,
+    selectedItem: selectedServerKey,
+    onSelect: setSelectedServerKey,
+  })
+
+  // Auto-select first server when data loads (sorted, so connected first)
+  useEffect(() => {
+    if (selectedServerKey || isLoadingConfig) return
+    const firstServer = allListedServers[0]
+    if (firstServer) {
+      setSelectedServerKey(firstServer.key)
+    }
+  }, [allListedServers, selectedServerKey, isLoadingConfig])
+
+  // Find selected server
+  const selectedServer = useMemo<ListedServer | null>(() => {
+    if (!selectedServerKey) return null
+    return (
+      allListedServers.find((server) => server.key === selectedServerKey) || null
+    )
+  }, [selectedServerKey, allListedServers])
+
+  const handleRefresh = useCallback(
+    async (silent = false, targetProvider?: McpProvider) => {
+      try {
+        if (targetProvider === "codex") {
+          await refreshCodexMcpMutation.mutateAsync()
+          await codexMcpQuery.refetch({ cancelRefetch: false })
+        } else if (targetProvider === "claude-code") {
+          await refreshClaudeMcpMutation.mutateAsync()
+          await claudeMcpQuery.refetch({ cancelRefetch: false })
+        } else {
+          await Promise.all([
+            refreshCodexMcpMutation.mutateAsync(),
+            refreshClaudeMcpMutation.mutateAsync(),
+          ])
+          await Promise.all([
+            codexMcpQuery.refetch({ cancelRefetch: false }),
+            claudeMcpQuery.refetch({ cancelRefetch: false }),
+          ])
+        }
+        if (!silent) {
+          toast.success("Refreshed MCP servers")
+        }
+      } catch {
+        if (!silent) {
+          toast.error("Failed to refresh MCP servers")
+        }
+      }
+    },
+    [
+      codexMcpQuery,
+      claudeMcpQuery,
+      refreshCodexMcpMutation,
+      refreshClaudeMcpMutation,
+    ],
+  )
+
+
+  const handleAuth = async (
+    provider: McpProvider,
+    serverName: string,
+    projectPath: string | null,
+  ) => {
+    try {
+      const result = provider === "codex"
+        ? await startCodexOAuthMutation.mutateAsync({
+            serverName,
+            ...(projectPath ? { projectPath } : {}),
+          })
+        : await startClaudeOAuthMutation.mutateAsync({
+            serverName,
+            projectPath: projectPath ?? "__global__",
+          })
+
+      if (result.success) {
+        toast.success(`"${serverName}" is authenticated, refreshing...`)
+        // Plugin servers get promoted to Global after OAuth — update selection
+          setSelectedServerKey(`${provider}:Global:${serverName}`)
+        await handleRefresh(true, provider)
+      } else {
+        toast.error(result.error || "Authentication failed")
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Authentication failed"
+      toast.error(message)
+    }
+  }
+
+  const handleCodexAuthLogout = async (
+    serverName: string,
+    projectPath?: string | null,
+  ) => {
+    try {
+      const result = await logoutCodexMcpMutation.mutateAsync({
+        serverName,
+        ...(projectPath ? { projectPath } : {}),
+      })
+      if (result.success) {
+        toast.success(`"${serverName}" is logged out, refreshing...`)
+        await handleRefresh(true, "codex")
+      } else {
+        toast.error(result.error || "Logout failed")
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Logout failed"
+      toast.error(message)
+    }
+  }
+
+  const handleToggleEnabled = async (item: ListedServer, enabled: boolean) => {
+    if (item.provider !== "claude-code") return
+    try {
+      await updateMutation.mutateAsync({
+        name: item.server.name,
+        scope: getScopeFromServer(item),
+        projectPath: item.projectPath ?? undefined,
+        disabled: !enabled,
+      })
+      toast.success(
+        enabled
+          ? `"${item.server.name}" is enabled, refreshing...`
+          : `"${item.server.name}" is disabled, refreshing...`,
+      )
+      await handleRefresh(true, "claude-code")
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to toggle server"
+      toast.error(message)
+    }
+  }
+
+  const handleDelete = async () => {
+    if (!deletingServer) return
+    try {
+      if (deletingServer.provider === "codex") {
+        await removeCodexMcpMutation.mutateAsync({
+          name: deletingServer.server.name,
+          scope: "global",
+        })
+      } else {
+        await removeClaudeMcpMutation.mutateAsync({
+          name: deletingServer.server.name,
+          scope: deletingServer.scope,
+          projectPath: deletingServer.projectPath ?? undefined,
+        })
+      }
+      toast.success(`"${deletingServer.server.name}" is removed, refreshing...`)
+      setDeletingServer(null)
+      setSelectedServerKey(null)
+      await handleRefresh(true)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to remove server"
+      toast.error(message)
+    }
+  }
+
+  const canCodexLogout = (server: McpServer) => {
+    const authStatus = String(
+      (server.config as Record<string, unknown>).authStatus || "",
+    )
+      .trim()
+      .toLowerCase()
+    return authStatus === "o_auth" || authStatus === "bearer_token"
+  }
+
+  const isEditableServer = (item: ListedServer): boolean => {
+    if (item.provider === "codex") {
+      // Codex edit/delete currently supports global scope only.
+      return !item.projectPath
+    }
+    return !item.groupName.toLowerCase().includes("plugin")
+  }
+
+  const getScopeFromServer = (item: ListedServer): ScopeType =>
+    item.projectPath ? "project" : "global"
+
+  const isToggleableServer = (item: ListedServer): boolean =>
+    item.provider === "claude-code" &&
+    !item.groupName.toLowerCase().includes("plugin")
+
+  return (
+    <div className="flex h-full overflow-hidden">
+      {/* Left sidebar - server list */}
+      <ResizableSidebar
+        isOpen={true}
+        onClose={() => {}}
+        widthAtom={settingsMcpSidebarWidthAtom}
+        minWidth={200}
+        maxWidth={400}
+        side="left"
+        animationDuration={0}
+        initialWidth={240}
+        exitWidth={240}
+        disableClickToClose={true}
+      >
+        <div className="flex flex-col h-full bg-background border-r overflow-hidden" style={{ borderRightWidth: "0.5px" }}>
+          {/* Search + Add */}
+          <div className="px-2 pt-2 flex-shrink-0 flex items-center">
+            <input
+              ref={searchInputRef}
+              placeholder="Search servers..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              onKeyDown={listKeyDown}
+              className="h-7 w-full rounded-lg text-sm bg-muted border border-input px-3 placeholder:text-muted-foreground/40 outline-none mr-1.5"
+            />
+            <button
+              onClick={() => { setShowAddForm(true); setSelectedServerKey(null) }}
+              className="h-7 w-7 shrink-0 flex items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-foreground/5 transition-colors cursor-pointer"
+              title="Add MCP server"
+            >
+              <Plus className="h-4 w-4" />
+            </button>
+            <button
+              onClick={() => { void handleRefresh() }}
+              className="h-7 w-7 shrink-0 flex items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-foreground/5 transition-colors cursor-pointer"
+              title="Refresh MCP servers"
+              aria-label="Refresh MCP servers"
+            >
+              <RefreshCw className={cn("h-3.5 w-3.5", isRefreshingConfig && "animate-spin")} />
+            </button>
+          </div>
+          {/* Server list */}
+          <div ref={listRef} onKeyDown={listKeyDown} tabIndex={-1} className="flex-1 overflow-y-auto px-2 pt-2 pb-2 outline-none">
+            {isLoadingConfig ? (
+              <div className="flex items-center justify-center h-full">
+                <Loader2 className="h-5 w-5 text-muted-foreground animate-spin" />
+              </div>
+            ) : totalServers === 0 ? (
+              <div className="flex flex-col items-center justify-center h-full text-center px-4">
+                <OriginalMCPIcon className="h-8 w-8 text-border mb-3" />
+                <p className="text-sm text-muted-foreground mb-1">No servers</p>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="mt-1"
+                  onClick={() => setShowAddForm(true)}
+                >
+                  <Plus className="h-3.5 w-3.5 mr-1.5" />
+                  Add server
+                </Button>
+              </div>
+            ) : filteredListedServers.length === 0 ? (
+              <div className="flex items-center justify-center py-8">
+                <p className="text-xs text-muted-foreground">No results found</p>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {filteredSections.map((section) => (
+                  <div key={section.provider} className="space-y-0.5">
+                    <div className="px-2 pb-1 pt-1">
+                      <p className="text-[10px] font-semibold tracking-[0.08em] text-muted-foreground">
+                        {section.title}
+                      </p>
+                      <div className="mt-1 h-px bg-border" />
+                    </div>
+                    {section.servers.map((item) => {
+                      const key = item.key
+                      const server = item.server
+                      const isDisabled = isServerDisabled(server)
+                      const hideToolsCount = isCodexHttpServer(item.provider, server)
+                      const isSelected = selectedServerKey === key
+                      return (
+                        <button
+                          key={key}
+                          data-item-id={key}
+                          onClick={() => setSelectedServerKey(key)}
+                          className={cn(
+                            "w-full text-left py-1.5 pl-2 pr-2 rounded-md cursor-pointer group relative",
+                            "transition-colors duration-75",
+                            "outline-offset-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring/70",
+                            isSelected
+                              ? "bg-foreground/5 text-foreground"
+                              : "text-muted-foreground hover:bg-foreground/5 hover:text-foreground",
+                          )}
+                        >
+                          <div className="flex items-start gap-2">
+                            <div className="flex-1 min-w-0 flex flex-col gap-0.5">
+                              <div className="flex items-center gap-1">
+                                <span
+                                  className={cn(
+                                    "truncate block text-sm leading-tight flex-1",
+                                    isDisabled && "opacity-50",
+                                  )}
+                                >
+                                  {server.name}
+                                </span>
+                                <div className="flex-shrink-0 w-3.5 h-3.5 flex items-center justify-center">
+                                  <McpStatusDot status={server.status} disabled={isDisabled} />
+                                </div>
+                              </div>
+                              <div className="flex items-center gap-1 text-[11px] text-muted-foreground/60 min-w-0">
+                                <span className="truncate flex-1 min-w-0">
+                                  {item.groupName}
+                                </span>
+                                {server.status !== "pending" && (
+                                  <span className="flex-shrink-0">
+                                    {isDisabled
+                                      ? "Disabled"
+                                      : server.status === "connected"
+                                        ? (hideToolsCount ? "Connected" : `${server.tools.length} tool${server.tools.length !== 1 ? "s" : ""}`)
+                                        : getStatusText(server.status)}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        </button>
+                      )
+                    })}
+                  </div>
+                ))}
+              </div>
+            )}
+
+          </div>
+        </div>
+      </ResizableSidebar>
+
+      {/* Right content - detail panel */}
+      <div className="flex-1 min-w-0 h-full overflow-hidden">
+        {showAddForm ? (
+          <CreateMcpServerForm
+            onCreated={() => { setShowAddForm(false); handleRefresh(true) }}
+            onCancel={() => setShowAddForm(false)}
+            hasProject={!!selectedProject?.path}
+            defaultProvider={defaultAddProvider}
+            projectPath={selectedProject?.path}
+            projectName={selectedProject?.name}
+          />
+        ) : selectedServer ? (
+          <McpServerDetail
+            provider={selectedServer.provider}
+            server={selectedServer.server}
+            onAuth={() =>
+              handleAuth(
+                selectedServer.provider,
+                selectedServer.server.name,
+                selectedServer.projectPath,
+              )
+            }
+            onLogout={
+              selectedServer.provider === "codex" && canCodexLogout(selectedServer.server)
+                ? () => handleCodexAuthLogout(selectedServer.server.name, selectedServer.projectPath)
+                : undefined
+            }
+            onDelete={
+              isEditableServer(selectedServer)
+                ? () =>
+                    setDeletingServer({
+                      provider: selectedServer.provider,
+                      server: selectedServer.server,
+                      scope: getScopeFromServer(selectedServer),
+                      projectPath: selectedServer.projectPath,
+                    })
+                : undefined
+            }
+            onToggleEnabled={
+              isToggleableServer(selectedServer)
+                ? (enabled) => handleToggleEnabled(selectedServer, enabled)
+                : undefined
+            }
+            isEditable={isEditableServer(selectedServer)}
+            isToggleable={isToggleableServer(selectedServer)}
+            isToggling={updateMutation.isPending}
+          />
+        ) : isLoadingConfig ? (
+          <div className="flex items-center justify-center h-full">
+            <Loader2 className="h-5 w-5 text-muted-foreground animate-spin" />
+          </div>
+        ) : (
+          <div className="flex flex-col items-center justify-center h-full text-center px-4">
+            <OriginalMCPIcon className="h-12 w-12 text-border mb-4" />
+            <p className="text-sm text-muted-foreground">
+              {totalServers > 0
+                ? "Select a server to view details"
+                : "No MCP servers configured"}
+            </p>
+            {totalServers === 0 && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="mt-3"
+                onClick={() => setShowAddForm(true)}
+              >
+                <Plus className="h-3.5 w-3.5 mr-1.5" />
+                Add your first server
+              </Button>
+            )}
+          </div>
+        )}
+      </div>
+
+      <DeleteServerConfirm
+        open={!!deletingServer}
+        onOpenChange={(open) => { if (!open) setDeletingServer(null) }}
+        serverName={deletingServer?.server.name ?? ""}
+        onConfirm={handleDelete}
+        isDeleting={removeClaudeMcpMutation.isPending || removeCodexMcpMutation.isPending}
+      />
+    </div>
+  )
+}

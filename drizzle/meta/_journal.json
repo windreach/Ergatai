@@ -1,0 +1,69 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1767732183550,
+      "tag": "0000_mixed_blur",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1767853413342,
+      "tag": "0001_married_reptil",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1767911269523,
+      "tag": "0002_fancy_blindfold",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1767986484084,
+      "tag": "0003_crazy_thunderbolts",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1768199613729,
+      "tag": "0004_melted_prism",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1769310092745,
+      "tag": "0005_marvelous_master_chief",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1769480000000,
+      "tag": "0006_anthropic_multi_account",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1769810815497,
+      "tag": "0007_clammy_grim_reaper",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1785862781239,
+      "tag": "0008_crazy_forge",
+      "breakpoints": true
+    }
+  ]
+}

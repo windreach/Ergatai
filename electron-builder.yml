@@ -1,0 +1,10 @@
+# electron-builder config with environment variables
+# This extends the base config in package.json
+
+mac:
+  # Code signing identity - set via APPLE_IDENTITY env var
+  # Example: "Developer ID Application: Your Name (TEAM_ID)"
+  identity: ${env.APPLE_IDENTITY}
+  # Notarization is handled explicitly in the CI workflow's "Notarize" step
+  # Disable built-in notarization to avoid double-notarization hangs
+  notarize: false

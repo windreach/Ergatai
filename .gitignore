@@ -1,0 +1,49 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+release/
+release-*/
+out/
+
+# IDE
+.idea/
+*.swp
+*.swo
+.vscode/
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# Environment
+.env
+.env.local
+
+# electron-vite temp files
+electron.vite.config.*.mjs
+
+# napi-rs build artifacts (empty files generated as side effects)
+src-rust/native-binding.d.ts
+src/index.d.ts
+
+# Claude binary (downloaded at build time)
+resources/bin/
+
+# Rust
+src-rust/target/
+*.node
+!index.*.node
+
+# AI plan docs (local-only, not tracked)
+.plan/
+
+# Task documents
+.tasks/
+network-demo/target/
+src-rust/serde::Deserialize
