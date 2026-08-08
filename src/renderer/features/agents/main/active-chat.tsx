@@ -168,7 +168,6 @@ import { useHaptic } from "../hooks/use-haptic"
 import { usePastedTextFiles, type PastedTextFile } from "../hooks/use-pasted-text-files"
 import { useTextContextSelection } from "../hooks/use-text-context-selection"
 import { useToggleFocusOnCmdEsc } from "../hooks/use-toggle-focus-on-cmd-esc"
-import { ACPChatTransport } from "../lib/acp-chat-transport"
 import { formatHistoryForContext } from "../lib/export-chat"
 import {
   clearSubChatDraft,
@@ -6581,8 +6580,10 @@ Make sure to preserve all functionality from both branches when resolving confli
         const overrideProvider = subChatProviderOverrides[subChatId]
         if (!overrideProvider) return existing
 
+        // Check provider from runtime atom instead of transport instance
+        const subChatRuntimeId = appStore.get(subChatRuntimeIdAtomFamily(subChatId))
         const existingProvider: "claude-code" | "codex" =
-          (existing as any)?.transport instanceof ACPChatTransport
+          subChatRuntimeId === "codex" || subChatRuntimeId?.includes("codex")
             ? "codex"
             : "claude-code"
         if (existingProvider === overrideProvider) return existing
@@ -6638,7 +6639,7 @@ Make sure to preserve all functionality from both branches when resolving confli
         worktreePath: worktreePath ? "exists" : "none",
       })
 
-      let transport: IPCChatTransport | RemoteChatTransport | ACPChatTransport | null = null
+      let transport: IPCChatTransport | RemoteChatTransport | null = null
 
       if (isRemoteChat && chatSandboxUrl) {
         // Remote sandbox chat: use HTTP SSE transport
@@ -6658,28 +6659,16 @@ Make sure to preserve all functionality from both branches when resolving confli
           model: modelString,
         })
       } else if (worktreePath) {
-        if (chatProvider === "codex") {
-          console.log("[getOrCreateChat] Using ACPChatTransport", { provider: chatProvider })
-          transport = new ACPChatTransport({
-            chatId,
-            subChatId,
-            cwd: worktreePath,
-            projectPath,
-            mode: subChatMode,
-            provider: "codex",
-          })
-        } else {
-          // Local worktree chat: use IPC transport
-          const subChatRuntimeId = appStore.get(subChatRuntimeIdAtomFamily(subChatId))
-          transport = new IPCChatTransport({
-            chatId,
-            subChatId,
-            cwd: worktreePath,
-            projectPath,
-            mode: subChatMode,
-            agentName: subChatRuntimeId || undefined,
-          })
-        }
+        // Local worktree chat: use IPC transport with agentName from atom
+        const subChatRuntimeId = appStore.get(subChatRuntimeIdAtomFamily(subChatId))
+        transport = new IPCChatTransport({
+          chatId,
+          subChatId,
+          cwd: worktreePath,
+          projectPath,
+          mode: subChatMode,
+          agentName: subChatRuntimeId || undefined,
+        })
       }
 
       if (!transport) {
@@ -6925,7 +6914,7 @@ Make sure to preserve all functionality from both branches when resolving confli
     })
 
     const chatProvider = newSubChatProvider
-    let newSubChatTransport: IPCChatTransport | RemoteChatTransport | ACPChatTransport | null = null
+    let newSubChatTransport: IPCChatTransport | RemoteChatTransport | null = null
 
     if (isNewSubChatRemote && newSubChatSandboxUrl) {
       // Remote sandbox chat: use HTTP SSE transport
@@ -6941,28 +6930,16 @@ Make sure to preserve all functionality from both branches when resolving confli
         model: modelString,
       })
     } else if (worktreePath) {
-      if (chatProvider === "codex") {
-        console.log("[createNewSubChat] Using ACPChatTransport", { provider: chatProvider })
-        newSubChatTransport = new ACPChatTransport({
-          chatId,
-          subChatId: newId,
-          cwd: worktreePath,
-          projectPath,
-          mode: newSubChatMode,
-          provider: "codex",
-        })
-      } else {
-        // Local worktree chat: use IPC transport
-        const subChatRuntimeId = appStore.get(subChatRuntimeIdAtomFamily(newId))
-        newSubChatTransport = new IPCChatTransport({
-          chatId,
-          subChatId: newId,
-          cwd: worktreePath,
-          projectPath,
-          mode: newSubChatMode,
-          agentName: subChatRuntimeId || undefined,
-        })
-      }
+      // Local worktree chat: use IPC transport with agentName from atom
+      const subChatRuntimeId = appStore.get(subChatRuntimeIdAtomFamily(newId))
+      newSubChatTransport = new IPCChatTransport({
+        chatId,
+        subChatId: newId,
+        cwd: worktreePath,
+        projectPath,
+        mode: newSubChatMode,
+        agentName: subChatRuntimeId || undefined,
+      })
     }
 
     if (newSubChatTransport) {
