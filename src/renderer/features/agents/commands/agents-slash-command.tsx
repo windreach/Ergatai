@@ -19,6 +19,8 @@ import {
   BUILTIN_SLASH_COMMANDS,
 } from "./builtin-commands"
 import type { AgentMode } from "../atoms"
+import { availableCommandsAtomFamily } from "../atoms/commands"
+import { useAtomValue } from "jotai"
 
 interface AgentsSlashCommandProps {
   isOpen: boolean
@@ -29,6 +31,7 @@ interface AgentsSlashCommandProps {
   projectPath?: string
   mode?: AgentMode
   disabledCommands?: string[]
+  subChatId?: string
 }
 
 // Memoized to prevent re-renders when parent re-renders
@@ -41,6 +44,7 @@ export const AgentsSlashCommand = memo(function AgentsSlashCommand({
   projectPath,
   mode,
   disabledCommands,
+  subChatId,
 }: AgentsSlashCommandProps) {
   const dropdownRef = useRef<HTMLDivElement>(null)
   const [selectedIndex, setSelectedIndex] = useState(0)
@@ -65,6 +69,9 @@ export const AgentsSlashCommand = memo(function AgentsSlashCommand({
     },
   )
 
+  // ACP runtime commands
+  const acpCommands = useAtomValue(availableCommandsAtomFamily(subChatId ?? ""))
+
   // Transform FileCommand to SlashCommandOption
   const customCommands: SlashCommandOption[] = useMemo(() => {
     return fileCommands.map((cmd) => ({
@@ -87,6 +94,12 @@ export const AgentsSlashCommand = memo(function AgentsSlashCommand({
   // Handle command selection - fetch content for custom commands
   const handleSelect = useCallback(
     async (option: SlashCommandOption) => {
+      // For ACP commands, insert into editor for user to edit/confirm
+      if (option.source === "acp") {
+        onSelect(option)
+        return
+      }
+
       // For builtin commands, call onSelect directly
       if (option.category === "builtin") {
         onSelect(option)
@@ -153,11 +166,33 @@ export const AgentsSlashCommand = memo(function AgentsSlashCommand({
       )
     }
 
+    // Filter ACP commands by search
+    let acpFiltered = acpCommands
+    if (debouncedSearchText) {
+      const query = debouncedSearchText.toLowerCase()
+      acpFiltered = acpCommands.filter(
+        (c: { name: string; description: string }) =>
+          c.name.toLowerCase().includes(query) ||
+          c.description.toLowerCase().includes(query),
+      )
+    }
+
     // Sort all commands by name length (shorter = closer match), then alphabetically for stability
-    return [...customFiltered, ...builtinFiltered].sort(
+    return [
+      ...acpFiltered.map((c: { name: string; description: string }) => ({
+        id: `acp:${c.name}`,
+        name: c.name,
+        command: `/${c.name}`,
+        description: c.description,
+        category: "builtin" as const,
+        source: "acp" as const,
+      })),
+      ...customFiltered,
+      ...builtinFiltered,
+    ].sort(
       (a, b) => a.name.length - b.name.length || a.name.localeCompare(b.name),
     )
-  }, [debouncedSearchText, customCommands, mode, disabledCommands])
+  }, [debouncedSearchText, customCommands, acpCommands, mode, disabledCommands])
 
   // Track previous values for smarter selection reset
   const prevIsOpenRef = useRef(isOpen)

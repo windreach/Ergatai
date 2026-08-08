@@ -22,6 +22,8 @@ export interface SlashCommand {
 export interface SlashCommandOption extends SlashCommand {
   // Full command string for display, e.g. "/clear"
   command: string
+  // Source identifier: "builtin" (default), "repository" (custom .md), "acp" (runtime)
+  source?: "builtin" | "repository" | "acp"
 }
 
 // Trigger payload for slash command dropdown

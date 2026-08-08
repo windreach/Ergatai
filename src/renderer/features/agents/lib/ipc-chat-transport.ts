@@ -315,6 +315,14 @@ export class IPCChatTransport implements ChatTransport<UIMessage> {
                 })
               }
 
+              // Handle available commands update from ACP runtime
+              if (chunk.type === "available-commands") {
+                appStore.set(
+                  availableCommandsAtomFamily(this.config.subChatId),
+                  chunk.commands || [],
+                )
+              }
+
               // Clear pending questions ONLY when agent has moved on
               // Don't clear on tool-input-* chunks (still building the question input)
               // Clear when we get tool-output-* (answer received) or text-delta (agent moved on)

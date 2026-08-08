@@ -1011,7 +1011,7 @@ export const ChatInputArea = memo(function ChatInputArea({
       setShowSlashDropdown(false)
 
       // Handle builtin commands that change app state (no text input needed)
-      if (command.category === "builtin") {
+      if (command.category === "builtin" && command.source !== "acp") {
         switch (command.name) {
           case "clear":
             // Create a new sub-chat (fresh conversation)
@@ -1036,7 +1036,7 @@ export const ChatInputArea = memo(function ChatInputArea({
         }
       }
 
-      // For all other commands (builtin prompts and custom):
+      // For all other commands (builtin prompts, custom, and ACP):
       // insert the command and let user add arguments or press Enter to send
       editorRef.current?.setValue(`/${command.name} `)
     },
@@ -1713,6 +1713,7 @@ export const ChatInputArea = memo(function ChatInputArea({
         position={slashPosition}
         projectPath={projectPath}
         mode={subChatMode}
+        subChatId={subChatId}
       />
     </div>
   )

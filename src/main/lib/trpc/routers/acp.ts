@@ -237,6 +237,22 @@ function translateEvent(event: NapiSessionEvent): any[] {
       break
     }
 
+    case "available_commands_update": {
+      const commands: Array<{ name: string; description: string; input?: string }> =
+        Array.isArray(data?.commands)
+          ? data.commands.map((c: any) => ({
+              name: c.name ?? "",
+              description: c.description ?? "",
+              input: c.input,
+            }))
+          : []
+      chunks.push({
+        type: "available-commands",
+        commands,
+      })
+      break
+    }
+
     default:
       break
   }
