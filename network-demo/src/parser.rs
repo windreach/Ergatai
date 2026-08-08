@@ -8,7 +8,6 @@ use super::transport::AgentId;
 /// 消息解析器：AI 友好格式 → 标准格式。
 ///
 /// 当前使用关键词匹配推断意图。后续可升级为 LLM 推断。
-/// ponytail: 关键词匹配是简化版，遇到边界情况再升级 LLM
 pub struct MessageParser;
 
 impl MessageParser {
@@ -63,9 +62,6 @@ impl MessageParser {
     }
 
     /// 从内容推断意图（关键词匹配）
-    ///
-    /// ponytail: 简单关键词匹配，覆盖常见场景。
-    /// 后续可升级为 LLM 推断（传入 LLM client）。
     fn infer_intent(content: &str) -> Intent {
         let lower = content.to_lowercase();
 

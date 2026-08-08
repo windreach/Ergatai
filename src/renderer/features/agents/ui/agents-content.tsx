@@ -1012,7 +1012,7 @@ export function AgentsContent() {
           ) : betaAutomationsEnabled && desktopView === "inbox" ? (
             <InboxView />
           ) : desktopView === "my-agents" ? (
-            <AgentsCustomAgentsTab />
+            <AcpAgentManager />
           ) : selectedChatId ? (
             <div className="h-full flex flex-col relative overflow-hidden">
               <ChatView

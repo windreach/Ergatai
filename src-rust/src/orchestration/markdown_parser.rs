@@ -46,7 +46,7 @@ pub fn parse_markdown_tree(content: &str) -> ErgataiResult<TaskTree> {
     // If only one root node, use it directly
     // Otherwise, create a virtual root
     let root = if root_nodes.len() == 1 {
-        root_nodes.pop().unwrap()
+        root_nodes.pop().expect("len == 1 guarantees pop() returns Some")
     } else {
         TaskNode {
             id: "root".to_string(),

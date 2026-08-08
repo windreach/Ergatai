@@ -104,7 +104,7 @@ pub fn load_global_agent_config() -> Result<GlobalAgentConfig, ErgataiError> {
 /// - Reserved keys (DERIVED_PROVIDER_MODEL_ENV_KEYS) are rejected in env_vars
 /// - NUL bytes are rejected
 /// - Values exceeding MAX_ENV_VALUE_BYTES are rejected
-pub fn validate_global_config(config: &GlobalAgentConfig) -> Result<(), String> {
+pub fn validate_global_config(config: &GlobalAgentConfig) -> Result<(), ErgataiError> {
     // Strip empty values first
     let non_empty: BTreeMap<String, String> = config
         .env_vars
@@ -125,30 +125,30 @@ pub fn validate_global_config(config: &GlobalAgentConfig) -> Result<(), String> 
         .collect();
 
     if !derived.is_empty() {
-        return Err(format!(
+        return Err(ErgataiError::InvalidArgument(format!(
             "the following keys must be set via the structured provider/model fields, not as env vars: {}",
             derived.join(", ")
-        ));
+        )));
     }
 
     // Validate env var keys and values
     for (key, value) in &non_empty {
         // Check for well-formed key
         if !is_well_formed_env_key(key) {
-            return Err(format!("invalid env var key: {}", key));
+            return Err(ErgataiError::InvalidArgument(format!("invalid env var key: {}", key)));
         }
 
         // Check for NUL bytes
         if key.contains('\0') || value.contains('\0') {
-            return Err(format!("env var contains NUL byte: {}", key));
+            return Err(ErgataiError::InvalidArgument(format!("env var contains NUL byte: {}", key)));
         }
 
         // Check size limit
         if value.len() > MAX_ENV_VALUE_BYTES {
-            return Err(format!(
+            return Err(ErgataiError::InvalidArgument(format!(
                 "env var value exceeds maximum allowed length ({} bytes): {}",
                 MAX_ENV_VALUE_BYTES, key
-            ));
+            )));
         }
     }
 
@@ -156,13 +156,13 @@ pub fn validate_global_config(config: &GlobalAgentConfig) -> Result<(), String> 
     for (field, value) in [("provider", &config.provider), ("model", &config.model)] {
         if let Some(v) = value {
             if v.contains('\0') {
-                return Err(format!("global config `{field}` must not contain NUL bytes"));
+                return Err(ErgataiError::InvalidArgument(format!("global config `{field}` must not contain NUL bytes")));
             }
             if v.len() > MAX_ENV_VALUE_BYTES {
-                return Err(format!(
+                return Err(ErgataiError::InvalidArgument(format!(
                     "global config `{field}` exceeds the maximum allowed length ({} bytes)",
                     MAX_ENV_VALUE_BYTES
-                ));
+                )));
             }
         }
     }
@@ -185,7 +185,7 @@ fn is_well_formed_env_key(key: &str) -> bool {
 /// Validates the config, strips empty values, and writes with restricted permissions (0o600).
 pub fn save_global_agent_config(config: &GlobalAgentConfig) -> Result<GlobalAgentConfigSaveResult, ErgataiError> {
     // Validate first
-    validate_global_config(config).map_err(|reason| ErgataiError::ConfigError(ConfigError::ValidationFailed { reason }))?;
+    validate_global_config(config).map_err(|e| ErgataiError::ConfigError(ConfigError::ValidationFailed { reason: e.to_string() }))?;
 
     // Strip empty values
     let mut cleaned = config.clone();
@@ -251,7 +251,7 @@ mod tests {
 
         let result = validate_global_config(&config);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("GOOSE_MODEL"));
+        assert!(result.unwrap_err().to_string().contains("GOOSE_MODEL"));
     }
 
     #[test]
@@ -261,7 +261,7 @@ mod tests {
 
         let result = validate_global_config(&config);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("NUL"));
+        assert!(result.unwrap_err().to_string().contains("NUL"));
     }
 
     #[test]
@@ -271,7 +271,7 @@ mod tests {
 
         let result = validate_global_config(&config);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("invalid env var key"));
+        assert!(result.unwrap_err().to_string().contains("invalid env var key"));
     }
 
     #[test]

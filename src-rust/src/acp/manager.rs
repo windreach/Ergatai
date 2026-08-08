@@ -77,7 +77,6 @@ impl From<SessionEvent> for NapiSessionEvent {
 }
 
 /// Session kind — distinguishes DAG orchestration sessions from user chat sessions.
-/// ponytail: single enum with two variants, add more when a third kind actually appears.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub enum SessionKind {
     /// Interactive user chat session (via NAPI / UI) — default

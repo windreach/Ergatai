@@ -77,6 +77,11 @@ export function AgentSelector({
   allowSwitch = true,
 }: AgentSelectorProps) {
   const { data: runtimes = [] } = trpc.agents.listRuntimes.useQuery()
+  // 只显示已安装的 agent（availability === "available"）
+  const availableRuntimes = useMemo(() =>
+    runtimes.filter((r) => normalizeAvailability(r.availability as string) === "available"),
+    [runtimes]
+  )
   // 如果 subChatId 存在，读取该 sub-chat 绑定的 runtime
   const boundRuntimeId = useAtomValue(
     subChatRuntimeIdAtomFamily(subChatId ?? "")
@@ -90,9 +95,9 @@ export function AgentSelector({
   const currentRuntime = useMemo(() => {
     const targetId = subChatId && boundRuntimeId
       ? boundRuntimeId
-      : (defaultRuntimeId ?? runtimes[0]?.id)
-    return runtimes.find((r) => r.id === targetId) ?? runtimes[0] ?? null
-  }, [subChatId, boundRuntimeId, defaultRuntimeId, runtimes])
+      : (defaultRuntimeId ?? availableRuntimes[0]?.id)
+    return availableRuntimes.find((r) => r.id === targetId) ?? availableRuntimes[0] ?? null
+  }, [subChatId, boundRuntimeId, defaultRuntimeId, availableRuntimes])
 
   const handleSelect = (runtimeId: string) => {
     if (!allowSwitch && runtimeId !== currentRuntime?.id) {
@@ -104,7 +109,7 @@ export function AgentSelector({
   }
 
   // 如果没有可用 runtime，显示 fallback
-  const displayRuntime = currentRuntime ?? (runtimes[0] as AcpRuntime | undefined)
+  const displayRuntime = currentRuntime ?? (availableRuntimes[0] as AcpRuntime | undefined)
 
   if (!displayRuntime) {
     return (
@@ -151,12 +156,12 @@ export function AgentSelector({
           <CommandInput placeholder="搜索 agent..." />
           <CommandList>
             <CommandGroup>
-              {runtimes.length === 0 ? (
+              {availableRuntimes.length === 0 ? (
                 <div className="py-6 text-center text-sm text-muted-foreground">
-                  没有找到可用 agent
+                  没有可用 agent
                 </div>
               ) : (
-                runtimes.map((runtime) => (
+                availableRuntimes.map((runtime) => (
                 <CommandItem
                   key={runtime.id}
                   value={runtime.label}
@@ -183,7 +188,8 @@ export function AgentSelector({
                     <span className="text-xs text-primary">✓</span>
                   )}
                 </CommandItem>
-              ))}
+                ))
+              )}
             </CommandGroup>
           </CommandList>
         </Command>

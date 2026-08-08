@@ -29,6 +29,12 @@ pub struct SimpleCrossAgentManager {
     agent_queues: Mutex<HashMap<String, mpsc::UnboundedSender<AgentMessage>>>,
 }
 
+impl Default for SimpleCrossAgentManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SimpleCrossAgentManager {
     pub fn new() -> Self {
         Self {

@@ -514,7 +514,7 @@ mod tests {
         let err1 = ErgataiError::internal("simple");
         assert!(matches!(err1, ErgataiError::InternalError { ref message, source: None } if message == "simple"));
 
-        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "boom");
+        let io_err = std::io::Error::other("boom");
         let err2 = ErgataiError::internal_with_source("wrapped", io_err);
         assert!(matches!(err2, ErgataiError::InternalError { ref message, source: Some(_) } if message == "wrapped"));
     }

@@ -72,7 +72,6 @@ impl DagScheduler {
     /// Generate plan and submit to scheduler (no lock acquisition)
     async fn generate_and_submit(&self, node: &TaskNode) -> ErgataiResult<String> {
         // Release lock before async I/O — generate_node_plan doesn't need the graph
-        // (ponytail: held lock across await made future !Send, breaking tokio::spawn callers)
         {
             let _graph = self.graph.lock().await;
             // Lock intentionally dropped here before async work below
@@ -128,41 +127,41 @@ impl DagScheduler {
         node_id: &str,
         result_path: Option<String>,
     ) -> ErgataiResult<Vec<String>> {
-        // Update status under lock, then release
-        {
+        // Update completed node status AND atomically preempt ready nodes as Running
+        // within a single lock acquisition to prevent TOCTOU duplicate submission.
+        let ready_nodes: Vec<TaskNode> = {
             let mut graph = self.graph.lock().await;
             if let Some(result) = result_path {
                 graph.set_result(node_id, result)?;
             } else {
                 graph.update_status(node_id, TaskStatus::Completed)?;
             }
-        }
 
-        tracing::info!(
-            "Node {} completed, checking for newly ready nodes",
-            node_id
-        );
-
-        // Collect newly ready nodes while holding lock
-        let ready_nodes: Vec<TaskNode> = {
-            let graph = self.graph.lock().await;
-            graph
+            // Collect and immediately preempt pending ready nodes as Running.
+            // This prevents concurrent on_node_completed calls from submitting
+            // the same node twice.
+            let ready: Vec<TaskNode> = graph
                 .ready_tasks()
                 .into_iter()
                 .filter(|n| n.status == TaskStatus::Pending)
                 .cloned()
-                .collect()
+                .collect();
+            for n in &ready {
+                graph.update_status(&n.id, TaskStatus::Running)?;
+            }
+            ready
         };
+
+        tracing::info!(
+            "Node {} completed, {} newly ready nodes preempted",
+            node_id,
+            ready_nodes.len()
+        );
 
         let mut newly_submitted = Vec::new();
         for node in ready_nodes {
             match self.generate_and_submit(&node).await {
                 Ok(task_id) => {
-                    // Update status after successful submission
-                    let mut graph = self.graph.lock().await;
-                    graph.update_status(&node.id, TaskStatus::Running)?;
-                    drop(graph);
-
                     tracing::info!(
                         "Submitted newly ready node {} as task {}",
                         node.id,
@@ -172,6 +171,9 @@ impl DagScheduler {
                 }
                 Err(e) => {
                     tracing::error!("Failed to submit node {}: {}", node.id, e);
+                    // Revert status so the node can be retried
+                    let mut graph = self.graph.lock().await;
+                    let _ = graph.update_status(&node.id, TaskStatus::Pending);
                 }
             }
         }
@@ -243,10 +245,6 @@ impl DagScheduler {
     }
 
     /// Skip all nodes that (transitively) depend on the failed node.
-    ///
-    /// ponytail: BFS under a single read lock to collect all skip targets,
-    /// then batch-update under a single write lock. Avoids the recursive
-    /// lock/unlock cycles the old implementation had.
     async fn skip_downstream(&self, failed_id: &str) -> ErgataiResult<()> {
         // 1. BFS to collect all transitively dependent pending nodes.
         let to_skip: Vec<String> = {
@@ -303,7 +301,6 @@ impl DagScheduler {
     }
 
     /// Save graph to disk (serializes under lock, writes without holding it)
-    /// ponytail: avoids holding MutexGuard across async I/O which would make the future !Send
     async fn save_graph_unlocked(&self) -> ErgataiResult<()> {
         let graph_json = {
             let graph = self.graph.lock().await;

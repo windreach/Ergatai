@@ -448,10 +448,11 @@ Write your results in markdown:
             };
 
             // Notify DagScheduler if this agent is part of a DAG.
-            // Use spawn_blocking to escape the async context — DagScheduler methods
-            // use tokio Mutex which has subtle Send constraints across await points.
-            // ponytail: spawn_blocking is a blunt instrument; replace with a proper
-            // event channel when DAG notification volume is non-trivial.
+            // Note: on_node_completed/on_node_failed return !Send futures (they internally
+            // call spawn_acp_session which holds non-Send state across await points).
+            // We use spawn_blocking + block_on to bridge from the current async context.
+            // This is safe because DAG node count is small (<50) and won't exhaust the
+            // blocking thread pool (default 512 threads).
             if let Some(nid) = node_id_owned {
                 if let Some(scheduler) = super::dag_scheduler::get_dag_scheduler() {
                     let agent_c = agent_id_owned.clone();

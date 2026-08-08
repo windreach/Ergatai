@@ -12,6 +12,7 @@ use tokio::sync::{mpsc, oneshot, RwLock};
 
 use crate::acp::manager::{SessionCommand, SessionEvent, event_tx, manager as session_manager};
 use crate::agent::config::AgentConfig;
+use crate::error::{ErgataiError, ErgataiResult};
 
 /// Global task ID counter.
 static TASK_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -33,13 +34,21 @@ pub struct NapiPoolStatus {
     pub in_flight_tasks: u32,
 }
 
+/// Pool running status.
+#[napi(string_enum)]
+#[derive(Debug, Serialize)]
+pub enum PoolStatus {
+    Running,
+    Stopped,
+}
+
 /// Pool info for listing.
 #[napi(object)]
 #[derive(Debug, Clone, Serialize)]
 pub struct NapiPoolInfo {
     pub agent_name: String,
     pub pool_size: u32,
-    pub status: String, // "running" | "stopped"
+    pub status: PoolStatus,
 }
 
 /// Task info returned to the frontend.
@@ -115,15 +124,6 @@ pub async fn acp_pool_create(
     pool_size: u32,
     cwd: String,
 ) -> napi::Result<()> {
-    let pools = pool_manager().pools.read().await;
-    if pools.contains_key(&agent_name) {
-        return Err(napi::Error::from_reason(format!(
-            "Pool already exists for agent: {}",
-            agent_name
-        )));
-    }
-    drop(pools);
-
     let config = crate::agent::config::get_agent_config(&agent_name)
         .map_err(|e| napi::Error::from_reason(format!("Failed to load agent config: {}", e)))?;
 
@@ -131,7 +131,28 @@ pub async fn acp_pool_create(
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let (completion_tx, completion_rx) = mpsc::unbounded_channel();
 
-    // Spawn the pool event loop.
+    let handle = PoolHandle {
+        agent_name: agent_name.clone(),
+        pool_size,
+        cmd_tx,
+    };
+
+    // Atomically check-and-insert under a single write lock to prevent TOCTOU:
+    // a concurrent create for the same agent_name would otherwise both spawn
+    // event loops, with the second insert leaking the first one.
+    {
+        let mut pools = pool_manager().pools.write().await;
+        if pools.contains_key(&agent_name) {
+            return Err(napi::Error::from_reason(format!(
+                "Pool already exists for agent: {}",
+                agent_name
+            )));
+        }
+        pools.insert(agent_name.clone(), handle);
+    }
+
+    // Spawn event loop AFTER the check+insert succeeds. If the check above
+    // fails, channels are dropped here without spawning anything — no leak.
     tokio::spawn(pool_event_loop(
         agent_name.clone(),
         config,
@@ -141,18 +162,6 @@ pub async fn acp_pool_create(
         completion_tx,
         completion_rx,
     ));
-
-    let handle = PoolHandle {
-        agent_name: agent_name.clone(),
-        pool_size,
-        cmd_tx,
-    };
-
-    pool_manager()
-        .pools
-        .write()
-        .await
-        .insert(agent_name.clone(), handle);
 
     tracing::info!(agent = %agent_name, pool_size, "SDK-based agent pool created");
     Ok(())
@@ -253,7 +262,7 @@ pub async fn acp_pool_list() -> napi::Result<Vec<NapiPoolInfo>> {
         .map(|h| NapiPoolInfo {
             agent_name: h.agent_name.clone(),
             pool_size: h.pool_size as u32,
-            status: "running".to_string(),
+            status: PoolStatus::Running,
         })
         .collect())
 }
@@ -266,7 +275,7 @@ async fn spawn_pool_agent(
     agent_name: &str,
     index: usize,
     cwd: &str,
-) -> Result<PoolAgent, String> {
+) -> ErgataiResult<PoolAgent> {
     // Use the existing session manager to create a new session
     let (session_id_tx, session_id_rx) = oneshot::channel();
 
@@ -281,14 +290,14 @@ async fn spawn_pool_agent(
     // Wait for session creation
     let session_id = session_id_rx
         .await
-        .map_err(|_| "Session creation channel died")?
-        .map_err(|e| format!("Session creation failed: {}", e))?;
+        .map_err(|_| ErgataiError::internal("Session creation channel died"))?
+        .map_err(|e| ErgataiError::agent_init_failed_with_source("Session creation failed", e))?;
 
     // Get the command channel for this session
     let cmd_tx = session_manager()
         .get_cmd_tx(&session_id)
         .await
-        .ok_or_else(|| format!("Session {} not found in manager", session_id))?;
+        .ok_or_else(|| ErgataiError::internal(format!("Session {} not found in manager", session_id)))?;
 
     tracing::info!(
         agent = %agent_name,
@@ -304,6 +313,20 @@ async fn spawn_pool_agent(
         busy: false,
         current_task_id: None,
     })
+}
+
+/// Guard that ensures a completion signal is sent when the task scope exits,
+/// even if a panic occurs between sending the prompt and signalling completion.
+/// This prevents pool agents from being permanently stuck as `busy = true`.
+struct CompletionGuard {
+    task_id: String,
+    tx: mpsc::UnboundedSender<String>,
+}
+
+impl Drop for CompletionGuard {
+    fn drop(&mut self) {
+        let _ = self.tx.send(self.task_id.clone());
+    }
 }
 
 /// The main event loop for a pool. Manages agents and dispatches tasks.
@@ -343,13 +366,14 @@ async fn pool_event_loop(
 
     loop {
         // Try to dispatch queued tasks to idle agents.
-        while !task_queue.is_empty() {
+        while let Some(task) = task_queue.pop_front() {
             let idle_idx = agents.iter().position(|a| !a.busy);
             let Some(idx) = idle_idx else {
+                // No idle agents — put the task back at the front and stop.
+                task_queue.push_front(task);
                 break;
             };
 
-            let task = task_queue.pop_front().unwrap();
             let task_id = task.task_id.clone();
             let prompt_preview = task.prompt.chars().take(80).collect::<String>();
 
@@ -376,6 +400,13 @@ async fn pool_event_loop(
             let completion_tx_local = completion_tx.clone();
 
             tokio::spawn(async move {
+                // CompletionGuard ensures the completion signal is sent even on panic,
+                // preventing the agent from being permanently stuck as `busy = true`.
+                let _completion_guard = CompletionGuard {
+                    task_id: task_id_clone.clone(),
+                    tx: completion_tx_local,
+                };
+
                 let (reply_tx, reply_rx) = oneshot::channel();
 
                 // Send prompt to SDK session
@@ -392,9 +423,7 @@ async fn pool_event_loop(
                             "error": format!("Failed to send prompt: {}", e),
                         }),
                     });
-                    // Signal completion so the event loop can reset the busy flag.
-                    let _ = completion_tx_local.send(task_id_clone);
-                    return;
+                    return; // _completion_guard dropped here, sends completion signal
                 }
 
                 // Wait for completion with timeout
@@ -444,8 +473,7 @@ async fn pool_event_loop(
                     }
                 }
 
-                // Signal the event loop to free the agent.
-                let _ = completion_tx_local.send(task_id_clone);
+                // _completion_guard dropped here, sends completion signal
             });
 
             // Agent remains busy until the spawned task above sends a completion

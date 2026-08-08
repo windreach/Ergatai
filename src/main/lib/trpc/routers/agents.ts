@@ -35,7 +35,24 @@ export const agentsRouter = router({
    * Returns catalog entries with availability status, auth status, and install hints.
    */
   listRuntimes: publicProcedure.query(async () => {
-    return nativeBinding.discoverAcpRuntimes()
+    const raw = await nativeBinding.discoverAcpRuntimes()
+    // NAPI #[napi(object)] converts Rust snake_case → JS camelCase.
+    // Normalize to snake_case for consistent frontend types.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- NAPI output casing varies by version
+    return raw.map((r: any) => ({
+      id: r.id,
+      label: r.label,
+      avatar_url: r.avatarUrl ?? r.avatar_url ?? "",
+      availability: r.availability ?? "not_installed",
+      command: r.command ?? null,
+      binary_path: r.binaryPath ?? r.binary_path ?? null,
+      install_hint: r.installHint ?? r.install_hint ?? "",
+      install_instructions_url: r.installInstructionsUrl ?? r.install_instructions_url ?? "",
+      has_install_command: r.hasInstallCommand ?? r.has_install_command ?? false,
+      auth_status: r.authStatus ?? r.auth_status ?? "unknown",
+      login_hint: r.loginHint ?? r.login_hint ?? null,
+      source: r.source ?? "builtin",
+    }))
   }),
 
   /**
@@ -44,7 +61,15 @@ export const agentsRouter = router({
    * Returns env_vars, provider, model, and preferred_runtime.
    */
   getGlobalConfig: publicProcedure.query(async () => {
-    return nativeBinding.getGlobalAgentConfig()
+    const raw = await nativeBinding.getGlobalAgentConfig()
+    // NAPI #[napi(object)] converts Rust snake_case → JS camelCase on output.
+    // Normalize back to snake_case so the rest of the stack is consistent.
+    return {
+      env_vars: raw.envVars ?? raw.env_vars ?? {},
+      provider: raw.provider ?? null,
+      model: raw.model ?? null,
+      preferred_runtime: raw.preferredRuntime ?? raw.preferred_runtime ?? null,
+    }
   }),
 
   /**

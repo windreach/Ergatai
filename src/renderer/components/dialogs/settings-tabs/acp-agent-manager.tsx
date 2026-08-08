@@ -1,21 +1,12 @@
-import { useState } from "react"
+import { useState, useMemo } from "react"
 import { trpc } from "../../../lib/trpc"
 import { cn } from "../../../lib/utils"
 import { Button } from "../../ui/button"
-import { Input } from "../../ui/input"
-import { Label } from "../../ui/label"
-import { Textarea } from "../../ui/textarea"
-import { Badge } from "../../ui/badge"
 import {
-  CheckCircle2,
-  XCircle,
-  AlertCircle,
-  Plus,
-  Trash2,
-  Settings,
+  Check,
+  ChevronDown,
   ExternalLink,
-  Download,
-  Wrench,
+  RefreshCw,
 } from "lucide-react"
 import { toast } from "sonner"
 
@@ -29,7 +20,7 @@ interface AcpRuntimeCatalogEntry {
   binary_path: string | null
   install_hint: string
   install_instructions_url: string
-  has_install_command: boolean  // Whether this runtime has a predefined install command
+  has_install_command: boolean
   auth_status: "logged_in" | "logged_out" | "not_applicable" | "unknown"
   login_hint: string | null
   source: "builtin" | "custom"
@@ -42,755 +33,431 @@ interface GlobalAgentConfig {
   preferred_runtime: string | null
 }
 
-interface HarnessDefinition {
-  id: string
-  label: string
-  command: string
-  args: string[]
-  env: Record<string, string>
-  install_instructions_url: string
-  install_hint: string
+// Normalize NAPI enum output (camelCase) to frontend format (snake_case)
+function normalizeAvailability(status: string): AcpRuntimeCatalogEntry["availability"] {
+  if (status === "available" || status === "Available") return "available"
+  if (status === "notInstalled" || status === "NotInstalled") return "not_installed"
+  if (status === "authRequired" || status === "AuthRequired") return "auth_required"
+  return "not_installed"
 }
 
-// Top Section: Installed Agent Row
-function InstalledAgentRow({
+function normalizeAuthStatus(status: string): AcpRuntimeCatalogEntry["auth_status"] {
+  if (status === "loggedIn" || status === "LoggedIn") return "logged_in"
+  if (status === "loggedOut" || status === "LoggedOut") return "logged_out"
+  if (status === "notApplicable" || status === "NotApplicable") return "not_applicable"
+  return "unknown"
+}
+
+// Default agent pill button
+function DefaultAgentPill({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean
+  onClick: () => void
+  children: React.ReactNode
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cn(
+        "inline-flex items-center gap-2 rounded-md border px-3 py-1.5 text-sm outline-none transition-colors",
+        active
+          ? "border-muted-foreground/40 bg-accent font-medium text-accent-foreground"
+          : "border-border bg-background/50 text-muted-foreground hover:border-muted-foreground/35 hover:text-foreground"
+      )}
+    >
+      {children}
+    </button>
+  )
+}
+
+// Agent icon (avatar or fallback letter)
+function AgentIcon({
   runtime,
-  globalConfig,
-  onConfigClick,
+  size = 16,
 }: {
   runtime: AcpRuntimeCatalogEntry
-  globalConfig: GlobalAgentConfig | undefined
-  onConfigClick: () => void
+  size?: number
 }) {
-  const getStatusBadge = () => {
-    if (runtime.availability === "not_installed") {
-      return (
-        <Badge variant="secondary" className="text-xs">
-          Not Installed
-        </Badge>
-      )
-    }
-    if (runtime.auth_status === "logged_out") {
-      return (
-        <Badge variant="outline" className="text-xs border-yellow-500 text-yellow-600">
-          Auth Required
-        </Badge>
-      )
-    }
-    if (runtime.availability === "available") {
-      return (
-        <Badge variant="default" className="text-xs">
-          <CheckCircle2 className="h-3 w-3 mr-1" />
-          Ready
-        </Badge>
-      )
-    }
+  if (runtime.avatar_url) {
     return (
-      <Badge variant="secondary" className="text-xs">
-        Unknown
-      </Badge>
+      <img
+        src={runtime.avatar_url}
+        alt={runtime.label}
+        width={size}
+        height={size}
+        className="rounded object-cover"
+      />
     )
   }
-
-  const hasConfig = globalConfig?.env_vars && Object.keys(globalConfig.env_vars).length > 0
-
   return (
-    <div className="flex items-center justify-between p-3 border border-border rounded-lg hover:bg-accent/50 transition-colors">
-      <div className="flex items-center gap-3 flex-1 min-w-0">
-        {runtime.avatar_url ? (
-          <img
-            src={runtime.avatar_url}
-            alt={runtime.label}
-            className="w-10 h-10 rounded-md object-cover flex-shrink-0"
-          />
-        ) : (
-          <div className="w-10 h-10 rounded-md bg-muted flex items-center justify-center flex-shrink-0">
-            <Settings className="h-5 w-5 text-muted-foreground" />
-          </div>
-        )}
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2">
-            <span className="font-medium text-sm truncate">{runtime.label}</span>
-            {runtime.source === "custom" && (
-              <Badge variant="secondary" className="text-xs">
-                Custom
-              </Badge>
-            )}
-            {getStatusBadge()}
-          </div>
-          {runtime.command && (
-            <code className="text-xs text-muted-foreground mt-0.5 block truncate">
-              {runtime.command}
-            </code>
-          )}
-        </div>
-      </div>
-      <Button
-        size="sm"
-        variant="outline"
-        onClick={onConfigClick}
-        className="ml-2 flex-shrink-0"
-      >
-        <Wrench className="h-4 w-4 mr-1" />
-        Config
-        {hasConfig && (
-          <span className="ml-1 text-xs text-muted-foreground">•</span>
-        )}
-      </Button>
+    <div
+      className="flex items-center justify-center rounded bg-muted font-medium text-muted-foreground"
+      style={{ width: size, height: size, fontSize: size * 0.6 }}
+    >
+      {runtime.label[0]}
     </div>
   )
 }
 
-// Bottom Section: Available Agent Row
-function AvailableAgentRow({
+// Compact agent row for installed agents
+function InstalledAgentRow({
   runtime,
+  isDefault,
+  onSetDefault,
   onInstall,
   isInstalling,
 }: {
   runtime: AcpRuntimeCatalogEntry
-  onInstall: () => void
-  isInstalling: boolean
+  isDefault: boolean
+  onSetDefault: () => void
+  onInstall?: () => void
+  isInstalling?: boolean
 }) {
-  // Hide Install button if no install command is defined
-  if (!runtime.has_install_command) {
-    return (
-      <div className="flex items-center justify-between p-3 border border-dashed border-border rounded-lg opacity-60">
-        <div className="flex items-center gap-3 flex-1 min-w-0">
-          {runtime.avatar_url ? (
-            <img
-              src={runtime.avatar_url}
-              alt={runtime.label}
-              className="w-10 h-10 rounded-md object-cover flex-shrink-0 opacity-70"
-            />
-          ) : (
-            <div className="w-10 h-10 rounded-md bg-muted flex items-center justify-center flex-shrink-0 opacity-70">
-              <Settings className="h-5 w-5 text-muted-foreground" />
+  const [cmdOpen, setCmdOpen] = useState(false)
+  const availability = normalizeAvailability(runtime.availability as string)
+  const authStatus = normalizeAuthStatus(runtime.auth_status as string)
+
+  const isReady = availability === "available"
+  const needsAuth = authStatus === "logged_out"
+
+  return (
+    <div className={cn("py-3", !isReady && "opacity-70")}>
+      <div className="flex flex-wrap items-start gap-3">
+        {/* Icon */}
+        <div className="flex size-7 shrink-0 items-center justify-center rounded-md border border-border/50 bg-background/50">
+          <AgentIcon runtime={runtime} size={16} />
+        </div>
+
+        {/* Label + command */}
+        <div className="min-w-0 flex-1 sm:min-w-[12rem]">
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-medium leading-none">{runtime.label}</span>
+            {!isReady && (
+              <span className="inline-flex items-center rounded-md bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+                {needsAuth ? "Auth Required" : "Not Installed"}
+              </span>
+            )}
+            {runtime.source === "custom" && (
+              <span className="inline-flex items-center rounded-md bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+                Custom
+              </span>
+            )}
+          </div>
+          {runtime.command && (
+            <div className="mt-1 truncate font-mono text-[11px] text-muted-foreground">
+              {runtime.command}
             </div>
           )}
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2">
-              <span className="font-medium text-sm truncate">{runtime.label}</span>
-              <Badge variant="secondary" className="text-xs">
-                Manual Install
-              </Badge>
-            </div>
-            {runtime.install_hint && (
-              <p className="text-xs text-muted-foreground mt-0.5 line-clamp-1">
-                {runtime.install_hint}
-              </p>
+        </div>
+
+        {/* Actions */}
+        <div className="ml-auto grid shrink-0 grid-cols-[max-content_6.5rem_1.75rem_1.75rem] items-center gap-1.5">
+          {/* Set default */}
+          <div className="flex justify-start">
+            {isReady && (
+              <Button
+                type="button"
+                variant={isDefault ? "secondary" : "ghost"}
+                size="xs"
+                onClick={onSetDefault}
+                className="h-7 w-full justify-center gap-1 text-xs"
+              >
+                {isDefault && <Check className="size-3" />}
+                {isDefault ? "Default" : "Set default"}
+              </Button>
+            )}
+          </div>
+
+          {/* Install / Docs link */}
+          {!isReady && runtime.install_instructions_url && (
+            <a
+              href={runtime.install_instructions_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              title="Install"
+              className="flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
+            >
+              <ExternalLink className="size-3.5" />
+            </a>
+          )}
+          {isReady && runtime.install_instructions_url && (
+            <a
+              href={runtime.install_instructions_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              title="Docs"
+              className="flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
+            >
+              <ExternalLink className="size-3.5" />
+            </a>
+          )}
+
+          {/* Expand toggle (only for installed agents with command) */}
+          <div className="flex size-7 items-center justify-center">
+            {isReady && runtime.command && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                onClick={() => setCmdOpen((prev) => !prev)}
+                className="size-7 text-muted-foreground hover:text-foreground"
+              >
+                <ChevronDown
+                  className={cn("size-3.5 transition-transform", cmdOpen && "rotate-180")}
+                />
+              </Button>
             )}
           </div>
         </div>
-        {runtime.install_instructions_url && (
-          <a
-            href={runtime.install_instructions_url}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors flex-shrink-0"
-          >
-            Docs
-            <ExternalLink className="h-3 w-3" />
-          </a>
-        )}
       </div>
-    )
-  }
 
-  return (
-    <div className="flex items-center justify-between p-3 border border-dashed border-border rounded-lg hover:bg-accent/30 transition-colors">
-      <div className="flex items-center gap-3 flex-1 min-w-0">
-        {runtime.avatar_url ? (
-          <img
-            src={runtime.avatar_url}
-            alt={runtime.label}
-            className="w-10 h-10 rounded-md object-cover flex-shrink-0 opacity-70"
-          />
-        ) : (
-          <div className="w-10 h-10 rounded-md bg-muted flex items-center justify-center flex-shrink-0 opacity-70">
-            <Settings className="h-5 w-5 text-muted-foreground" />
+      {/* Expanded command info */}
+      {isReady && cmdOpen && runtime.command && (
+        <div className="mt-3 pl-10 space-y-2">
+          <div>
+            <span className="text-[11px] text-muted-foreground">Command</span>
+            <code className="ml-2 text-[11px] font-mono bg-muted px-1.5 py-0.5 rounded">
+              {runtime.command}
+            </code>
           </div>
-        )}
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2">
-            <span className="font-medium text-sm truncate">{runtime.label}</span>
-            <Badge variant="secondary" className="text-xs">
-              Not Installed
-            </Badge>
-          </div>
-          {runtime.install_hint && (
-            <p className="text-xs text-muted-foreground mt-0.5 line-clamp-1">
-              {runtime.install_hint}
-            </p>
+          {runtime.binary_path && (
+            <div>
+              <span className="text-[11px] text-muted-foreground">Binary</span>
+              <code className="ml-2 text-[11px] font-mono bg-muted px-1.5 py-0.5 rounded break-all">
+                {runtime.binary_path}
+              </code>
+            </div>
           )}
+          <p className="text-[11px] text-muted-foreground">
+            {runtime.install_hint || "No additional configuration available."}
+          </p>
         </div>
-      </div>
-      <div className="flex items-center gap-2 flex-shrink-0">
-        {runtime.install_instructions_url && (
-          <a
-            href={runtime.install_instructions_url}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
-          >
-            Docs
-            <ExternalLink className="h-3 w-3" />
-          </a>
-        )}
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={onInstall}
-          disabled={isInstalling}
-        >
-          {isInstalling ? (
-            <>
-              <div className="h-4 w-4 mr-1 animate-spin rounded-full border-2 border-current border-t-transparent" />
-              Installing...
-            </>
-          ) : (
-            <>
-              <Download className="h-4 w-4 mr-1" />
-              Install
-            </>
-          )}
-        </Button>
-      </div>
+      )}
     </div>
   )
 }
 
-// Main Component: Two-section layout
+// Main Component
 export function AcpAgentManager() {
-  const [configOpenId, setConfigOpenId] = useState<string | null>(null)
-  const [showCustomForm, setShowCustomForm] = useState(false)
   const utils = trpc.useUtils()
 
-  // Fetch runtimes
-  const { data: runtimes, isLoading: isLoadingRuntimes } = trpc.agents.listRuntimes.useQuery()
+  const { data: runtimes = [], isLoading, refetch } = trpc.agents.listRuntimes.useQuery()
+  const { data: globalConfig } = trpc.agents.getGlobalConfig.useQuery()
 
-  // Fetch global config (for env vars, provider, model per runtime)
-  const { data: globalConfig, isLoading: isLoadingConfig } = trpc.agents.getGlobalConfig.useQuery()
-
-  // Mutations
   const setConfigMutation = trpc.agents.setGlobalConfig.useMutation({
     onSuccess: () => {
       utils.agents.getGlobalConfig.invalidate()
       toast.success("Configuration saved")
     },
-    onError: (error) => {
-      toast.error(`Failed to save configuration: ${error.message}`)
-    },
+    onError: (error) => toast.error(`Failed to save: ${error.message}`),
   })
 
-  const saveCustomHarnessMutation = trpc.agents.saveCustomHarness.useMutation({
-    onSuccess: () => {
-      utils.agents.listRuntimes.invalidate()
-      setShowCustomForm(false)
-      toast.success("Custom agent saved")
-    },
-    onError: (error) => {
-      toast.error(`Failed to save custom agent: ${error.message}`)
-    },
-  })
-
-  const deleteCustomHarnessMutation = trpc.agents.deleteCustomHarness.useMutation({
-    onSuccess: () => {
-      utils.agents.listRuntimes.invalidate()
-      setConfigOpenId(null)
-      toast.success("Custom agent deleted")
-    },
-    onError: (error) => {
-      toast.error(`Failed to delete custom agent: ${error.message}`)
-    },
-  })
-
-  // Install runtime mutation
   const installRuntimeMutation = trpc.agents.installRuntime.useMutation({
     onSuccess: () => {
       utils.agents.listRuntimes.invalidate()
       toast.success("Runtime installed successfully")
     },
-    onError: (error) => {
-      toast.error(`Install failed: ${error.message}`)
-    },
+    onError: (error) => toast.error(`Install failed: ${error.message}`),
   })
 
-  const handleInstallRuntime = (runtimeId: string) => {
+  // Normalize and split runtimes
+  const normalizedRuntimes = useMemo(
+    () =>
+      runtimes.map((r) => ({
+        ...r,
+        availability: normalizeAvailability(r.availability as string),
+        auth_status: normalizeAuthStatus(r.auth_status as string),
+      })),
+    [runtimes]
+  )
+
+  const installedRuntimes = normalizedRuntimes.filter(
+    (r) => r.availability !== "not_installed"
+  )
+  const availableRuntimes = normalizedRuntimes.filter(
+    (r) => r.availability === "not_installed"
+  )
+
+  const defaultRuntimeId = globalConfig?.preferred_runtime ?? null
+  const isAutoDefault = !defaultRuntimeId || !installedRuntimes.find((r) => r.id === defaultRuntimeId)
+
+  const handleSetDefault = (runtimeId: string) => {
+    setConfigMutation.mutate({
+      env_vars: globalConfig?.env_vars ?? {},
+      provider: globalConfig?.provider ?? null,
+      model: globalConfig?.model ?? null,
+      preferred_runtime: runtimeId,
+    })
+  }
+
+  const handleSetAuto = () => {
+    setConfigMutation.mutate({
+      env_vars: globalConfig?.env_vars ?? {},
+      provider: globalConfig?.provider ?? null,
+      model: globalConfig?.model ?? null,
+      preferred_runtime: null,
+    })
+  }
+
+  const handleInstall = (runtimeId: string) => {
     installRuntimeMutation.mutate({ runtimeId })
   }
 
-  // Split runtimes into installed vs available
-  const installedRuntimes = runtimes?.filter(
-    (r: AcpRuntimeCatalogEntry) => r.availability !== "not_installed"
-  ) ?? []
-  const availableRuntimes = runtimes?.filter(
-    (r: AcpRuntimeCatalogEntry) => r.availability === "not_installed"
-  ) ?? []
-
-  const configOpenRuntime = runtimes?.find((r: AcpRuntimeCatalogEntry) => r.id === configOpenId)
-
-  if (isLoadingRuntimes || isLoadingConfig) {
+  if (isLoading) {
     return (
       <div className="h-full flex items-center justify-center">
-        <div className="text-muted-foreground">Loading...</div>
-      </div>
-    )
-  }
-
-  if (!runtimes || !globalConfig) {
-    return (
-      <div className="h-full flex items-center justify-center">
-        <div className="text-muted-foreground">Failed to load agents</div>
+        <div className="text-muted-foreground">Loading agents…</div>
       </div>
     )
   }
 
   return (
-    <div className="h-full overflow-y-auto">
-      <div className="max-w-3xl mx-auto p-6 space-y-6">
-        {/* Header */}
-        <div className="flex items-center justify-between">
-          <div>
-            <h2 className="text-lg font-semibold">My Agents</h2>
-            <p className="text-sm text-muted-foreground mt-0.5">
-              {installedRuntimes.length} installed, {availableRuntimes.length} available
-            </p>
-          </div>
-          <Button size="sm" onClick={() => setShowCustomForm(true)}>
-            <Plus className="h-4 w-4 mr-1" />
-            Add Custom
-          </Button>
-        </div>
-
-        {/* Section 1: Installed Agents */}
-        <div className="space-y-2">
-          <h3 className="text-sm font-semibold text-muted-foreground">
-            Installed Agents
-          </h3>
-          <div className="space-y-2">
-            {installedRuntimes.length === 0 ? (
-              <div className="text-sm text-muted-foreground text-center py-6 border border-dashed border-border rounded-lg">
-                No agents installed yet. Install one from the list below.
-              </div>
-            ) : (
-              installedRuntimes.map((runtime: AcpRuntimeCatalogEntry) => (
-                <div key={runtime.id}>
-                  <InstalledAgentRow
-                    runtime={runtime}
-                    globalConfig={globalConfig}
-                    onConfigClick={() =>
-                      setConfigOpenId(configOpenId === runtime.id ? null : runtime.id)
-                    }
-                  />
-                  {/* Config Panel inline after the clicked row */}
-                  {configOpenId === runtime.id && configOpenRuntime && (
-                    <div className="mt-2 border border-border rounded-lg p-4 space-y-4 bg-accent/20">
-                      <div className="flex items-center justify-between">
-                        <h3 className="text-sm font-semibold">
-                          Configuration: {configOpenRuntime.label}
-                        </h3>
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          onClick={() => setConfigOpenId(null)}
-                        >
-                          <XCircle className="h-4 w-4" />
-                        </Button>
-                      </div>
-                      <AgentConfigPanel
-                        runtime={configOpenRuntime}
-                        globalConfig={globalConfig!}
-                        onUpdateConfig={(config) => {
-                          setConfigMutation.mutate({
-                            ...globalConfig!,
-                            ...config,
-                          })
-                        }}
-                        onDelete={
-                          configOpenRuntime.source === "custom"
-                            ? () => {
-                                if (
-                                  confirm(
-                                    `Delete custom agent "${configOpenRuntime.label}"?`
-                                  )
-                                ) {
-                                  deleteCustomHarnessMutation.mutate(configOpenRuntime.id)
-                                }
-                              }
-                            : undefined
-                        }
-                      />
-                    </div>
-                  )}
-                </div>
-              ))
-            )}
-          </div>
-        </div>
-
-        {/* Section 2: Available Agents */}
-        <div className="space-y-2">
-          <h3 className="text-sm font-semibold text-muted-foreground">
-            Available Agents
-          </h3>
-          <div className="space-y-2">
-            {availableRuntimes.length === 0 ? (
-              <div className="text-sm text-muted-foreground text-center py-6 border border-dashed border-border rounded-lg">
-                All agents are installed!
-              </div>
-            ) : (
-              availableRuntimes.map((runtime: AcpRuntimeCatalogEntry) => (
-                <AvailableAgentRow
-                  key={runtime.id}
-                  runtime={runtime}
-                  onInstall={() => handleInstallRuntime(runtime.id)}
-                  isInstalling={installRuntimeMutation.isPending && installRuntimeMutation.variables?.runtimeId === runtime.id}
-                />
-              ))
-            )}
-          </div>
-        </div>
-
-        {/* Custom Harness Form (expanded below when clicked) */}
-        {showCustomForm && (
-          <div className="border border-border rounded-lg p-4">
-            <CustomHarnessForm
-              onSave={(harness) => saveCustomHarnessMutation.mutate(harness)}
-              onCancel={() => setShowCustomForm(false)}
-            />
-          </div>
-        )}
-      </div>
-    </div>
-  )
-}
-
-// Config Panel: shown when "Config" is clicked on an installed agent
-function AgentConfigPanel({
-  runtime,
-  globalConfig,
-  onUpdateConfig,
-  onDelete,
-}: {
-  runtime: AcpRuntimeCatalogEntry
-  globalConfig: GlobalAgentConfig
-  onUpdateConfig: (config: Partial<GlobalAgentConfig>) => void
-  onDelete?: () => void
-}) {
-  const [envVars, setEnvVars] = useState<Record<string, string>>(
-    globalConfig.env_vars
-  )
-  const [provider, setProvider] = useState(globalConfig.provider || "")
-  const [model, setModel] = useState(globalConfig.model || "")
-
-  const handleSaveConfig = () => {
-    onUpdateConfig({
-      env_vars: envVars,
-      provider: provider || null,
-      model: model || null,
-      preferred_runtime: runtime.id,
-    })
-  }
-
-  const handleAddEnvVar = () => {
-    const key = `NEW_VAR_${Date.now()}`
-    setEnvVars({ ...envVars, [key]: "" })
-  }
-
-  const handleRemoveEnvVar = (key: string) => {
-    const newVars = { ...envVars }
-    delete newVars[key]
-    setEnvVars(newVars)
-  }
-
-  const handleEnvVarChange = (key: string, value: string) => {
-    setEnvVars({ ...envVars, [key]: value })
-  }
-
-  return (
-    <div className="space-y-4">
-      {/* Status */}
-      <div className="space-y-2">
-        <Label className="text-xs font-medium">Status</Label>
-        <div className="flex items-center gap-2 text-sm">
-          <Badge
-            variant={
-              runtime.availability === "available" ? "default" : "secondary"
-            }
-          >
-            {runtime.availability}
-          </Badge>
-          {runtime.command && (
-            <code className="text-xs bg-muted px-2 py-1 rounded">
-              {runtime.command}
-            </code>
-          )}
-        </div>
-        {runtime.binary_path && (
-          <div>
-            <Label className="text-xs text-muted-foreground">Binary Path</Label>
-            <code className="text-xs bg-muted px-2 py-1 rounded block mt-1">
-              {runtime.binary_path}
-            </code>
-          </div>
-        )}
-        {runtime.auth_status === "logged_out" && runtime.login_hint && (
-          <div className="p-3 bg-yellow-50 dark:bg-yellow-950/20 border border-yellow-200 dark:border-yellow-900 rounded-md">
-            <p className="text-sm text-yellow-800 dark:text-yellow-200">
-              {runtime.login_hint}
-            </p>
-          </div>
-        )}
-      </div>
-
-      {/* Provider & Model */}
-      <div className="space-y-2">
-        <Label className="text-xs font-medium">Default Provider & Model</Label>
-        <div className="grid grid-cols-2 gap-2">
-          <Input
-            value={provider}
-            onChange={(e) => setProvider(e.target.value)}
-            placeholder="Provider (e.g., anthropic)"
-            className="text-sm"
-          />
-          <Input
-            value={model}
-            onChange={(e) => setModel(e.target.value)}
-            placeholder="Model (e.g., claude-3-opus)"
-            className="text-sm"
-          />
-        </div>
-      </div>
-
-      {/* Environment Variables */}
-      <div className="space-y-2">
-        <div className="flex items-center justify-between">
-          <Label className="text-xs font-medium">Environment Variables</Label>
-          <Button size="sm" variant="outline" onClick={handleAddEnvVar}>
-            <Plus className="h-3 w-3 mr-1" />
-            Add
-          </Button>
-        </div>
-        <div className="space-y-2">
-          {Object.entries(envVars).map(([key, value]) => (
-            <div key={key} className="flex gap-2">
-              <Input
-                value={key}
-                onChange={(e) => {
-                  const newKey = e.target.value
-                  const newVars = { ...envVars }
-                  delete newVars[key]
-                  newVars[newKey] = value
-                  setEnvVars(newVars)
-                }}
-                placeholder="VAR_NAME"
-                className="font-mono text-sm"
-              />
-              <Input
-                value={value}
-                onChange={(e) => handleEnvVarChange(key, e.target.value)}
-                placeholder="value"
-                className="font-mono text-sm flex-1"
-              />
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={() => handleRemoveEnvVar(key)}
-              >
-                <Trash2 className="h-4 w-4" />
-              </Button>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {/* Actions */}
-      <div className="flex justify-between pt-2 border-t">
-        {onDelete && (
-          <Button variant="destructive" size="sm" onClick={onDelete}>
-            <Trash2 className="h-4 w-4 mr-1" />
-            Delete Agent
-          </Button>
-        )}
-        <div className="flex-1" />
-        <Button onClick={handleSaveConfig}>Save Configuration</Button>
-      </div>
-    </div>
-  )
-}
-
-// Custom Harness Form
-function CustomHarnessForm({
-  onSave,
-  onCancel,
-}: {
-  onSave: (harness: HarnessDefinition) => void
-  onCancel: () => void
-}) {
-  const [id, setId] = useState("")
-  const [label, setLabel] = useState("")
-  const [command, setCommand] = useState("")
-  const [args, setArgs] = useState("")
-  const [installHint, setInstallHint] = useState("")
-  const [installUrl, setInstallUrl] = useState("")
-  const [envVars, setEnvVars] = useState<Record<string, string>>({})
-
-  const handleSubmit = () => {
-    if (!id || !label || !command) {
-      toast.error("ID, label, and command are required")
-      return
-    }
-
-    // Filter out empty keys from env vars
-    const filteredEnv = Object.fromEntries(
-      Object.entries(envVars).filter(([key]) => key.trim() !== "")
-    )
-
-    onSave({
-      id,
-      label,
-      command,
-      args: args ? args.split("\n").filter(Boolean) : [],
-      env: filteredEnv,
-      install_hint: installHint,
-      install_instructions_url: installUrl,
-    })
-  }
-
-  return (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between">
+    <div className="space-y-8 p-6">
+      {/* Default Agent Selector */}
+      <section className="space-y-4">
         <div>
-          <h3 className="text-sm font-semibold">Add Custom Agent</h3>
+          <h3 className="text-sm font-semibold">Default Agent</h3>
           <p className="text-xs text-muted-foreground mt-0.5">
-            Define a custom ACP agent harness
+            Choose the default agent for new chats.
           </p>
         </div>
-        <Button variant="ghost" size="sm" onClick={onCancel}>
-          <XCircle className="h-4 w-4" />
-        </Button>
-      </div>
 
-      <div className="space-y-3">
-        <div>
-          <Label className="text-xs">ID *</Label>
-          <Input
-            value={id}
-            onChange={(e) => setId(e.target.value)}
-            placeholder="my-custom-agent"
-            className="mt-1 font-mono text-sm"
-          />
+        <div className="flex flex-wrap gap-2">
+          {/* Auto pill */}
+          <DefaultAgentPill active={isAutoDefault} onClick={handleSetAuto}>
+            {isAutoDefault && <Check className="size-3.5" />}
+            Auto
+          </DefaultAgentPill>
+
+          {/* Each installed agent as a pill */}
+          {installedRuntimes.map((runtime) => {
+            const isActive = defaultRuntimeId === runtime.id
+            return (
+              <DefaultAgentPill
+                key={runtime.id}
+                active={isActive}
+                onClick={() => handleSetDefault(runtime.id)}
+              >
+                <AgentIcon runtime={runtime} size={14} />
+                {runtime.label}
+                {isActive && <Check className="size-3.5" />}
+              </DefaultAgentPill>
+            )
+          })}
         </div>
+      </section>
 
-        <div>
-          <Label className="text-xs">Label *</Label>
-          <Input
-            value={label}
-            onChange={(e) => setLabel(e.target.value)}
-            placeholder="My Custom Agent"
-            className="mt-1 text-sm"
-          />
-        </div>
-
-        <div>
-          <Label className="text-xs">Command *</Label>
-          <Input
-            value={command}
-            onChange={(e) => setCommand(e.target.value)}
-            placeholder="my-agent-acp"
-            className="mt-1 font-mono text-sm"
-          />
-        </div>
-
-        <div>
-          <Label className="text-xs">Arguments (one per line)</Label>
-          <Textarea
-            value={args}
-            onChange={(e) => setArgs(e.target.value)}
-            placeholder="--flag&#10;--option value"
-            className="mt-1 font-mono text-sm"
-            rows={3}
-          />
-        </div>
-
-        <div>
-          <Label className="text-xs">Install Hint</Label>
-          <Input
-            value={installHint}
-            onChange={(e) => setInstallHint(e.target.value)}
-            placeholder="Install from https://..."
-            className="mt-1 text-sm"
-          />
-        </div>
-
-        <div>
-          <Label className="text-xs">Install Instructions URL</Label>
-          <Input
-            value={installUrl}
-            onChange={(e) => setInstallUrl(e.target.value)}
-            placeholder="https://..."
-            className="mt-1 text-sm"
-          />
-        </div>
-
-        <div>
+      {/* Installed Agents */}
+      {installedRuntimes.length > 0 && (
+        <section className="space-y-3">
           <div className="flex items-center justify-between">
-            <Label className="text-xs">Environment Variables</Label>
+            <div className="flex items-center gap-2">
+              <h3 className="text-sm font-semibold text-muted-foreground">Installed</h3>
+              <span className="inline-flex items-center rounded-md bg-accent px-1.5 py-0.5 text-[10px] font-medium text-accent-foreground">
+                {installedRuntimes.length} detected
+              </span>
+            </div>
             <Button
-              size="sm"
-              variant="outline"
-              onClick={() => setEnvVars({ ...envVars, "": "" })}
+              type="button"
+              variant="ghost"
+              size="xs"
+              onClick={() => refetch()}
+              className="h-7 gap-1.5 text-xs text-muted-foreground hover:text-foreground"
             >
-              <Plus className="h-3 w-3 mr-1" />
-              Add
+              <RefreshCw className="size-3" />
+              Refresh
             </Button>
           </div>
-          <div className="space-y-2 mt-1">
-            {Object.entries(envVars).map(([key, value]) => (
-              <div key={key} className="flex gap-2">
-                <Input
-                  value={key}
-                  onChange={(e) => {
-                    const newKey = e.target.value
-                    const newVars = { ...envVars }
-                    delete newVars[key]
-                    newVars[newKey] = value
-                    setEnvVars(newVars)
-                  }}
-                  placeholder="VAR_NAME"
-                  className="font-mono text-sm"
-                />
-                <Input
-                  value={value}
-                  onChange={(e) => {
-                    setEnvVars({ ...envVars, [key]: e.target.value })
-                  }}
-                  placeholder="value"
-                  className="font-mono text-sm flex-1"
-                />
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={() => {
-                    const newVars = { ...envVars }
-                    delete newVars[key]
-                    setEnvVars(newVars)
-                  }}
-                >
-                  <Trash2 className="h-4 w-4" />
-                </Button>
+
+          <div className="divide-y divide-border/40">
+            {installedRuntimes.map((runtime) => (
+              <InstalledAgentRow
+                key={runtime.id}
+                runtime={runtime}
+                isDefault={defaultRuntimeId === runtime.id}
+                onSetDefault={() => handleSetDefault(runtime.id)}
+              />
+            ))}
+          </div>
+        </section>
+      )}
+
+      {/* Available to Install */}
+      {availableRuntimes.length > 0 && (
+        <section className="space-y-3">
+          <div className="flex items-center gap-2">
+            <h3 className="text-sm font-semibold text-muted-foreground">Available to install</h3>
+            <span className="inline-flex items-center rounded-md bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+              {availableRuntimes.length} agents
+            </span>
+          </div>
+
+          <div className="divide-y divide-border/40">
+            {availableRuntimes.map((runtime) => (
+              <div key={runtime.id} className="py-3 opacity-70">
+                <div className="flex flex-wrap items-start gap-3">
+                  <div className="flex size-7 shrink-0 items-center justify-center rounded-md border border-border/50 bg-background/50">
+                    <AgentIcon runtime={runtime} size={16} />
+                  </div>
+
+                  <div className="min-w-0 flex-1 sm:min-w-[12rem]">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-medium leading-none">{runtime.label}</span>
+                      <span className="inline-flex items-center rounded-md bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+                        Not Installed
+                      </span>
+                    </div>
+                    {runtime.install_hint && (
+                      <div className="mt-1 text-[11px] text-muted-foreground">
+                        {runtime.install_hint}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="ml-auto flex items-center gap-2">
+                    {runtime.install_instructions_url && (
+                      <a
+                        href={runtime.install_instructions_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        title="Install docs"
+                        className="flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
+                      >
+                        <ExternalLink className="size-3.5" />
+                      </a>
+                    )}
+                    {runtime.has_install_command && (
+                      <Button
+                        size="xs"
+                        variant="outline"
+                        onClick={() => handleInstall(runtime.id)}
+                        disabled={installRuntimeMutation.isPending}
+                        className="h-7 gap-1 text-xs"
+                      >
+                        {installRuntimeMutation.isPending ? (
+                          <div className="size-3 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                        ) : null}
+                        Install
+                      </Button>
+                    )}
+                  </div>
+                </div>
               </div>
             ))}
           </div>
-        </div>
-      </div>
+        </section>
+      )}
 
-      <div className="flex justify-end gap-2 pt-2 border-t">
-        <Button variant="outline" onClick={onCancel}>
-          Cancel
-        </Button>
-        <Button onClick={handleSubmit}>Save Custom Agent</Button>
-      </div>
+      {/* Empty state */}
+      {installedRuntimes.length === 0 && availableRuntimes.length === 0 && (
+        <div className="flex items-center justify-center rounded-md border border-dashed border-border/50 py-6 text-sm text-muted-foreground">
+          No agents detected. Install one to get started.
+        </div>
+      )}
     </div>
   )
 }

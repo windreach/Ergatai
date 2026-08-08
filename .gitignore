@@ -42,6 +42,8 @@ src-rust/target/
 
 # AI plan docs (local-only, not tracked)
 .plan/
+.architecture/
+.codegraph/
 
 # Task documents
 .tasks/
