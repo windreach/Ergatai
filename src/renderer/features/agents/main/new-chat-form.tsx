@@ -105,8 +105,9 @@ import {
   PromptInputContextItems,
 } from "../../../components/ui/prompt-input"
 import { agentsSidebarOpenAtom, agentsUnseenChangesAtom } from "../atoms"
+import { normalizedRuntimeIdAtom } from "../atoms/runtime"
 import { AgentSendButton } from "../components/agent-send-button"
-import { AgentModelSelector } from "../components/agent-model-selector"
+import { AgentSelector } from "../components/agent-selector"
 import { CreateBranchDialog } from "../components/create-branch-dialog"
 import { formatTimeAgo } from "../utils/format-time-ago"
 import { handlePasteEvent } from "../utils/paste-text"
@@ -164,7 +165,8 @@ function useAvailableModels() {
   }
 }
 
-// Agent providers
+// Legacy agent providers - kept for backward compatibility with model selection logic
+// TODO(Plan 9): Remove when /model command handles model selection
 const agents = [
   { id: "claude-code", name: "Claude Code", hasModels: true },
   { id: "cursor", name: "Cursor CLI", disabled: true },
@@ -223,6 +225,7 @@ export function NewChatForm({
   const [lastSelectedAgentId, setLastSelectedAgentId] = useAtom(
     lastSelectedAgentIdAtom,
   )
+  const [selectedRuntimeId, setSelectedRuntimeId] = useAtom(normalizedRuntimeIdAtom)
   const [lastSelectedModelId, setLastSelectedModelId] = useAtom(
     lastSelectedModelIdAtom,
   )
@@ -413,33 +416,7 @@ export function NewChatForm({
   const currentOllamaModel = selectedOllamaModel || availableModels.recommendedModel || availableModels.ollamaModels[0]
   const claudeAgent =
     enabledAgents.find((agent) => agent.id === "claude-code") || fallbackAgent
-  const selectedModelLabel = useMemo(() => {
-    if (selectedAgent.id === "codex") {
-      return selectedCodexModel.name
-    }
-
-    if (availableModels.isOffline && availableModels.hasOllama) {
-      return currentOllamaModel || "Ollama"
-    }
-
-    if (hasCustomClaudeConfig) {
-      return "Custom Model"
-    }
-
-    if (!selectedModel) {
-      return "Select model"
-    }
-
-    return `${selectedModel.name} ${selectedModel.version}`
-  }, [
-    selectedAgent.id,
-    selectedCodexModel.name,
-    availableModels.isOffline,
-    availableModels.hasOllama,
-    currentOllamaModel,
-    hasCustomClaudeConfig,
-    selectedModel,
-  ])
+  // selectedModelLabel removed - model selection moved to /model command (Plan 9)
   const [repoPopoverOpen, setRepoPopoverOpen] = useState(false)
   const [branchPopoverOpen, setBranchPopoverOpen] = useState(false)
   const [lastSelectedBranches, setLastSelectedBranches] = useAtom(
@@ -540,7 +517,7 @@ export function NewChatForm({
       setModeTooltip(null)
     }
   }, [modeDropdownOpen])
-  const [isModelDropdownOpen, setIsModelDropdownOpen] = useState(false)
+  // isModelDropdownOpen removed - AgentSelector manages its own open state
 
   // Voice input state
   const customHotkeys = useAtomValue(customHotkeysAtom)
@@ -1870,64 +1847,19 @@ export function NewChatForm({
                       </DropdownMenu>
 
                       <div className="group/model-controls flex items-center gap-0.5">
-                        <AgentModelSelector
-                          open={isModelDropdownOpen}
-                          onOpenChange={setIsModelDropdownOpen}
-                          selectedAgentId={selectedAgent.id as "claude-code" | "codex"}
-                          onSelectedAgentIdChange={(provider) => {
-                            if (provider === "claude-code") {
+                        <AgentSelector
+                          defaultRuntimeId={selectedRuntimeId}
+                          onRuntimeSelect={(runtimeId) => {
+                            setSelectedRuntimeId(runtimeId)
+                            // Map runtime ID to old provider ID for backward compatibility
+                            const providerId = runtimeId === "claude" ? "claude-code" : runtimeId
+                            setLastSelectedAgentId(providerId)
+                            // Update selectedAgent state (used by model selection logic)
+                            if (providerId === "claude-code") {
                               setSelectedAgent(claudeAgent)
-                            } else {
+                            } else if (providerId === "codex") {
                               setSelectedAgent(enabledAgents.find((agent) => agent.id === "codex") || fallbackAgent)
                             }
-                            setLastSelectedAgentId(provider)
-                          }}
-                          selectedModelLabel={selectedModelLabel}
-                          onOpenModelsSettings={() => {
-                            setSettingsActiveTab("models")
-                            setSettingsDialogOpen(true)
-                          }}
-                          claude={{
-                            models: availableModels.models.filter((m) => !hiddenModels.includes(m.id)),
-                            selectedModelId: selectedModel?.id,
-                            onSelectModel: (modelId) => {
-                              const model =
-                                availableModels.models.find((m) => m.id === modelId) ||
-                                availableModels.models[0]
-                              if (!model) return
-                              setSelectedModel(model)
-                              setLastSelectedModelId(model.id)
-                            },
-                            hasCustomModelConfig: hasCustomClaudeConfig,
-                            isOffline: availableModels.isOffline && availableModels.hasOllama,
-                            ollamaModels: availableModels.ollamaModels,
-                            selectedOllamaModel: currentOllamaModel,
-                            recommendedOllamaModel: availableModels.recommendedModel,
-                            onSelectOllamaModel: setSelectedOllamaModel,
-                            isConnected: isClaudeConnected,
-                            thinkingEnabled,
-                            onThinkingChange: setThinkingEnabled,
-                          }}
-                          codex={{
-                            models: codexUiModels,
-                            selectedModelId: selectedCodexModel.id,
-                            onSelectModel: (modelId) => {
-                              const model = codexUiModels.find((item) => item.id === modelId)
-                              if (!model) return
-                              const nextThinking = model.thinkings.includes(
-                                lastSelectedCodexThinking as CodexThinkingLevel,
-                              )
-                                ? (lastSelectedCodexThinking as CodexThinkingLevel)
-                                : (model.thinkings.includes("high")
-                                  ? "high"
-                                  : model.thinkings[0]!)
-
-                              setLastSelectedCodexModelId(model.id)
-                              setLastSelectedCodexThinking(nextThinking)
-                            },
-                            selectedThinking: selectedCodexThinking,
-                            onSelectThinking: setLastSelectedCodexThinking,
-                            isConnected: codexOnboardingCompleted,
                           }}
                         />
                       </div>
