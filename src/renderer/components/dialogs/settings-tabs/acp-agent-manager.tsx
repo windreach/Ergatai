@@ -1,5 +1,4 @@
 import { useState } from "react"
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
 import { trpc } from "../../../lib/trpc"
 import { cn } from "../../../lib/utils"
 import { Button } from "../../ui/button"
@@ -202,7 +201,7 @@ function AvailableAgentRow({
 export function AcpAgentManager() {
   const [configOpenId, setConfigOpenId] = useState<string | null>(null)
   const [showCustomForm, setShowCustomForm] = useState(false)
-  const queryClient = useQueryClient()
+  const utils = trpc.useUtils()
 
   // Fetch runtimes
   const { data: runtimes, isLoading: isLoadingRuntimes } = trpc.agents.listRuntimes.useQuery()
@@ -213,7 +212,7 @@ export function AcpAgentManager() {
   // Mutations
   const setConfigMutation = trpc.agents.setGlobalConfig.useMutation({
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["global-agent-config"] })
+      utils.agents.getGlobalConfig.invalidate()
       toast.success("Configuration saved")
     },
     onError: (error) => {
@@ -223,7 +222,7 @@ export function AcpAgentManager() {
 
   const saveCustomHarnessMutation = trpc.agents.saveCustomHarness.useMutation({
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["acp-runtimes"] })
+      utils.agents.listRuntimes.invalidate()
       setShowCustomForm(false)
       toast.success("Custom agent saved")
     },
@@ -234,7 +233,7 @@ export function AcpAgentManager() {
 
   const deleteCustomHarnessMutation = trpc.agents.deleteCustomHarness.useMutation({
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["acp-runtimes"] })
+      utils.agents.listRuntimes.invalidate()
       setConfigOpenId(null)
       toast.success("Custom agent deleted")
     },
@@ -246,6 +245,8 @@ export function AcpAgentManager() {
   // TODO(Plan 7): Backend installRuntime not yet implemented
   // Placeholder handler for Plan 7
   const handleInstallRuntime = (runtimeId: string, runtimeLabel: string) => {
+    // Plan 7 will use runtimeId to call trpc.agents.installRuntime
+    void runtimeId
     toast.info(`Install flow for ${runtimeLabel} coming in Plan 7`)
   }
 
@@ -304,12 +305,55 @@ export function AcpAgentManager() {
               </div>
             ) : (
               installedRuntimes.map((runtime: AcpRuntimeCatalogEntry) => (
-                <InstalledAgentRow
-                  key={runtime.id}
-                  runtime={runtime}
-                  globalConfig={globalConfig}
-                  onConfigClick={() => setConfigOpenId(runtime.id)}
-                />
+                <div key={runtime.id}>
+                  <InstalledAgentRow
+                    runtime={runtime}
+                    globalConfig={globalConfig}
+                    onConfigClick={() =>
+                      setConfigOpenId(configOpenId === runtime.id ? null : runtime.id)
+                    }
+                  />
+                  {/* Config Panel inline after the clicked row */}
+                  {configOpenId === runtime.id && configOpenRuntime && (
+                    <div className="mt-2 border border-border rounded-lg p-4 space-y-4 bg-accent/20">
+                      <div className="flex items-center justify-between">
+                        <h3 className="text-sm font-semibold">
+                          Configuration: {configOpenRuntime.label}
+                        </h3>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => setConfigOpenId(null)}
+                        >
+                          <XCircle className="h-4 w-4" />
+                        </Button>
+                      </div>
+                      <AgentConfigPanel
+                        runtime={configOpenRuntime}
+                        globalConfig={globalConfig!}
+                        onUpdateConfig={(config) => {
+                          setConfigMutation.mutate({
+                            ...globalConfig!,
+                            ...config,
+                          })
+                        }}
+                        onDelete={
+                          configOpenRuntime.source === "custom"
+                            ? () => {
+                                if (
+                                  confirm(
+                                    `Delete custom agent "${configOpenRuntime.label}"?`
+                                  )
+                                ) {
+                                  deleteCustomHarnessMutation.mutate(configOpenRuntime.id)
+                                }
+                              }
+                            : undefined
+                        }
+                      />
+                    </div>
+                  )}
+                </div>
               ))
             )}
           </div>
@@ -336,47 +380,6 @@ export function AcpAgentManager() {
             )}
           </div>
         </div>
-
-        {/* Config Panel (expanded below when clicked) */}
-        {configOpenRuntime && (
-          <div className="border border-border rounded-lg p-4 space-y-4">
-            <div className="flex items-center justify-between">
-              <h3 className="text-sm font-semibold">
-                Configuration: {configOpenRuntime.label}
-              </h3>
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={() => setConfigOpenId(null)}
-              >
-                <XCircle className="h-4 w-4" />
-              </Button>
-            </div>
-            <AgentConfigPanel
-              runtime={configOpenRuntime}
-              globalConfig={globalConfig!}
-              onUpdateConfig={(config) => {
-                setConfigMutation.mutate({
-                  ...globalConfig!,
-                  ...config,
-                })
-              }}
-              onDelete={
-                configOpenRuntime.source === "custom"
-                  ? () => {
-                      if (
-                        confirm(
-                          `Delete custom agent "${configOpenRuntime.label}"?`
-                        )
-                      ) {
-                        deleteCustomHarnessMutation.mutate(configOpenRuntime.id)
-                      }
-                    }
-                  : undefined
-              }
-            />
-          </div>
-        )}
 
         {/* Custom Harness Form (expanded below when clicked) */}
         {showCustomForm && (
@@ -568,12 +571,17 @@ function CustomHarnessForm({
       return
     }
 
+    // Filter out empty keys from env vars
+    const filteredEnv = Object.fromEntries(
+      Object.entries(envVars).filter(([key]) => key.trim() !== "")
+    )
+
     onSave({
       id,
       label,
       command,
       args: args ? args.split("\n").filter(Boolean) : [],
-      env: envVars,
+      env: filteredEnv,
       install_hint: installHint,
       install_instructions_url: installUrl,
     })
