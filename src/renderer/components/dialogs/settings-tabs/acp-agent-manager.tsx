@@ -7,7 +7,6 @@ import { Input } from "../../ui/input"
 import { Label } from "../../ui/label"
 import { Textarea } from "../../ui/textarea"
 import { Badge } from "../../ui/badge"
-// ScrollArea & Separator replaced with native elements (components not installed)
 import {
   CheckCircle2,
   XCircle,
@@ -16,6 +15,8 @@ import {
   Trash2,
   Settings,
   ExternalLink,
+  Download,
+  Wrench,
 } from "lucide-react"
 import { toast } from "sonner"
 
@@ -51,151 +52,348 @@ interface HarnessDefinition {
   install_hint: string
 }
 
-// Left Panel: Agent List
-function AgentList({
-  runtimes,
-  selectedId,
-  onSelect,
-  onAddCustom,
-}: {
-  runtimes: AcpRuntimeCatalogEntry[]
-  selectedId: string | null
-  onSelect: (id: string) => void
-  onAddCustom: () => void
-}) {
-  const builtinRuntimes = runtimes.filter((r) => r.source === "builtin")
-  const customRuntimes = runtimes.filter((r) => r.source === "custom")
-
-  return (
-    <div className="h-full flex flex-col border-r">
-      <div className="p-4 border-b">
-        <div className="flex items-center justify-between">
-          <h2 className="text-lg font-semibold">ACP Agents</h2>
-          <Button size="sm" onClick={onAddCustom}>
-            <Plus className="h-4 w-4 mr-1" />
-            Custom
-          </Button>
-        </div>
-        <p className="text-sm text-muted-foreground mt-1">
-          {runtimes.length} agents detected
-        </p>
-      </div>
-
-      <div className="flex-1 overflow-auto">
-        <div className="p-2 space-y-4">
-          {/* Builtin Agents */}
-          {builtinRuntimes.length > 0 && (
-            <div>
-              <h3 className="text-xs font-semibold text-muted-foreground px-2 py-1">
-                Builtin Agents
-              </h3>
-              <div className="space-y-1">
-                {builtinRuntimes.map((runtime) => (
-                  <AgentListItem
-                    key={runtime.id}
-                    runtime={runtime}
-                    isSelected={selectedId === runtime.id}
-                    onSelect={() => onSelect(runtime.id)}
-                  />
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Custom Agents */}
-          {customRuntimes.length > 0 && (
-            <div>
-              <h3 className="text-xs font-semibold text-muted-foreground px-2 py-1">
-                Custom Agents
-              </h3>
-              <div className="space-y-1">
-                {customRuntimes.map((runtime) => (
-                  <AgentListItem
-                    key={runtime.id}
-                    runtime={runtime}
-                    isSelected={selectedId === runtime.id}
-                    onSelect={() => onSelect(runtime.id)}
-                  />
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function AgentListItem({
+// Top Section: Installed Agent Row
+function InstalledAgentRow({
   runtime,
-  isSelected,
-  onSelect,
+  globalConfig,
+  onConfigClick,
 }: {
   runtime: AcpRuntimeCatalogEntry
-  isSelected: boolean
-  onSelect: () => void
+  globalConfig: GlobalAgentConfig | undefined
+  onConfigClick: () => void
 }) {
-  const getStatusIcon = () => {
-    if (runtime.availability === "available" && runtime.auth_status !== "logged_out") {
-      return <CheckCircle2 className="h-4 w-4 text-green-500" />
+  const getStatusBadge = () => {
+    if (runtime.availability === "not_installed") {
+      return (
+        <Badge variant="secondary" className="text-xs">
+          Not Installed
+        </Badge>
+      )
     }
-    if (runtime.availability === "auth_required" || runtime.auth_status === "logged_out") {
-      return <AlertCircle className="h-4 w-4 text-yellow-500" />
+    if (runtime.auth_status === "logged_out") {
+      return (
+        <Badge variant="outline" className="text-xs border-yellow-500 text-yellow-600">
+          Auth Required
+        </Badge>
+      )
     }
-    return <XCircle className="h-4 w-4 text-red-500" />
+    if (runtime.availability === "available") {
+      return (
+        <Badge variant="default" className="text-xs">
+          <CheckCircle2 className="h-3 w-3 mr-1" />
+          Ready
+        </Badge>
+      )
+    }
+    return (
+      <Badge variant="secondary" className="text-xs">
+        Unknown
+      </Badge>
+    )
   }
 
-  const getStatusText = () => {
-    if (runtime.availability === "not_installed") return "Not Installed"
-    if (runtime.auth_status === "logged_out") return "Auth Required"
-    if (runtime.availability === "available") return "Ready"
-    return "Unknown"
-  }
+  const hasConfig = globalConfig?.env_vars && Object.keys(globalConfig.env_vars).length > 0
 
   return (
-    <button
-      onClick={onSelect}
-      className={cn(
-        "w-full text-left px-3 py-2 rounded-md transition-colors",
-        "hover:bg-accent",
-        isSelected && "bg-accent"
-      )}
-    >
-      <div className="flex items-start gap-3">
+    <div className="flex items-center justify-between p-3 border border-border rounded-lg hover:bg-accent/50 transition-colors">
+      <div className="flex items-center gap-3 flex-1 min-w-0">
         {runtime.avatar_url ? (
           <img
             src={runtime.avatar_url}
             alt={runtime.label}
-            className="w-8 h-8 rounded-md object-cover"
+            className="w-10 h-10 rounded-md object-cover flex-shrink-0"
           />
         ) : (
-          <div className="w-8 h-8 rounded-md bg-muted flex items-center justify-center">
-            <Settings className="h-4 w-4 text-muted-foreground" />
+          <div className="w-10 h-10 rounded-md bg-muted flex items-center justify-center flex-shrink-0">
+            <Settings className="h-5 w-5 text-muted-foreground" />
           </div>
         )}
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">
-            <span className="font-medium text-sm">{runtime.label}</span>
+            <span className="font-medium text-sm truncate">{runtime.label}</span>
             {runtime.source === "custom" && (
               <Badge variant="secondary" className="text-xs">
                 Custom
               </Badge>
             )}
+            {getStatusBadge()}
           </div>
-          <div className="flex items-center gap-1 mt-0.5">
-            {getStatusIcon()}
-            <span className="text-xs text-muted-foreground">
-              {getStatusText()}
-            </span>
-          </div>
+          {runtime.command && (
+            <code className="text-xs text-muted-foreground mt-0.5 block truncate">
+              {runtime.command}
+            </code>
+          )}
         </div>
       </div>
-    </button>
+      <Button
+        size="sm"
+        variant="outline"
+        onClick={onConfigClick}
+        className="ml-2 flex-shrink-0"
+      >
+        <Wrench className="h-4 w-4 mr-1" />
+        Config
+        {hasConfig && (
+          <span className="ml-1 text-xs text-muted-foreground">•</span>
+        )}
+      </Button>
+    </div>
   )
 }
 
-// Right Panel: Agent Detail
-function AgentDetail({
+// Bottom Section: Available Agent Row
+function AvailableAgentRow({
+  runtime,
+  onInstall,
+}: {
+  runtime: AcpRuntimeCatalogEntry
+  onInstall: () => void
+}) {
+  return (
+    <div className="flex items-center justify-between p-3 border border-dashed border-border rounded-lg hover:bg-accent/30 transition-colors">
+      <div className="flex items-center gap-3 flex-1 min-w-0">
+        {runtime.avatar_url ? (
+          <img
+            src={runtime.avatar_url}
+            alt={runtime.label}
+            className="w-10 h-10 rounded-md object-cover flex-shrink-0 opacity-70"
+          />
+        ) : (
+          <div className="w-10 h-10 rounded-md bg-muted flex items-center justify-center flex-shrink-0 opacity-70">
+            <Settings className="h-5 w-5 text-muted-foreground" />
+          </div>
+        )}
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2">
+            <span className="font-medium text-sm truncate">{runtime.label}</span>
+            <Badge variant="secondary" className="text-xs">
+              Not Installed
+            </Badge>
+          </div>
+          {runtime.install_hint && (
+            <p className="text-xs text-muted-foreground mt-0.5 line-clamp-1">
+              {runtime.install_hint}
+            </p>
+          )}
+        </div>
+      </div>
+      <div className="flex items-center gap-2 flex-shrink-0">
+        {runtime.install_instructions_url && (
+          <a
+            href={runtime.install_instructions_url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+          >
+            Docs
+            <ExternalLink className="h-3 w-3" />
+          </a>
+        )}
+        <Button size="sm" variant="outline" onClick={onInstall}>
+          <Download className="h-4 w-4 mr-1" />
+          Install
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+// Main Component: Two-section layout
+export function AcpAgentManager() {
+  const [configOpenId, setConfigOpenId] = useState<string | null>(null)
+  const [showCustomForm, setShowCustomForm] = useState(false)
+  const queryClient = useQueryClient()
+
+  // Fetch runtimes
+  const { data: runtimes, isLoading: isLoadingRuntimes } = trpc.agents.listRuntimes.useQuery()
+
+  // Fetch global config (for env vars, provider, model per runtime)
+  const { data: globalConfig, isLoading: isLoadingConfig } = trpc.agents.getGlobalConfig.useQuery()
+
+  // Mutations
+  const setConfigMutation = trpc.agents.setGlobalConfig.useMutation({
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["global-agent-config"] })
+      toast.success("Configuration saved")
+    },
+    onError: (error) => {
+      toast.error(`Failed to save configuration: ${error.message}`)
+    },
+  })
+
+  const saveCustomHarnessMutation = trpc.agents.saveCustomHarness.useMutation({
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["acp-runtimes"] })
+      setShowCustomForm(false)
+      toast.success("Custom agent saved")
+    },
+    onError: (error) => {
+      toast.error(`Failed to save custom agent: ${error.message}`)
+    },
+  })
+
+  const deleteCustomHarnessMutation = trpc.agents.deleteCustomHarness.useMutation({
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["acp-runtimes"] })
+      setConfigOpenId(null)
+      toast.success("Custom agent deleted")
+    },
+    onError: (error) => {
+      toast.error(`Failed to delete custom agent: ${error.message}`)
+    },
+  })
+
+  // TODO(Plan 7): Backend installRuntime not yet implemented
+  // Placeholder handler for Plan 7
+  const handleInstallRuntime = (runtimeId: string, runtimeLabel: string) => {
+    toast.info(`Install flow for ${runtimeLabel} coming in Plan 7`)
+  }
+
+  // Split runtimes into installed vs available
+  const installedRuntimes = runtimes?.filter(
+    (r: AcpRuntimeCatalogEntry) => r.availability !== "not_installed"
+  ) ?? []
+  const availableRuntimes = runtimes?.filter(
+    (r: AcpRuntimeCatalogEntry) => r.availability === "not_installed"
+  ) ?? []
+
+  const configOpenRuntime = runtimes?.find((r: AcpRuntimeCatalogEntry) => r.id === configOpenId)
+
+  if (isLoadingRuntimes || isLoadingConfig) {
+    return (
+      <div className="h-full flex items-center justify-center">
+        <div className="text-muted-foreground">Loading...</div>
+      </div>
+    )
+  }
+
+  if (!runtimes || !globalConfig) {
+    return (
+      <div className="h-full flex items-center justify-center">
+        <div className="text-muted-foreground">Failed to load agents</div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="h-full overflow-y-auto">
+      <div className="max-w-3xl mx-auto p-6 space-y-6">
+        {/* Header */}
+        <div className="flex items-center justify-between">
+          <div>
+            <h2 className="text-lg font-semibold">My Agents</h2>
+            <p className="text-sm text-muted-foreground mt-0.5">
+              {installedRuntimes.length} installed, {availableRuntimes.length} available
+            </p>
+          </div>
+          <Button size="sm" onClick={() => setShowCustomForm(true)}>
+            <Plus className="h-4 w-4 mr-1" />
+            Add Custom
+          </Button>
+        </div>
+
+        {/* Section 1: Installed Agents */}
+        <div className="space-y-2">
+          <h3 className="text-sm font-semibold text-muted-foreground">
+            Installed Agents
+          </h3>
+          <div className="space-y-2">
+            {installedRuntimes.length === 0 ? (
+              <div className="text-sm text-muted-foreground text-center py-6 border border-dashed border-border rounded-lg">
+                No agents installed yet. Install one from the list below.
+              </div>
+            ) : (
+              installedRuntimes.map((runtime: AcpRuntimeCatalogEntry) => (
+                <InstalledAgentRow
+                  key={runtime.id}
+                  runtime={runtime}
+                  globalConfig={globalConfig}
+                  onConfigClick={() => setConfigOpenId(runtime.id)}
+                />
+              ))
+            )}
+          </div>
+        </div>
+
+        {/* Section 2: Available Agents */}
+        <div className="space-y-2">
+          <h3 className="text-sm font-semibold text-muted-foreground">
+            Available Agents
+          </h3>
+          <div className="space-y-2">
+            {availableRuntimes.length === 0 ? (
+              <div className="text-sm text-muted-foreground text-center py-6 border border-dashed border-border rounded-lg">
+                All agents are installed!
+              </div>
+            ) : (
+              availableRuntimes.map((runtime: AcpRuntimeCatalogEntry) => (
+                <AvailableAgentRow
+                  key={runtime.id}
+                  runtime={runtime}
+                  onInstall={() => handleInstallRuntime(runtime.id, runtime.label)}
+                />
+              ))
+            )}
+          </div>
+        </div>
+
+        {/* Config Panel (expanded below when clicked) */}
+        {configOpenRuntime && (
+          <div className="border border-border rounded-lg p-4 space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-semibold">
+                Configuration: {configOpenRuntime.label}
+              </h3>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => setConfigOpenId(null)}
+              >
+                <XCircle className="h-4 w-4" />
+              </Button>
+            </div>
+            <AgentConfigPanel
+              runtime={configOpenRuntime}
+              globalConfig={globalConfig!}
+              onUpdateConfig={(config) => {
+                setConfigMutation.mutate({
+                  ...globalConfig!,
+                  ...config,
+                })
+              }}
+              onDelete={
+                configOpenRuntime.source === "custom"
+                  ? () => {
+                      if (
+                        confirm(
+                          `Delete custom agent "${configOpenRuntime.label}"?`
+                        )
+                      ) {
+                        deleteCustomHarnessMutation.mutate(configOpenRuntime.id)
+                      }
+                    }
+                  : undefined
+              }
+            />
+          </div>
+        )}
+
+        {/* Custom Harness Form (expanded below when clicked) */}
+        {showCustomForm && (
+          <div className="border border-border rounded-lg p-4">
+            <CustomHarnessForm
+              onSave={(harness) => saveCustomHarnessMutation.mutate(harness)}
+              onCancel={() => setShowCustomForm(false)}
+            />
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// Config Panel: shown when "Config" is clicked on an installed agent
+function AgentConfigPanel({
   runtime,
   globalConfig,
   onUpdateConfig,
@@ -237,295 +435,112 @@ function AgentDetail({
   }
 
   return (
-    <div className="h-full overflow-y-auto">
-      <div className="max-w-2xl mx-auto p-6 space-y-6">
-        {/* Header */}
-        <div className="flex items-start gap-4">
-          {runtime.avatar_url ? (
-            <img
-              src={runtime.avatar_url}
-              alt={runtime.label}
-              className="w-16 h-16 rounded-lg object-cover"
-            />
-          ) : (
-            <div className="w-16 h-16 rounded-lg bg-muted flex items-center justify-center">
-              <Settings className="h-8 w-8 text-muted-foreground" />
-            </div>
-          )}
-          <div className="flex-1">
-            <h2 className="text-2xl font-bold">{runtime.label}</h2>
-            <div className="flex items-center gap-2 mt-2">
-              <Badge
-                variant={
-                  runtime.availability === "available" ? "default" : "secondary"
-                }
-              >
-                {runtime.availability}
-              </Badge>
-              {runtime.command && (
-                <code className="text-xs bg-muted px-2 py-1 rounded">
-                  {runtime.command}
-                </code>
-              )}
-            </div>
-          </div>
-          {onDelete && (
-            <Button variant="destructive" size="sm" onClick={onDelete}>
-              <Trash2 className="h-4 w-4 mr-1" />
-              Delete
-            </Button>
-          )}
-        </div>
-
-        <hr className="my-2 border-border" />
-
-        {/* Status Info */}
-        <div className="space-y-3">
-          <h3 className="text-sm font-semibold">Status</h3>
-          <div className="grid gap-3">
-            {runtime.binary_path && (
-              <div>
-                <Label className="text-xs text-muted-foreground">
-                  Binary Path
-                </Label>
-                <code className="text-xs bg-muted px-2 py-1 rounded block mt-1">
-                  {runtime.binary_path}
-                </code>
-              </div>
-            )}
-            {runtime.auth_status === "logged_out" && runtime.login_hint && (
-              <div className="p-3 bg-yellow-50 dark:bg-yellow-950/20 border border-yellow-200 dark:border-yellow-900 rounded-md">
-                <p className="text-sm text-yellow-800 dark:text-yellow-200">
-                  {runtime.login_hint}
-                </p>
-              </div>
-            )}
-            {runtime.availability === "not_installed" && (
-              <div className="p-3 bg-blue-50 dark:bg-blue-950/20 border border-blue-200 dark:border-blue-900 rounded-md">
-                <p className="text-sm text-blue-800 dark:text-blue-200 mb-2">
-                  {runtime.install_hint}
-                </p>
-                <a
-                  href={runtime.install_instructions_url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="inline-flex items-center gap-1 text-sm text-blue-600 dark:text-blue-400 hover:underline"
-                >
-                  Installation Instructions
-                  <ExternalLink className="h-3 w-3" />
-                </a>
-              </div>
-            )}
-          </div>
-        </div>
-
-        <hr className="my-2 border-border" />
-
-        {/* Global Configuration */}
-        <div className="space-y-4">
-          <h3 className="text-sm font-semibold">Global Configuration</h3>
-
-          <div className="space-y-3">
-            <div>
-              <Label>Provider</Label>
-              <Input
-                value={provider}
-                onChange={(e) => setProvider(e.target.value)}
-                placeholder="e.g., anthropic, openai"
-                className="mt-1"
-              />
-            </div>
-
-            <div>
-              <Label>Model</Label>
-              <Input
-                value={model}
-                onChange={(e) => setModel(e.target.value)}
-                placeholder="e.g., claude-3-opus, gpt-4"
-                className="mt-1"
-              />
-            </div>
-          </div>
-        </div>
-
-        <hr className="my-2 border-border" />
-
-        {/* Environment Variables */}
-        <div className="space-y-4">
-          <div className="flex items-center justify-between">
-            <h3 className="text-sm font-semibold">Environment Variables</h3>
-            <Button size="sm" variant="outline" onClick={handleAddEnvVar}>
-              <Plus className="h-3 w-3 mr-1" />
-              Add Variable
-            </Button>
-          </div>
-
-          <div className="space-y-2">
-            {Object.entries(envVars).map(([key, value]) => (
-              <div key={key} className="flex gap-2">
-                <Input
-                  value={key}
-                  onChange={(e) => {
-                    const newKey = e.target.value
-                    const newVars = { ...envVars }
-                    delete newVars[key]
-                    newVars[newKey] = value
-                    setEnvVars(newVars)
-                  }}
-                  placeholder="VAR_NAME"
-                  className="font-mono text-sm"
-                />
-                <Input
-                  value={value}
-                  onChange={(e) => handleEnvVarChange(key, e.target.value)}
-                  placeholder="value"
-                  className="font-mono text-sm flex-1"
-                />
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={() => handleRemoveEnvVar(key)}
-                >
-                  <Trash2 className="h-4 w-4" />
-                </Button>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        <hr className="my-2 border-border" />
-
-        {/* Save Button */}
-        <div className="flex justify-end">
-          <Button onClick={handleSaveConfig}>Save Configuration</Button>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-// Main Component: Two-column layout
-export function AcpAgentManager() {
-  const [selectedId, setSelectedId] = useState<string | null>(null)
-  const [showCustomForm, setShowCustomForm] = useState(false)
-  const queryClient = useQueryClient()
-
-  // Fetch runtimes
-  const { data: runtimes, isLoading: isLoadingRuntimes } = useQuery({
-    queryKey: ["acp-runtimes"],
-    queryFn: () => trpc.agents.listRuntimes.query(),
-  })
-
-  // Fetch global config
-  const { data: globalConfig, isLoading: isLoadingConfig } = useQuery({
-    queryKey: ["global-agent-config"],
-    queryFn: () => trpc.agents.getGlobalConfig.query(),
-  })
-
-  // Mutations
-  const setConfigMutation = useMutation({
-    mutationFn: (config: GlobalAgentConfig) =>
-      trpc.agents.setGlobalConfig.mutate(config),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["global-agent-config"] })
-      toast.success("Configuration saved")
-    },
-    onError: (error) => {
-      toast.error(`Failed to save configuration: ${error.message}`)
-    },
-  })
-
-  const saveCustomHarnessMutation = useMutation({
-    mutationFn: (harness: HarnessDefinition) =>
-      trpc.agents.saveCustomHarness.mutate(harness),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["acp-runtimes"] })
-      setShowCustomForm(false)
-      toast.success("Custom agent saved")
-    },
-    onError: (error) => {
-      toast.error(`Failed to save custom agent: ${error.message}`)
-    },
-  })
-
-  const deleteCustomHarnessMutation = useMutation({
-    mutationFn: (id: string) => trpc.agents.deleteCustomHarness.mutate(id),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["acp-runtimes"] })
-      setSelectedId(null)
-      toast.success("Custom agent deleted")
-    },
-    onError: (error) => {
-      toast.error(`Failed to delete custom agent: ${error.message}`)
-    },
-  })
-
-  const selectedRuntime = runtimes?.find((r) => r.id === selectedId)
-
-  const handleUpdateConfig = (config: Partial<GlobalAgentConfig>) => {
-    if (!globalConfig) return
-    setConfigMutation.mutate({
-      ...globalConfig,
-      ...config,
-    })
-  }
-
-  const handleDeleteCustom = () => {
-    if (!selectedRuntime || selectedRuntime.source !== "custom") return
-    if (confirm(`Delete custom agent "${selectedRuntime.label}"?`)) {
-      deleteCustomHarnessMutation.mutate(selectedRuntime.id)
-    }
-  }
-
-  if (isLoadingRuntimes || isLoadingConfig) {
-    return (
-      <div className="h-full flex items-center justify-center">
-        <div className="text-muted-foreground">Loading...</div>
-      </div>
-    )
-  }
-
-  if (!runtimes || !globalConfig) {
-    return (
-      <div className="h-full flex items-center justify-center">
-        <div className="text-muted-foreground">Failed to load agents</div>
-      </div>
-    )
-  }
-
-  return (
-    <div className="h-full flex">
-      {/* Left Panel: Agent List */}
-      <div className="w-80 flex-shrink-0">
-        <AgentList
-          runtimes={runtimes}
-          selectedId={selectedId}
-          onSelect={setSelectedId}
-          onAddCustom={() => setShowCustomForm(true)}
-        />
-      </div>
-
-      {/* Right Panel: Detail or Custom Form */}
-      <div className="flex-1">
-        {showCustomForm ? (
-          <CustomHarnessForm
-            onSave={(harness) => saveCustomHarnessMutation.mutate(harness)}
-            onCancel={() => setShowCustomForm(false)}
-          />
-        ) : selectedRuntime ? (
-          <AgentDetail
-            runtime={selectedRuntime}
-            globalConfig={globalConfig}
-            onUpdateConfig={handleUpdateConfig}
-            onDelete={
-              selectedRuntime.source === "custom" ? handleDeleteCustom : undefined
+    <div className="space-y-4">
+      {/* Status */}
+      <div className="space-y-2">
+        <Label className="text-xs font-medium">Status</Label>
+        <div className="flex items-center gap-2 text-sm">
+          <Badge
+            variant={
+              runtime.availability === "available" ? "default" : "secondary"
             }
-          />
-        ) : (
-          <div className="h-full flex items-center justify-center text-muted-foreground">
-            Select an agent to view details
+          >
+            {runtime.availability}
+          </Badge>
+          {runtime.command && (
+            <code className="text-xs bg-muted px-2 py-1 rounded">
+              {runtime.command}
+            </code>
+          )}
+        </div>
+        {runtime.binary_path && (
+          <div>
+            <Label className="text-xs text-muted-foreground">Binary Path</Label>
+            <code className="text-xs bg-muted px-2 py-1 rounded block mt-1">
+              {runtime.binary_path}
+            </code>
           </div>
         )}
+        {runtime.auth_status === "logged_out" && runtime.login_hint && (
+          <div className="p-3 bg-yellow-50 dark:bg-yellow-950/20 border border-yellow-200 dark:border-yellow-900 rounded-md">
+            <p className="text-sm text-yellow-800 dark:text-yellow-200">
+              {runtime.login_hint}
+            </p>
+          </div>
+        )}
+      </div>
+
+      {/* Provider & Model */}
+      <div className="space-y-2">
+        <Label className="text-xs font-medium">Default Provider & Model</Label>
+        <div className="grid grid-cols-2 gap-2">
+          <Input
+            value={provider}
+            onChange={(e) => setProvider(e.target.value)}
+            placeholder="Provider (e.g., anthropic)"
+            className="text-sm"
+          />
+          <Input
+            value={model}
+            onChange={(e) => setModel(e.target.value)}
+            placeholder="Model (e.g., claude-3-opus)"
+            className="text-sm"
+          />
+        </div>
+      </div>
+
+      {/* Environment Variables */}
+      <div className="space-y-2">
+        <div className="flex items-center justify-between">
+          <Label className="text-xs font-medium">Environment Variables</Label>
+          <Button size="sm" variant="outline" onClick={handleAddEnvVar}>
+            <Plus className="h-3 w-3 mr-1" />
+            Add
+          </Button>
+        </div>
+        <div className="space-y-2">
+          {Object.entries(envVars).map(([key, value]) => (
+            <div key={key} className="flex gap-2">
+              <Input
+                value={key}
+                onChange={(e) => {
+                  const newKey = e.target.value
+                  const newVars = { ...envVars }
+                  delete newVars[key]
+                  newVars[newKey] = value
+                  setEnvVars(newVars)
+                }}
+                placeholder="VAR_NAME"
+                className="font-mono text-sm"
+              />
+              <Input
+                value={value}
+                onChange={(e) => handleEnvVarChange(key, e.target.value)}
+                placeholder="value"
+                className="font-mono text-sm flex-1"
+              />
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => handleRemoveEnvVar(key)}
+              >
+                <Trash2 className="h-4 w-4" />
+              </Button>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Actions */}
+      <div className="flex justify-between pt-2 border-t">
+        {onDelete && (
+          <Button variant="destructive" size="sm" onClick={onDelete}>
+            <Trash2 className="h-4 w-4 mr-1" />
+            Delete Agent
+          </Button>
+        )}
+        <div className="flex-1" />
+        <Button onClick={handleSaveConfig}>Save Configuration</Button>
       </div>
     </div>
   )
@@ -565,146 +580,138 @@ function CustomHarnessForm({
   }
 
   return (
-    <div className="h-full overflow-y-auto">
-      <div className="max-w-2xl mx-auto p-6 space-y-6">
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-2xl font-bold">Add Custom Agent</h2>
-          <p className="text-muted-foreground mt-1">
+          <h3 className="text-sm font-semibold">Add Custom Agent</h3>
+          <p className="text-xs text-muted-foreground mt-0.5">
             Define a custom ACP agent harness
           </p>
         </div>
+        <Button variant="ghost" size="sm" onClick={onCancel}>
+          <XCircle className="h-4 w-4" />
+        </Button>
+      </div>
 
-        <hr className="my-2 border-border" />
-
-        <div className="space-y-4">
-          <div>
-            <Label>ID *</Label>
-            <Input
-              value={id}
-              onChange={(e) => setId(e.target.value)}
-              placeholder="my-custom-agent"
-              className="mt-1 font-mono"
-            />
-            <p className="text-xs text-muted-foreground mt-1">
-              Unique identifier (lowercase, hyphens allowed)
-            </p>
-          </div>
-
-          <div>
-            <Label>Label *</Label>
-            <Input
-              value={label}
-              onChange={(e) => setLabel(e.target.value)}
-              placeholder="My Custom Agent"
-              className="mt-1"
-            />
-          </div>
-
-          <div>
-            <Label>Command *</Label>
-            <Input
-              value={command}
-              onChange={(e) => setCommand(e.target.value)}
-              placeholder="my-agent-acp"
-              className="mt-1 font-mono"
-            />
-            <p className="text-xs text-muted-foreground mt-1">
-              Command to launch the agent
-            </p>
-          </div>
-
-          <div>
-            <Label>Arguments</Label>
-            <Textarea
-              value={args}
-              onChange={(e) => setArgs(e.target.value)}
-              placeholder="--flag&#10;--option value"
-              className="mt-1 font-mono text-sm"
-              rows={3}
-            />
-            <p className="text-xs text-muted-foreground mt-1">
-              One argument per line
-            </p>
-          </div>
-
-          <div>
-            <Label>Install Hint</Label>
-            <Input
-              value={installHint}
-              onChange={(e) => setInstallHint(e.target.value)}
-              placeholder="Install from https://..."
-              className="mt-1"
-            />
-          </div>
-
-          <div>
-            <Label>Install Instructions URL</Label>
-            <Input
-              value={installUrl}
-              onChange={(e) => setInstallUrl(e.target.value)}
-              placeholder="https://..."
-              className="mt-1"
-            />
-          </div>
-
-          <div>
-            <Label>Environment Variables</Label>
-            <div className="space-y-2 mt-1">
-              {Object.entries(envVars).map(([key, value]) => (
-                <div key={key} className="flex gap-2">
-                  <Input
-                    value={key}
-                    onChange={(e) => {
-                      const newKey = e.target.value
-                      const newVars = { ...envVars }
-                      delete newVars[key]
-                      newVars[newKey] = value
-                      setEnvVars(newVars)
-                    }}
-                    placeholder="VAR_NAME"
-                    className="font-mono text-sm"
-                  />
-                  <Input
-                    value={value}
-                    onChange={(e) => {
-                      setEnvVars({ ...envVars, [key]: e.target.value })
-                    }}
-                    placeholder="value"
-                    className="font-mono text-sm flex-1"
-                  />
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={() => {
-                      const newVars = { ...envVars }
-                      delete newVars[key]
-                      setEnvVars(newVars)
-                    }}
-                  >
-                    <Trash2 className="h-4 w-4" />
-                  </Button>
-                </div>
-              ))}
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => setEnvVars({ ...envVars, "": "" })}
-              >
-                <Plus className="h-3 w-3 mr-1" />
-                Add Variable
-              </Button>
-            </div>
-          </div>
+      <div className="space-y-3">
+        <div>
+          <Label className="text-xs">ID *</Label>
+          <Input
+            value={id}
+            onChange={(e) => setId(e.target.value)}
+            placeholder="my-custom-agent"
+            className="mt-1 font-mono text-sm"
+          />
         </div>
 
-        <hr className="my-2 border-border" />
-
-        <div className="flex justify-end gap-2">
-          <Button variant="outline" onClick={onCancel}>
-            Cancel
-          </Button>
-          <Button onClick={handleSubmit}>Save Custom Agent</Button>
+        <div>
+          <Label className="text-xs">Label *</Label>
+          <Input
+            value={label}
+            onChange={(e) => setLabel(e.target.value)}
+            placeholder="My Custom Agent"
+            className="mt-1 text-sm"
+          />
         </div>
+
+        <div>
+          <Label className="text-xs">Command *</Label>
+          <Input
+            value={command}
+            onChange={(e) => setCommand(e.target.value)}
+            placeholder="my-agent-acp"
+            className="mt-1 font-mono text-sm"
+          />
+        </div>
+
+        <div>
+          <Label className="text-xs">Arguments (one per line)</Label>
+          <Textarea
+            value={args}
+            onChange={(e) => setArgs(e.target.value)}
+            placeholder="--flag&#10;--option value"
+            className="mt-1 font-mono text-sm"
+            rows={3}
+          />
+        </div>
+
+        <div>
+          <Label className="text-xs">Install Hint</Label>
+          <Input
+            value={installHint}
+            onChange={(e) => setInstallHint(e.target.value)}
+            placeholder="Install from https://..."
+            className="mt-1 text-sm"
+          />
+        </div>
+
+        <div>
+          <Label className="text-xs">Install Instructions URL</Label>
+          <Input
+            value={installUrl}
+            onChange={(e) => setInstallUrl(e.target.value)}
+            placeholder="https://..."
+            className="mt-1 text-sm"
+          />
+        </div>
+
+        <div>
+          <div className="flex items-center justify-between">
+            <Label className="text-xs">Environment Variables</Label>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => setEnvVars({ ...envVars, "": "" })}
+            >
+              <Plus className="h-3 w-3 mr-1" />
+              Add
+            </Button>
+          </div>
+          <div className="space-y-2 mt-1">
+            {Object.entries(envVars).map(([key, value]) => (
+              <div key={key} className="flex gap-2">
+                <Input
+                  value={key}
+                  onChange={(e) => {
+                    const newKey = e.target.value
+                    const newVars = { ...envVars }
+                    delete newVars[key]
+                    newVars[newKey] = value
+                    setEnvVars(newVars)
+                  }}
+                  placeholder="VAR_NAME"
+                  className="font-mono text-sm"
+                />
+                <Input
+                  value={value}
+                  onChange={(e) => {
+                    setEnvVars({ ...envVars, [key]: e.target.value })
+                  }}
+                  placeholder="value"
+                  className="font-mono text-sm flex-1"
+                />
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => {
+                    const newVars = { ...envVars }
+                    delete newVars[key]
+                    setEnvVars(newVars)
+                  }}
+                >
+                  <Trash2 className="h-4 w-4" />
+                </Button>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div className="flex justify-end gap-2 pt-2 border-t">
+        <Button variant="outline" onClick={onCancel}>
+          Cancel
+        </Button>
+        <Button onClick={handleSubmit}>Save Custom Agent</Button>
       </div>
     </div>
   )
