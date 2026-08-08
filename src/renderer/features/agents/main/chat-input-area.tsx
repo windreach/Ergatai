@@ -66,9 +66,11 @@ import {
   type AgentMode,
   type SubChatFileChange,
 } from "../atoms"
+import { subChatRuntimeIdAtomFamily } from "../atoms/runtime"
+import { RUNTIME_TO_PROVIDER } from "../lib/runtime-types"
 import { useAgentSubChatStore } from "../stores/sub-chat-store"
 import { AgentsSlashCommand, type SlashCommandOption } from "../commands"
-import { AgentModelSelector } from "../components/agent-model-selector"
+import { AgentSelector } from "../components/agent-selector"
 import { AgentSendButton } from "../components/agent-send-button"
 import type { UploadedFile, UploadedImage } from "../hooks/use-agents-file-upload"
 import {
@@ -449,8 +451,7 @@ export const ChatInputArea = memo(function ChatInputArea({
     }
   }, [modeDropdownOpen])
 
-  // Model dropdown state
-  const [isModelDropdownOpen, setIsModelDropdownOpen] = useState(false)
+  // Model dropdown state - removed, AgentSelector manages its own open state
   const subChatModelIdAtom = useMemo(
     () => subChatModelIdAtomFamily(subChatId),
     [subChatId],
@@ -475,6 +476,11 @@ export const ChatInputArea = memo(function ChatInputArea({
   const setLastSelectedModelId = useSetAtom(lastSelectedModelIdAtom)
   const setLastSelectedCodexModelId = useSetAtom(lastSelectedCodexModelIdAtom)
   const setLastSelectedCodexThinking = useSetAtom(lastSelectedCodexThinkingAtom)
+
+  // Runtime atom for this sub-chat (1:1 binding)
+  const setSubChatRuntimeId = useSetAtom(
+    useMemo(() => subChatRuntimeIdAtomFamily(subChatId), [subChatId])
+  )
   const [selectedOllamaModel, setSelectedOllamaModel] = useAtom(selectedOllamaModelAtom)
   const availableModels = useAvailableModels()
   const [selectedModel, setSelectedModel] = useState(
@@ -598,33 +604,7 @@ export const ChatInputArea = memo(function ChatInputArea({
   // Extended thinking (reasoning) toggle
   const [thinkingEnabled, setThinkingEnabled] = useAtom(extendedThinkingEnabledAtom)
 
-  const selectedModelLabel = useMemo(() => {
-    if (provider === "codex") {
-      return selectedCodexModel.name
-    }
-
-    if (availableModels.isOffline && availableModels.hasOllama) {
-      return currentOllamaModel || "Ollama"
-    }
-
-    if (hasCustomClaudeConfig) {
-      return "Custom Model"
-    }
-
-    if (!selectedModel) {
-      return "Select model"
-    }
-
-    return `${selectedModel.name} ${selectedModel.version}`
-  }, [
-    provider,
-    selectedCodexModel.name,
-    availableModels.isOffline,
-    availableModels.hasOllama,
-    currentOllamaModel,
-    hasCustomClaudeConfig,
-    selectedModel,
-  ])
+  // selectedModelLabel removed - model selection moved to /model command (Plan 9)
   const canSwitchProvider =
     messageTokenData.messageCount === 0 && !isStreaming && !sandboxId
 
@@ -738,25 +718,7 @@ export const ChatInputArea = memo(function ChatInputArea({
   currentSubChatIdRef.current = subChatId
   currentChatIdRef.current = parentChatId
 
-  // Keyboard shortcut: Cmd+/ to open model selector
-  useEffect(() => {
-    if (!isActive) return
-
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.metaKey && e.key === "/") {
-        e.preventDefault()
-        e.stopPropagation()
-        const shouldBlockForCustomClaude =
-          provider === "claude-code" && hasCustomClaudeConfig
-        if (!shouldBlockForCustomClaude) {
-          setIsModelDropdownOpen(true)
-        }
-      }
-    }
-
-    window.addEventListener("keydown", handleKeyDown, true)
-    return () => window.removeEventListener("keydown", handleKeyDown, true)
-  }, [hasCustomClaudeConfig, provider, isActive])
+  // Cmd+/ shortcut removed - model selection moved to /model command (Plan 9)
 
   // Voice input handlers
   const handleVoiceMouseDown = useCallback(async () => {
@@ -1544,70 +1506,23 @@ export const ChatInputArea = memo(function ChatInputArea({
                   </DropdownMenu>
 
                   <div className="group/model-controls flex items-center gap-0.5">
-                    <AgentModelSelector
-                      open={isModelDropdownOpen}
-                      onOpenChange={setIsModelDropdownOpen}
-                      selectedAgentId={provider}
-                      onSelectedAgentIdChange={(nextProvider) => {
-                        if (!canSwitchProvider) return
-                        if (nextProvider === provider) return
-                        onProviderChange?.(nextProvider)
-                      }}
-                      allowProviderSwitch={canSwitchProvider}
-                      onContinueWithProvider={!canSwitchProvider ? onContinueWithProvider : undefined}
-                      selectedModelLabel={selectedModelLabel}
-                      onOpenModelsSettings={() => {
-                        setSettingsTab("models")
-                        setSettingsOpen(true)
-                      }}
-                      claude={{
-                        models: availableModels.models.filter((m) => !hiddenModels.includes(m.id)),
-                        selectedModelId: selectedModel?.id,
-                        onSelectModel: (modelId) => {
-                          const model =
-                            availableModels.models.find((item) => item.id === modelId) ||
-                            availableModels.models[0]
-                          if (!model) return
-                          setSelectedModel(model)
-                          setSelectedSubChatModelId(model.id)
-                          setLastSelectedModelId(model.id)
-                        },
-                        hasCustomModelConfig: hasCustomClaudeConfig,
-                        isOffline: availableModels.isOffline && availableModels.hasOllama,
-                        ollamaModels: availableModels.ollamaModels,
-                        selectedOllamaModel: currentOllamaModel,
-                        recommendedOllamaModel: availableModels.recommendedModel,
-                        onSelectOllamaModel: setSelectedOllamaModel,
-                        isConnected: isClaudeConnected,
-                        thinkingEnabled,
-                        onThinkingChange: setThinkingEnabled,
-                      }}
-                      codex={{
-                        models: codexUiModels,
-                        selectedModelId: selectedCodexModel.id,
-                        onSelectModel: (modelId) => {
-                          const model = codexUiModels.find((item) => item.id === modelId)
-                          if (!model) return
-                          const nextThinking = model.thinkings.includes(
-                            selectedSubChatCodexThinking as CodexThinkingLevel,
-                          )
-                            ? (selectedSubChatCodexThinking as CodexThinkingLevel)
-                            : (model.thinkings.includes("high")
-                              ? "high"
-                              : model.thinkings[0]!)
+                    <AgentSelector
+                      subChatId={subChatId}
+                      onRuntimeSelect={(runtimeId) => {
+                        // Update runtime atom for this sub-chat
+                        setSubChatRuntimeId(runtimeId)
 
-                          setSelectedSubChatCodexModelId(model.id)
-                          setSelectedSubChatCodexThinking(nextThinking)
-                          setLastSelectedCodexModelId(model.id)
-                          setLastSelectedCodexThinking(nextThinking)
-                        },
-                        selectedThinking: selectedCodexThinking,
-                        onSelectThinking: (thinking) => {
-                          setSelectedSubChatCodexThinking(thinking)
-                          setLastSelectedCodexThinking(thinking)
-                        },
-                        isConnected: codexOnboardingCompleted,
+                        // Convert runtime ID to provider ID for backward compatibility
+                        const providerId = RUNTIME_TO_PROVIDER[runtimeId] ?? runtimeId
+
+                        // Call appropriate callback based on message count
+                        if (canSwitchProvider) {
+                          onProviderChange?.(providerId as "claude-code" | "codex")
+                        } else {
+                          onContinueWithProvider?.(providerId as "claude-code" | "codex")
+                        }
                       }}
+                      allowSwitch={canSwitchProvider}
                     />
                   </div>
 
