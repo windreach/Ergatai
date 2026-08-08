@@ -25,7 +25,7 @@ import {
   CommandItem,
 } from "../../../components/ui/command"
 import { cn } from "../../../lib/utils"
-import { availableRuntimesAtom } from "../atoms/runtime"
+import { availableRuntimesAtom, subChatRuntimeIdAtomFamily } from "../atoms/runtime"
 import type { AcpRuntime } from "../lib/runtime-types"
 
 export interface AgentSelectorProps {
@@ -63,6 +63,10 @@ export function AgentSelector({
   allowSwitch = true,
 }: AgentSelectorProps) {
   const runtimes = useAtomValue(availableRuntimesAtom)
+  // 如果 subChatId 存在，读取该 sub-chat 绑定的 runtime
+  const boundRuntimeId = useAtomValue(
+    subChatRuntimeIdAtomFamily(subChatId ?? "")
+  )
   const [open, setOpen] = useState(false)
 
   // 只显示可用的 runtime
@@ -71,11 +75,16 @@ export function AgentSelector({
     [runtimes]
   )
 
-  // 当前选中的 runtime（从默认值或列表第一个）
+  // 当前选中的 runtime：
+  // 1. 如果有 subChatId 且已绑定，使用绑定的 runtime
+  // 2. 否则使用 defaultRuntimeId（新 Chat 场景）
+  // 3. 最后 fallback 到列表第一个
   const currentRuntime = useMemo(() => {
-    const targetId = defaultRuntimeId ?? availableRuntimes[0]?.id
+    const targetId = subChatId && boundRuntimeId
+      ? boundRuntimeId
+      : (defaultRuntimeId ?? availableRuntimes[0]?.id)
     return availableRuntimes.find((r) => r.id === targetId) ?? availableRuntimes[0] ?? null
-  }, [defaultRuntimeId, availableRuntimes])
+  }, [subChatId, boundRuntimeId, defaultRuntimeId, availableRuntimes])
 
   const handleSelect = (runtimeId: string) => {
     if (!allowSwitch && runtimeId !== currentRuntime?.id) {
