@@ -169,7 +169,6 @@ function useAvailableModels() {
 // TODO(Plan 9): Remove when /model command handles model selection
 const agents = [
   { id: "claude-code", name: "Claude Code", hasModels: true },
-  { id: "cursor", name: "Cursor CLI", disabled: true },
   { id: "codex", name: "OpenAI Codex" },
 ]
 
@@ -300,10 +299,7 @@ export function NewChatForm({
     if (!match) return null
     return `${match[1]}/${match[2].replace(/\.git$/, "")}`
   }
-  const enabledAgents = useMemo(
-    () => agents.filter((agent) => !agent.disabled),
-    [],
-  )
+  const enabledAgents = agents // All agents are enabled (disabled agents removed)
   const fallbackAgent = enabledAgents[0] ?? agents[0]!
   const [selectedAgent, setSelectedAgent] = useState(
     () =>
@@ -518,6 +514,20 @@ export function NewChatForm({
     }
   }, [modeDropdownOpen])
   // isModelDropdownOpen removed - AgentSelector manages its own open state
+
+  // Runtime selection handler (extracted from JSX for clarity)
+  const handleRuntimeSelect = useCallback((runtimeId: string) => {
+    setSelectedRuntimeId(runtimeId)
+    // Map runtime ID to old provider ID for backward compatibility
+    const providerId = runtimeId === "claude" ? "claude-code" : runtimeId
+    setLastSelectedAgentId(providerId)
+    // Update selectedAgent state (used by model selection logic)
+    if (providerId === "claude-code") {
+      setSelectedAgent(claudeAgent)
+    } else if (providerId === "codex") {
+      setSelectedAgent(enabledAgents.find((agent) => agent.id === "codex") || fallbackAgent)
+    }
+  }, [claudeAgent, enabledAgents, fallbackAgent, setSelectedRuntimeId, setLastSelectedAgentId])
 
   // Voice input state
   const customHotkeys = useAtomValue(customHotkeysAtom)
@@ -1184,6 +1194,8 @@ export function NewChatForm({
       }
     }
 
+    // TODO(Plan 8): Add runtimeId to createChatMutation when backend schema supports it
+    // Currently runtime selection is persisted via lastSelectedRuntimeIdAtom (localStorage)
     // Create chat with selected project, branch, and initial message
     createChatMutation.mutate({
       projectId: selectedProject.id,
@@ -1849,18 +1861,7 @@ export function NewChatForm({
                       <div className="group/model-controls flex items-center gap-0.5">
                         <AgentSelector
                           defaultRuntimeId={selectedRuntimeId}
-                          onRuntimeSelect={(runtimeId) => {
-                            setSelectedRuntimeId(runtimeId)
-                            // Map runtime ID to old provider ID for backward compatibility
-                            const providerId = runtimeId === "claude" ? "claude-code" : runtimeId
-                            setLastSelectedAgentId(providerId)
-                            // Update selectedAgent state (used by model selection logic)
-                            if (providerId === "claude-code") {
-                              setSelectedAgent(claudeAgent)
-                            } else if (providerId === "codex") {
-                              setSelectedAgent(enabledAgents.find((agent) => agent.id === "codex") || fallbackAgent)
-                            }
-                          }}
+                          onRuntimeSelect={handleRuntimeSelect}
                         />
                       </div>
                     </div>
