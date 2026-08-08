@@ -6,6 +6,7 @@ import { getWindowId } from "../../../contexts/WindowContext"
 import { clearTaskSnapshotCache } from "../ui/agent-task-tools"
 import { clearSubChatRuntimeCaches } from "./sub-chat-runtime-cleanup"
 import { getDefaultRatios, addPaneRatio, removePaneRatio } from "../atoms"
+import type { AgentMode } from "../atoms"
 
 const MAX_SPLIT_PANES = 4
 
@@ -14,7 +15,7 @@ export interface SubChatMeta {
   name: string
   created_at?: string
   updated_at?: string
-  mode?: "plan" | "agent"
+  mode?: AgentMode
 }
 
 interface AgentSubChatStore {
@@ -39,7 +40,7 @@ interface AgentSubChatStore {
   setAllSubChats: (subChats: SubChatMeta[]) => void
   addToAllSubChats: (subChat: SubChatMeta) => void
   updateSubChatName: (subChatId: string, name: string) => void
-  updateSubChatMode: (subChatId: string, mode: "plan" | "agent") => void
+  updateSubChatMode: (subChatId: string, mode: AgentMode) => void
   updateSubChatTimestamp: (subChatId: string) => void
   addToSplit: (subChatId: string) => void
   removeFromSplit: (subChatId: string) => void
