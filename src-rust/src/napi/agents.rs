@@ -8,6 +8,7 @@ use crate::agent::{
     custom_harness::{self, HarnessDefinition},
     discovery::{self, AcpRuntimeCatalogEntry},
     global_config::{self, GlobalAgentConfig},
+    install::{self},
 };
 
 use super::{guard, to_napi};
@@ -71,4 +72,16 @@ pub fn delete_custom_harness(id: String) -> napi::Result<()> {
     guard();
     custom_harness::delete_custom_harness(&id)
         .map_err(to_napi)
+}
+
+/// Install an ACP runtime by executing its predefined install command.
+///
+/// Runs the install command (e.g., `npm install -g @block/goose`) via shell.
+/// The command must be in the whitelist to prevent injection attacks.
+/// Returns the stdout output on success.
+#[napi]
+pub async fn install_acp_runtime(runtime_id: String) -> napi::Result<String> {
+    guard();
+    install::install_acp_runtime(&runtime_id)
+        .map_err(|e| to_napi(crate::error::ErgataiError::from(e)))
 }

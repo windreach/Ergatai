@@ -243,11 +243,19 @@ export function AcpAgentManager() {
   })
 
   // TODO(Plan 7): Backend installRuntime not yet implemented
-  // Placeholder handler for Plan 7
+  // Install runtime mutation
+  const installRuntimeMutation = trpc.agents.installRuntime.useMutation({
+    onSuccess: () => {
+      utils.agents.listRuntimes.invalidate()
+      toast.success("Runtime installed successfully")
+    },
+    onError: (error) => {
+      toast.error(`Install failed: ${error.message}`)
+    },
+  })
+
   const handleInstallRuntime = (runtimeId: string, runtimeLabel: string) => {
-    // Plan 7 will use runtimeId to call trpc.agents.installRuntime
-    void runtimeId
-    toast.info(`Install flow for ${runtimeLabel} coming in Plan 7`)
+    installRuntimeMutation.mutate({ runtimeId })
   }
 
   // Split runtimes into installed vs available

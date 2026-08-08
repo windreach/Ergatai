@@ -26,6 +26,8 @@ import {
   pendingUserQuestionsAtom,
   subChatModelIdAtomFamily,
 } from "../atoms"
+import { availableCommandsAtomFamily } from "../atoms/commands"
+import { subChatRuntimeIdAtomFamily } from "../atoms/runtime"
 import { useAgentSubChatStore } from "../stores/sub-chat-store"
 import type { AgentMessageMetadata } from "../ui/agent-message-usage"
 
@@ -129,6 +131,7 @@ type IPCChatTransportConfig = {
   projectPath?: string // Original project path for MCP config lookup (when using worktrees)
   mode: "plan" | "agent"
   model?: string
+  agentName?: string
 }
 
 // Image attachment type matching the tRPC schema
@@ -186,10 +189,10 @@ export class IPCChatTransport implements ChatTransport<UIMessage> {
     const offlineModeEnabled = showOfflineFeatures && autoOfflineMode
 
     const currentMode =
-      useAgentSubChatStore
+      (useAgentSubChatStore
         .getState()
         .allSubChats.find((subChat) => subChat.id === this.config.subChatId)
-        ?.mode || this.config.mode
+        ?.mode as "plan" | "agent" | undefined) || this.config.mode
 
     // Stream debug logging
     const subId = this.config.subChatId.slice(-8)
@@ -199,6 +202,8 @@ export class IPCChatTransport implements ChatTransport<UIMessage> {
 
     return new ReadableStream({
       start: (controller) => {
+        const subChatRuntimeId = appStore.get(subChatRuntimeIdAtomFamily(this.config.subChatId))
+        const agentName = this.config.agentName || subChatRuntimeId || "claude-code"
         const sub = trpcClient.claude.chat.subscribe(
           {
             subChatId: this.config.subChatId,
@@ -208,6 +213,7 @@ export class IPCChatTransport implements ChatTransport<UIMessage> {
             projectPath: this.config.projectPath, // Original project path for MCP config lookup
             mode: currentMode,
             sessionId,
+            agentName,
             ...(maxThinkingTokens && { maxThinkingTokens }),
             ...(modelString && { model: modelString }),
             ...(customConfig && { customConfig }),

@@ -200,6 +200,7 @@ import {
   syncMessagesWithStatusAtom
 } from "../stores/message-store"
 import { clearSubChatRuntimeCaches } from "../stores/sub-chat-runtime-cleanup"
+import { subChatRuntimeIdAtomFamily } from "../atoms/runtime"
 import { useStreamingStatusStore } from "../stores/streaming-status-store"
 import {
   useAgentSubChatStore,
@@ -6669,12 +6670,14 @@ Make sure to preserve all functionality from both branches when resolving confli
           })
         } else {
           // Local worktree chat: use IPC transport
+          const subChatRuntimeId = appStore.get(subChatRuntimeIdAtomFamily(subChatId))
           transport = new IPCChatTransport({
             chatId,
             subChatId,
             cwd: worktreePath,
             projectPath,
             mode: subChatMode,
+            agentName: subChatRuntimeId || undefined,
           })
         }
       }
@@ -6950,12 +6953,14 @@ Make sure to preserve all functionality from both branches when resolving confli
         })
       } else {
         // Local worktree chat: use IPC transport
+        const subChatRuntimeId = appStore.get(subChatRuntimeIdAtomFamily(newId))
         newSubChatTransport = new IPCChatTransport({
           chatId,
           subChatId: newId,
           cwd: worktreePath,
           projectPath,
           mode: newSubChatMode,
+          agentName: subChatRuntimeId || undefined,
         })
       }
     }

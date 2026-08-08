@@ -79,7 +79,7 @@ export const agentsRouter = router({
    */
   listCustomHarnesses: publicProcedure.query(async () => {
     const runtimes = await nativeBinding.discoverAcpRuntimes()
-    return runtimes.filter((r) => r.source === "custom")
+    return runtimes.filter((r: any) => r.source === "custom")
   }),
 
   /**
@@ -121,5 +121,18 @@ export const agentsRouter = router({
     .mutation(async ({ input }) => {
       await nativeBinding.deleteCustomHarness(input)
       return { success: true }
+    }),
+
+  /**
+   * Install an ACP runtime by executing its predefined install command.
+   *
+   * Runs the install command (e.g., `npm install -g @block/goose`) via shell.
+   * The command must be in the whitelist to prevent injection attacks.
+   */
+  installRuntime: publicProcedure
+    .input(z.object({ runtimeId: z.string() }))
+    .mutation(async ({ input }) => {
+      const output = await nativeBinding.installAcpRuntime(input.runtimeId)
+      return { success: true, output }
     }),
 })
