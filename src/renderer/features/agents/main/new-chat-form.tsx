@@ -1194,13 +1194,12 @@ export function NewChatForm({
       }
     }
 
-    // TODO(Plan 8): Add runtimeId to createChatMutation when backend schema supports it
-    // Currently runtime selection is persisted via lastSelectedRuntimeIdAtom (localStorage)
-    // Create chat with selected project, branch, and initial message
+    // Create chat with selected project, branch, runtime, and initial message
     createChatMutation.mutate({
       projectId: selectedProject.id,
       name: message.trim().slice(0, 50), // Use first 50 chars as chat name
       model: selectedChatModel,
+      runtimeId: selectedRuntimeId,
       initialMessageParts: parts.length > 0 ? parts : undefined,
       baseBranch:
         workMode === "worktree" ? selectedBranch || undefined : undefined,
@@ -2155,6 +2154,7 @@ export function NewChatForm({
                     projectId: validatedProject.id,
                     name: "Worktree Setup",
                     model: selectedChatModel,
+                    runtimeId: selectedRuntimeId,
                     initialMessageParts: [
                       { type: "text", text: prompt },
                     ],

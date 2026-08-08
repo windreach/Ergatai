@@ -200,6 +200,7 @@ import {
 } from "../stores/message-store"
 import { clearSubChatRuntimeCaches } from "../stores/sub-chat-runtime-cleanup"
 import { subChatRuntimeIdAtomFamily } from "../atoms/runtime"
+import { RUNTIME_TO_PROVIDER } from "../lib/runtime-types"
 import { useStreamingStatusStore } from "../stores/streaming-status-store"
 import {
   useAgentSubChatStore,
@@ -4546,14 +4547,19 @@ const ChatViewInner = memo(function ChatViewInner({
           text: historyMarkdown,
         })
 
-        // 3. Create new sub-chat
+        // 3. Create new sub-chat with target runtime
+        const targetRuntimeId = targetProvider === "codex" ? "codex" : "claude"
         const newSubChat = await trpcClient.chats.createSubChat.mutate({
           chatId: parentChatId,
           name: "New Chat",
           mode: subChatMode,
+          runtimeId: targetRuntimeId,
         })
 
         const newId = newSubChat.id
+
+        // Set runtime atom for the new sub-chat
+        appStore.set(subChatRuntimeIdAtomFamily(newId), targetRuntimeId)
 
         // Inherit model preferences from source sub-chat for deterministic behavior.
         appStore.set(
@@ -5433,11 +5439,32 @@ export function ChatView({
     id: string
     name?: string | null
     mode?: AgentMode | null
+    runtimeId?: string | null
     created_at?: Date | string | null
     updated_at?: Date | string | null
     messages?: any
     stream_id?: string | null
   }>
+
+  // Initialize runtime atoms from DB data when sub-chats are loaded
+  // This restores runtime bindings after app restart
+  // Track initialized sub-chat IDs to avoid redundant atom updates
+  const initializedRuntimeIdsRef = useRef<Set<string>>(new Set())
+  useEffect(() => {
+    for (const sc of agentSubChats) {
+      if (sc.runtimeId && !initializedRuntimeIdsRef.current.has(sc.id)) {
+        appStore.set(subChatRuntimeIdAtomFamily(sc.id), sc.runtimeId)
+        initializedRuntimeIdsRef.current.add(sc.id)
+      }
+    }
+    // Clean up removed sub-chats from the tracking set
+    const currentIds = new Set(agentSubChats.map((sc) => sc.id))
+    for (const id of initializedRuntimeIdsRef.current) {
+      if (!currentIds.has(id)) {
+        initializedRuntimeIdsRef.current.delete(id)
+      }
+    }
+  }, [agentSubChats])
 
   // Workspace isolation: limit mounted tabs to prevent memory growth
   // CRITICAL: Filter by workspace to prevent rendering sub-chats from other workspaces
@@ -6381,50 +6408,35 @@ Make sure to preserve all functionality from both branches when resolving confli
     setCurrentPlanPath(lastPlanPath)
   }, [agentSubChats, activeSubChatIdForPlan, setCurrentPlanPath])
 
-  const inferProviderFromMessages = useCallback(
-    (subChatId?: string): "claude-code" | "codex" => {
-      if (!subChatId) return "claude-code"
-
-      const override = subChatProviderOverrides[subChatId]
-      if (override) return override
-
-      const subChat = ((agentChat as any)?.subChats || []).find(
-        (sc: any) => sc?.id === subChatId,
-      ) as { messages?: any } | undefined
-      const rawMessages = subChat?.messages
-
-      let messages: any[] = []
-      if (Array.isArray(rawMessages)) {
-        messages = rawMessages
-      } else if (typeof rawMessages === "string") {
-        try {
-          const parsed = JSON.parse(rawMessages)
-          messages = Array.isArray(parsed) ? parsed : []
-        } catch {
-          messages = []
-        }
-      }
-
-      for (const message of messages) {
-        const model = (message as any)?.metadata?.model
-        if (typeof model !== "string") continue
-        const normalizedModel = model.toLowerCase()
-        if (
-          normalizedModel.includes("codex") ||
-          normalizedModel.startsWith("gpt-")
-        ) {
-          return "codex"
-        }
-      }
-
-      return "claude-code"
-    },
-    [agentChat, subChatProviderOverrides],
-  )
+  // Determine active sub-chat runtime from atom (preferred) or DB fallback.
+  // Replaces the old resolveProvider which scanned message metadata.
+  const activeSubChatRuntimeId = useMemo(() => {
+    if (!activeSubChatId) return "claude"
+    // 1. Check atom (set by user selection or DB hydration)
+    const atomValue = appStore.get(subChatRuntimeIdAtomFamily(activeSubChatId))
+    if (atomValue) return atomValue
+    // 2. Fallback to DB runtimeId
+    const subChat = agentSubChats.find((sc) => sc.id === activeSubChatId)
+    if (subChat?.runtimeId) return subChat.runtimeId
+    // 3. Default
+    return "claude"
+  }, [activeSubChatId, agentSubChats])
 
   const activeSubChatProvider = useMemo(
-    () => inferProviderFromMessages(activeSubChatId || undefined),
-    [activeSubChatId, inferProviderFromMessages],
+    () => (activeSubChatRuntimeId === "codex" ? "codex" : "claude-code"),
+    [activeSubChatRuntimeId],
+  )
+
+  // Helper to resolve provider for any sub-chat ID (replaces resolveProvider)
+  const resolveProvider = useCallback(
+    (subChatId?: string): "claude-code" | "codex" => {
+      if (!subChatId) return "claude-code"
+      const runtimeId =
+        appStore.get(subChatRuntimeIdAtomFamily(subChatId)) ||
+        agentSubChats.find((sc) => sc.id === subChatId)?.runtimeId
+      return runtimeId === "codex" ? "codex" : "claude-code"
+    },
+    [agentSubChats],
   )
 
   const { data: codexMcpConfig } = trpc.codex.getAllMcpConfig.useQuery(undefined, {
@@ -6583,7 +6595,7 @@ Make sure to preserve all functionality from both branches when resolving confli
         // Check provider from runtime atom instead of transport instance
         const subChatRuntimeId = appStore.get(subChatRuntimeIdAtomFamily(subChatId))
         const existingProvider: "claude-code" | "codex" =
-          subChatRuntimeId === "codex" || subChatRuntimeId?.includes("codex")
+          RUNTIME_TO_PROVIDER[subChatRuntimeId || ""] === "codex"
             ? "codex"
             : "claude-code"
         if (existingProvider === overrideProvider) return existing
@@ -6628,8 +6640,6 @@ Make sure to preserve all functionality from both branches when resolving confli
         .getState()
         .allSubChats.find((sc) => sc.id === subChatId)
       const subChatMode = subChatMeta?.mode || currentMode
-
-      const chatProvider = inferProviderFromMessages(subChatId)
 
       console.log("[getOrCreateChat] Transport selection", {
         subChatId: subChatId.slice(-8),
@@ -6767,7 +6777,7 @@ Make sure to preserve all functionality from both branches when resolving confli
       worktreePath,
       chatId,
       currentMode,
-      inferProviderFromMessages,
+      resolveProvider,
       subChatProviderOverrides,
       setSubChatUnseenChanges,
       selectedChatId,
@@ -6803,6 +6813,9 @@ Make sure to preserve all functionality from both branches when resolving confli
 
       if (messageCount > 0) return
 
+      // Set runtime atom and legacy override for backward compat
+      const runtimeId = nextProvider === "codex" ? "codex" : "claude"
+      appStore.set(subChatRuntimeIdAtomFamily(subChatId), runtimeId)
       setSubChatProviderOverrides((prev) => ({
         ...prev,
         [subChatId]: nextProvider,
@@ -6821,7 +6834,8 @@ Make sure to preserve all functionality from both branches when resolving confli
     const sourceSubChatId = activeSubChatId || ""
     // New sub-chats use the user's default mode preference
     const newSubChatMode = defaultAgentMode
-    const newSubChatProvider = inferProviderFromMessages(activeSubChatId || undefined)
+    const newSubChatRuntime = activeSubChatRuntimeId
+    const newSubChatProvider = newSubChatRuntime === "codex" ? "codex" : "claude-code"
 
     // Check if this is a remote sandbox chat
     const isRemoteChat = !!(agentChat as any)?.isRemote
@@ -6834,13 +6848,18 @@ Make sure to preserve all functionality from both branches when resolving confli
       newId = crypto.randomUUID()
     } else {
       // Local mode: create sub-chat in DB first to get the real ID
+      const newRuntimeId = newSubChatProvider === "codex" ? "codex" : "claude"
       const newSubChat = await trpcClient.chats.createSubChat.mutate({
         chatId,
         name: "New Chat",
         mode: newSubChatMode,
+        runtimeId: newRuntimeId,
       })
       newId = newSubChat.id
       utils.agents.getAgentChat.invalidate({ chatId })
+
+      // Set runtime atom for the new sub-chat
+      appStore.set(subChatRuntimeIdAtomFamily(newId), newRuntimeId)
 
       // Optimistic update: add new sub-chat to React Query cache immediately
       // This is CRITICAL for workspace isolation - without this, the new sub-chat
@@ -7030,7 +7049,7 @@ Make sure to preserve all functionality from both branches when resolving confli
     chatId,
     defaultAgentMode,
     activeSubChatId,
-    inferProviderFromMessages,
+    resolveProvider,
     utils,
     setSubChatUnseenChanges,
     selectedChatId,
@@ -7672,7 +7691,7 @@ Make sure to preserve all functionality from both branches when resolving confli
                             chat={chat}
                             subChatId={paneId}
                             parentChatId={chatId}
-                            provider={inferProviderFromMessages(paneId)}
+                            provider={resolveProvider(paneId)}
                             isFirstSubChat={isFirstSubChat}
                             onAutoRename={handleAutoRename}
                             onCreateNewSubChat={handleCreateNewSubChat}
@@ -7722,7 +7741,7 @@ Make sure to preserve all functionality from both branches when resolving confli
                                 chat={chat}
                                 subChatId={subChatId}
                                 parentChatId={chatId}
-                                provider={inferProviderFromMessages(subChatId)}
+                                provider={resolveProvider(subChatId)}
                                 isFirstSubChat={isFirstSubChat}
                                 onAutoRename={handleAutoRename}
                                 onCreateNewSubChat={handleCreateNewSubChat}
@@ -7785,7 +7804,7 @@ Make sure to preserve all functionality from both branches when resolving confli
                       chat={chat}
                       subChatId={subChatId}
                       parentChatId={chatId}
-                      provider={inferProviderFromMessages(subChatId)}
+                      provider={resolveProvider(subChatId)}
                       isFirstSubChat={isFirstSubChat}
                       onAutoRename={handleAutoRename}
                       onCreateNewSubChat={handleCreateNewSubChat}

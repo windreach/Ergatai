@@ -203,7 +203,7 @@ export class IPCChatTransport implements ChatTransport<UIMessage> {
     return new ReadableStream({
       start: (controller) => {
         const subChatRuntimeId = appStore.get(subChatRuntimeIdAtomFamily(this.config.subChatId))
-        const agentName = this.config.agentName || subChatRuntimeId || "claude-code"
+        const agentName = this.config.agentName || subChatRuntimeId || "claude"
         const sub = trpcClient.claude.chat.subscribe(
           {
             subChatId: this.config.subChatId,

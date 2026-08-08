@@ -217,6 +217,11 @@ export const selectedProjectAtom = atomWithWindowStorage<SelectedProject>(
   { getOnInit: true },
 )
 
+/**
+ * @deprecated Use `normalizedRuntimeIdAtom` instead.
+ * Kept for backward compat — reads legacy "claude-code" value from localStorage.
+ * Migration: on app startup, convert via normalizeRuntimeId() → normalizedRuntimeIdAtom.
+ */
 export const lastSelectedAgentIdAtom = atomWithStorage<string>(
   "agents:lastSelectedAgentId",
   "claude-code",

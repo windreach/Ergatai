@@ -52,7 +52,7 @@ import {
   selectedOllamaModelAtom,
   showOfflineModeFeaturesAtom,
 } from "../../../lib/atoms"
-import { trpc } from "../../../lib/trpc"
+import { trpc, trpcClient } from "../../../lib/trpc"
 import { cn } from "../../../lib/utils"
 import {
   lastSelectedCodexModelIdAtom,
@@ -1563,14 +1563,24 @@ export const ChatInputArea = memo(function ChatInputArea({
                   <div className="group/model-controls flex items-center gap-0.5">
                     <AgentSelector
                       subChatId={subChatId}
-                      onRuntimeSelect={(runtimeId) => {
+                      onRuntimeSelect={async (runtimeId) => {
                         // Convert runtime ID to provider ID for backward compatibility
                         const providerId = RUNTIME_TO_PROVIDER[runtimeId]
 
                         // Call appropriate callback based on message count
                         if (canSwitchProvider) {
-                          // New sub-chat: update atom and notify parent
+                          // New sub-chat: update atom and persist to DB
                           setSubChatRuntimeId(runtimeId)
+                          try {
+                            await trpcClient.chats.updateSubChatRuntime.mutate({
+                              subChatId,
+                              runtimeId,
+                            })
+                          } catch (error) {
+                            console.error("Failed to update runtime in DB:", error)
+                            // Atom is already updated, so UI is consistent
+                            // User can retry by selecting runtime again
+                          }
                           if (providerId) {
                             onProviderChange?.(providerId as "claude-code" | "codex")
                           }

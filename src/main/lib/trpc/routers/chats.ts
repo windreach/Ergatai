@@ -310,6 +310,7 @@ export const chatsRouter = router({
         branchType: z.enum(["local", "remote"]).optional(), // Whether baseBranch is local or remote
         useWorktree: z.boolean().default(true), // If false, work directly in project dir
         mode: z.enum(["plan", "agent"]).default("agent"),
+        runtimeId: z.string().optional(), // ACP runtime binding (e.g., "claude", "codex")
       }),
     )
     .mutation(async ({ input, ctx }) => {
@@ -367,6 +368,7 @@ export const chatsRouter = router({
         .values({
           chatId: chat.id,
           mode: input.mode,
+          runtimeId: input.runtimeId,
           messages: initialMessages,
         })
         .returning()
@@ -719,6 +721,7 @@ export const chatsRouter = router({
         chatId: z.string(),
         name: z.string().optional(),
         mode: z.enum(["plan", "agent"]).default("agent"),
+        runtimeId: z.string().optional(), // ACP runtime ID (e.g., "claude", "goose", "codex")
       }),
     )
     .mutation(({ input }) => {
@@ -729,10 +732,36 @@ export const chatsRouter = router({
           chatId: input.chatId,
           name: input.name,
           mode: input.mode,
+          runtimeId: input.runtimeId, // Will use default "claude" if not provided
           messages: "[]",
         })
         .returning()
         .get()
+    }),
+
+  /**
+   * Update sub-chat runtime ID (ACP runtime binding)
+   */
+  updateSubChatRuntime: publicProcedure
+    .input(
+      z.object({
+        subChatId: z.string(),
+        runtimeId: z.string(),
+      }),
+    )
+    .mutation(({ input }) => {
+      const db = getDatabase()
+      const result = db
+        .update(subChats)
+        .set({ runtimeId: input.runtimeId, updatedAt: new Date() })
+        .where(eq(subChats.id, input.subChatId))
+        .returning()
+        .get()
+
+      if (!result) {
+        throw new Error(`Sub-chat ${input.subChatId} not found`)
+      }
+      return result
     }),
 
   /**
