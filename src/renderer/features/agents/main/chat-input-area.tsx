@@ -1509,17 +1509,23 @@ export const ChatInputArea = memo(function ChatInputArea({
                     <AgentSelector
                       subChatId={subChatId}
                       onRuntimeSelect={(runtimeId) => {
-                        // Update runtime atom for this sub-chat
-                        setSubChatRuntimeId(runtimeId)
-
                         // Convert runtime ID to provider ID for backward compatibility
-                        const providerId = RUNTIME_TO_PROVIDER[runtimeId] ?? runtimeId
+                        const providerId = RUNTIME_TO_PROVIDER[runtimeId]
 
                         // Call appropriate callback based on message count
                         if (canSwitchProvider) {
-                          onProviderChange?.(providerId as "claude-code" | "codex")
+                          // New sub-chat: update atom and notify parent
+                          setSubChatRuntimeId(runtimeId)
+                          if (providerId) {
+                            onProviderChange?.(providerId as "claude-code" | "codex")
+                          }
                         } else {
-                          onContinueWithProvider?.(providerId as "claude-code" | "codex")
+                          // Mid-chat: parent creates new sub-chat, then binds runtime
+                          if (providerId) {
+                            onContinueWithProvider?.(providerId as "claude-code" | "codex")
+                          }
+                          // Note: runtime atom not updated here — parent handles binding
+                          // when creating the new sub-chat
                         }
                       }}
                       allowSwitch={canSwitchProvider}
