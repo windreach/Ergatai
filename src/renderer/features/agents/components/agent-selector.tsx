@@ -150,9 +150,13 @@ export function AgentSelector({
         <Command>
           <CommandInput placeholder="搜索 agent..." />
           <CommandList>
-            <CommandEmpty>没有找到可用 agent</CommandEmpty>
             <CommandGroup>
-              {runtimes.map((runtime) => (
+              {runtimes.length === 0 ? (
+                <div className="py-6 text-center text-sm text-muted-foreground">
+                  没有找到可用 agent
+                </div>
+              ) : (
+                runtimes.map((runtime) => (
                 <CommandItem
                   key={runtime.id}
                   value={runtime.label}
