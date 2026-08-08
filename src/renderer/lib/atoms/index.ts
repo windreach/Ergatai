@@ -507,15 +507,16 @@ if (typeof window !== "undefined") {
   if (oldValue !== null && localStorage.getItem(newKey) === null) {
     // Old value was JSON boolean, new value is JSON string
     const wasInPlanMode = oldValue === "true"
-    localStorage.setItem(newKey, JSON.stringify(wasInPlanMode ? "plan" : "agent"))
+    // Migrate: old "agent" → new "auto"
+    localStorage.setItem(newKey, JSON.stringify(wasInPlanMode ? "plan" : "auto"))
     localStorage.removeItem(oldKey)
-    console.log("[atoms] Migrated isPlanMode to defaultAgentMode:", wasInPlanMode ? "plan" : "agent")
+    console.log("[atoms] Migrated isPlanMode to defaultAgentMode:", wasInPlanMode ? "plan" : "auto")
   }
 }
 
 export const defaultAgentModeAtom = atomWithStorage<AgentModeType>(
   "preferences:default-agent-mode",
-  "agent", // Default to agent mode
+  "auto", // Default to auto mode
   undefined,
   { getOnInit: true },
 )

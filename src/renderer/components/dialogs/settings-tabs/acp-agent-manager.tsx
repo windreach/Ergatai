@@ -7,8 +7,7 @@ import { Input } from "../../ui/input"
 import { Label } from "../../ui/label"
 import { Textarea } from "../../ui/textarea"
 import { Badge } from "../../ui/badge"
-import { ScrollArea } from "../../ui/scroll-area"
-import { Separator } from "../../ui/separator"
+// ScrollArea & Separator replaced with native elements (components not installed)
 import {
   CheckCircle2,
   XCircle,
@@ -82,7 +81,7 @@ function AgentList({
         </p>
       </div>
 
-      <ScrollArea className="flex-1">
+      <div className="flex-1 overflow-auto">
         <div className="p-2 space-y-4">
           {/* Builtin Agents */}
           {builtinRuntimes.length > 0 && (
@@ -122,7 +121,7 @@ function AgentList({
             </div>
           )}
         </div>
-      </ScrollArea>
+      </div>
     </div>
   )
 }
@@ -278,7 +277,7 @@ function AgentDetail({
           )}
         </div>
 
-        <Separator />
+        <hr className="my-2 border-border" />
 
         {/* Status Info */}
         <div className="space-y-3">
@@ -320,7 +319,7 @@ function AgentDetail({
           </div>
         </div>
 
-        <Separator />
+        <hr className="my-2 border-border" />
 
         {/* Global Configuration */}
         <div className="space-y-4">
@@ -349,7 +348,7 @@ function AgentDetail({
           </div>
         </div>
 
-        <Separator />
+        <hr className="my-2 border-border" />
 
         {/* Environment Variables */}
         <div className="space-y-4">
@@ -394,7 +393,7 @@ function AgentDetail({
           </div>
         </div>
 
-        <Separator />
+        <hr className="my-2 border-border" />
 
         {/* Save Button */}
         <div className="flex justify-end">
@@ -575,7 +574,7 @@ function CustomHarnessForm({
           </p>
         </div>
 
-        <Separator />
+        <hr className="my-2 border-border" />
 
         <div className="space-y-4">
           <div>
@@ -698,7 +697,7 @@ function CustomHarnessForm({
           </div>
         </div>
 
-        <Separator />
+        <hr className="my-2 border-border" />
 
         <div className="flex justify-end gap-2">
           <Button variant="outline" onClick={onCancel}>

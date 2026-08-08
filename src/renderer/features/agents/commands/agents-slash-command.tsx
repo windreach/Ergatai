@@ -130,7 +130,7 @@ export const AgentsSlashCommand = memo(function AgentsSlashCommand({
     if (mode !== undefined) {
       builtinFiltered = builtinFiltered.filter((cmd) => {
         if (mode === "plan" && cmd.name === "plan") return false
-        if (mode === "agent" && cmd.name === "agent") return false
+        if (mode === "auto" && cmd.name === "agent") return false
         return true
       })
     }

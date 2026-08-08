@@ -2214,7 +2214,7 @@ const ChatViewInner = memo(function ChatViewInner({
       }
 
       // Revert local state on error to maintain sync with database
-      const revertedMode: AgentMode = variables.mode === "plan" ? "agent" : "plan"
+      const revertedMode: AgentMode = variables.mode === "plan" ? "auto" : "plan"
       setSubChatMode(revertedMode)
       // Also update store for consistency
       useAgentSubChatStore
@@ -3144,15 +3144,17 @@ const ChatViewInner = memo(function ChatViewInner({
   // Handle plan approval - sends "Build plan" message and switches to agent mode
   const handleApprovePlan = useCallback(() => {
     // Update store mode synchronously BEFORE sending (transport reads from store)
-    useAgentSubChatStore.getState().updateSubChatMode(subChatId, "agent")
+    // Note: "agent" mode is now "auto" in the new three-mode system
+    useAgentSubChatStore.getState().updateSubChatMode(subChatId, "auto")
 
     // Sync mode to database for sidebar indicator (getPendingPlanApprovals)
+    // Backend still uses "agent", will be updated in Plan 8
     if (!subChatId.startsWith("temp-")) {
       updateSubChatModeMutation.mutate({ subChatId, mode: "agent" })
     }
 
     // Update atomFamily state (for UI) - this also syncs to store via effect
-    setSubChatMode("agent")
+    setSubChatMode("auto")
 
     // Enable auto-scroll and immediately scroll to bottom
     shouldAutoScrollRef.current = true
@@ -3485,7 +3487,9 @@ const ChatViewInner = memo(function ChatViewInner({
         })
 
         const newSubChat = result.subChat
-        const newMode = (newSubChat.mode as "plan" | "agent") || "agent"
+        // Migrate legacy "agent" to new "auto"
+        const rawMode = (newSubChat.mode as string) || "auto"
+        const newMode: AgentMode = rawMode === "agent" ? "auto" : rawMode as AgentMode
 
         // Invalidate + await ensures agentSubChats has the fork before we switch tabs
         await utils.agents.getAgentChat.invalidate({ chatId: parentChatId })
@@ -4857,7 +4861,7 @@ export function ChatView({
 
   // Get active sub-chat ID from store for mode tracking (reactive)
   const activeSubChatIdForMode = useAgentSubChatStore((state) => state.activeSubChatId)
-  // Use per-subChat mode atom - falls back to "agent" if no active sub-chat
+  // Use per-subChat mode atom - falls back to "auto" if no active sub-chat
   const subChatModeAtom = useMemo(
     () => subChatModeAtomFamily(activeSubChatIdForMode || ""),
     [activeSubChatIdForMode],
@@ -5428,7 +5432,7 @@ export function ChatView({
   const agentSubChats = (agentChat?.subChats ?? []) as Array<{
     id: string
     name?: string | null
-    mode?: "plan" | "agent" | null
+    mode?: AgentMode | null
     created_at?: Date | string | null
     updated_at?: Date | string | null
     messages?: any
@@ -6293,9 +6297,10 @@ Make sure to preserve all functionality from both branches when resolving confli
           createdAt ?? existingLocal?.created_at ?? new Date().toISOString(),
         updated_at: updatedAt ?? existingLocal?.updated_at,
         mode:
-          (sc.mode as "plan" | "agent" | undefined) ||
+          // Migrate legacy "agent" to new "auto"
+          ((sc.mode as string) === "agent" ? "auto" : (sc.mode as AgentMode | undefined)) ||
           existingLocal?.mode ||
-          "agent",
+          "auto",
       }
     })
     const dbSubChatIds = new Set(dbSubChats.map((sc) => sc.id))
@@ -7356,7 +7361,7 @@ Make sure to preserve all functionality from both branches when resolving confli
                     created_at: new Date(),
                     updated_at: new Date(),
                     messages: "[]",
-                    mode: "agent",
+                    mode: "auto",
                     stream_id: null,
                     chat_id: chatId,
                   },

@@ -1,6 +1,24 @@
 import { z } from "zod"
+import { join } from "path"
+import { app } from "electron"
 import { router, publicProcedure } from "../index"
-import { nativeBinding } from "../../native-binding"
+
+function loadNativeBinding(): any {
+  const appRoot = app.getAppPath()
+  const candidates = [
+    join(appRoot, "src/native-binding"),
+    join(appRoot, "out/main/native-binding"),
+    join(appRoot, "native-binding"),
+  ]
+  for (const p of candidates) {
+    try {
+      return require(p)
+    } catch {}
+  }
+  throw new Error("Cannot find native-binding module")
+}
+
+const nativeBinding = loadNativeBinding()
 
 /**
  * ACP Agent Management Router

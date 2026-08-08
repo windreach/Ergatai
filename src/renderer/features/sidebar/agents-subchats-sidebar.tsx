@@ -122,7 +122,7 @@ const SidebarSearchHistoryPopover = memo(function SidebarSearchHistoryPopover({
     const timeAgo = formatTimeAgo(subChat.updated_at || subChat.created_at)
     const isLoading = loadingSubChats.has(subChat.id)
     const hasUnseen = subChatUnseenChanges.has(subChat.id)
-    const mode = subChat.mode || "agent"
+    const mode = subChat.mode || "auto"
     const hasPendingQuestion = pendingQuestionsMap.has(subChat.id)
 
     return (
@@ -727,10 +727,12 @@ export function AgentsSubChatsSidebar({
       newId = crypto.randomUUID()
     } else {
       // Local mode: create sub-chat in DB first to get the real ID
+      // Map new AgentMode to legacy backend mode (auto/team → agent for now)
+      const backendMode = defaultAgentMode === "plan" ? "plan" : "agent"
       const newSubChat = await trpcClient.chats.createSubChat.mutate({
         chatId: parentChatId,
         name: "New Chat",
-        mode: defaultAgentMode,
+        mode: backendMode,
       })
       newId = newSubChat.id
     }
@@ -1286,7 +1288,7 @@ export function AgentsSubChatsSidebar({
                           const timeAgo = formatTimeAgo(
                             subChat.updated_at || subChat.created_at,
                           )
-                          const mode = subChat.mode || "agent"
+                          const mode = subChat.mode || "auto"
                           const isChecked = selectedSubChatIds.has(subChat.id)
                           const draftText = getDraftText(subChat.id)
                           const hasPendingQuestion = pendingQuestionsMap.has(subChat.id)
@@ -1590,7 +1592,7 @@ export function AgentsSubChatsSidebar({
                           const timeAgo = formatTimeAgo(
                             subChat.updated_at || subChat.created_at,
                           )
-                          const mode = subChat.mode || "agent"
+                          const mode = subChat.mode || "auto"
                           const isChecked = selectedSubChatIds.has(subChat.id)
                           const draftText = getDraftText(subChat.id)
                           const hasPendingQuestion = pendingQuestionsMap.has(subChat.id)
