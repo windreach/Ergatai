@@ -1,4 +1,3 @@
-use anyhow::Result;
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::time::timeout;
@@ -14,15 +13,16 @@ use agent_client_protocol::{AcpAgent, AcpAgentConfig, Agent, Client, ConnectionT
 
 use super::manager::{event_tx, manager, SessionCommand, SessionEvent, SessionHandle, SessionKind};
 use crate::agent::config::AgentConfig;
+use crate::error::{ErgataiError, ErgataiResult};
 
 const SESSION_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// 通过临时连接执行一次性 ACP 操作。
 /// 连接 → 初始化 → 执行闭包 → 断开。
-async fn with_agent_connection<F, T, Fut>(config: &AgentConfig, f: F) -> Result<T>
+async fn with_agent_connection<F, T, Fut>(config: &AgentConfig, f: F) -> ErgataiResult<T>
 where
     F: FnOnce(ConnectionTo<Agent>) -> Fut,
-    Fut: std::future::Future<Output = Result<T>>,
+    Fut: std::future::Future<Output = ErgataiResult<T>>,
 {
     let mut agent_config = AcpAgentConfig::new(&config.command).args(config.args.clone());
     for (k, v) in &config.env {
@@ -33,16 +33,22 @@ where
     let result = Client.builder()
         .connect_with(agent, |connection: ConnectionTo<Agent>| async move {
             // 初始化
-            timeout(SESSION_TIMEOUT, connection
+            let init_result = timeout(SESSION_TIMEOUT, connection
                 .send_request(InitializeRequest::new(ProtocolVersion::V1))
                 .block_task())
-                .await
-                .map_err(|_| anyhow::anyhow!("Initialize timeout"))?
-                .map_err(|e| anyhow::anyhow!("Initialize failed: {}", e))?;
+                .await;
+
+            match init_result {
+                Ok(Ok(_)) => {},
+                Ok(Err(e)) => return Err(agent_client_protocol::Error::internal_error().data(format!("Initialize failed: {}", e))),
+                Err(_) => return Err(agent_client_protocol::Error::internal_error().data("Initialize timeout")),
+            }
 
             // 执行操作
-            let result = f(connection).await?;
-            Ok(result)
+            match f(connection).await {
+                Ok(result) => Ok(result),
+                Err(e) => Err(agent_client_protocol::Error::internal_error().data(e.to_string())),
+            }
         })
         .await?;
 
@@ -50,7 +56,7 @@ where
 }
 
 /// 从 agent 查询会话列表
-pub async fn list_sessions_from_agent(config: &AgentConfig, cwd: Option<String>) -> Result<Vec<SessionInfo>> {
+pub async fn list_sessions_from_agent(config: &AgentConfig, cwd: Option<String>) -> ErgataiResult<Vec<SessionInfo>> {
     let cwd_path = cwd.map(PathBuf::from);
 
     with_agent_connection(config, |connection| async move {
@@ -62,8 +68,8 @@ pub async fn list_sessions_from_agent(config: &AgentConfig, cwd: Option<String>)
         let response = timeout(SESSION_TIMEOUT, connection
             .send_request(request).block_task())
             .await
-            .map_err(|_| anyhow::anyhow!("ListSessions timeout"))?
-            .map_err(|e| anyhow::anyhow!("ListSessions failed: {}", e))?;
+            .map_err(|_| ErgataiError::agent_timeout("ListSessions timeout"))?
+            .map_err(|e| ErgataiError::network_with_source("ListSessions failed", e))?;
 
         Ok(response.sessions)
     })
@@ -71,15 +77,15 @@ pub async fn list_sessions_from_agent(config: &AgentConfig, cwd: Option<String>)
 }
 
 /// 从 agent 删除会话
-pub async fn delete_session_from_agent(config: &AgentConfig, session_id: &str) -> Result<()> {
+pub async fn delete_session_from_agent(config: &AgentConfig, session_id: &str) -> ErgataiResult<()> {
     let sid = SessionId::new(session_id.to_string());
 
     with_agent_connection(config, |connection| async move {
         timeout(SESSION_TIMEOUT, connection
             .send_request(DeleteSessionRequest::new(sid)).block_task())
             .await
-            .map_err(|_| anyhow::anyhow!("DeleteSession timeout"))?
-            .map_err(|e| anyhow::anyhow!("DeleteSession failed: {}", e))?;
+            .map_err(|_| ErgataiError::agent_timeout("DeleteSession timeout"))?
+            .map_err(|e| ErgataiError::network_with_source("DeleteSession failed", e))?;
 
         Ok(())
     })
@@ -91,7 +97,7 @@ pub fn load_session_task(
     config: AgentConfig,
     session_id: String,
     cwd: String,
-    session_id_tx: tokio::sync::oneshot::Sender<Result<String>>,
+    session_id_tx: tokio::sync::oneshot::Sender<ErgataiResult<String>>,
 ) {
     let agent_name = config.name.clone();
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<SessionCommand>();
@@ -168,21 +174,27 @@ pub fn load_session_task(
                         let tx = tx_for_closure.lock().unwrap().take();
 
                         // 1. 初始化
-                        timeout(SESSION_TIMEOUT, connection
+                        let init_result = timeout(SESSION_TIMEOUT, connection
                             .send_request(InitializeRequest::new(ProtocolVersion::V1))
                             .block_task())
-                            .await
-                            .map_err(|_| anyhow::anyhow!("Initialize timeout"))?
-                            .map_err(|e| anyhow::anyhow!("Initialize failed: {}", e))?;
+                            .await;
+                        match init_result {
+                            Ok(Ok(_)) => {},
+                            Ok(Err(e)) => return Err(agent_client_protocol::Error::internal_error().data(format!("Initialize failed: {}", e))),
+                            Err(_) => return Err(agent_client_protocol::Error::internal_error().data("Initialize timeout")),
+                        }
 
                         // 2. 加载会话
                         let sid = SessionId::new(session_id_clone.clone());
-                        timeout(SESSION_TIMEOUT, connection
+                        let load_result = timeout(SESSION_TIMEOUT, connection
                             .send_request(LoadSessionRequest::new(sid, PathBuf::from(&cwd_clone)))
                             .block_task())
-                            .await
-                            .map_err(|_| anyhow::anyhow!("LoadSession timeout"))?
-                            .map_err(|e| anyhow::anyhow!("LoadSession failed: {}", e))?;
+                            .await;
+                        match load_result {
+                            Ok(Ok(_)) => {},
+                            Ok(Err(e)) => return Err(agent_client_protocol::Error::internal_error().data(format!("LoadSession failed: {}", e))),
+                            Err(_) => return Err(agent_client_protocol::Error::internal_error().data("LoadSession timeout")),
+                        }
 
                         // 3. 注册到全局管理器
                         manager().register(SessionHandle {
@@ -282,7 +294,7 @@ pub fn load_session_task(
             if let Err(e) = result {
                 tracing::error!("Load session connection failed: {}", e);
                 if let Some(tx) = session_id_tx.lock().unwrap().take() {
-                    let _ = tx.send(Err(anyhow::anyhow!("Connection failed: {}", e)));
+                    let _ = tx.send(Err(ErgataiError::network(format!("Connection failed: {}", e))));
                 }
             }
         }
@@ -294,7 +306,7 @@ pub fn resume_session_task(
     config: AgentConfig,
     session_id: String,
     cwd: String,
-    session_id_tx: tokio::sync::oneshot::Sender<Result<String>>,
+    session_id_tx: tokio::sync::oneshot::Sender<ErgataiResult<String>>,
 ) {
     let agent_name = config.name.clone();
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<SessionCommand>();
@@ -371,21 +383,27 @@ pub fn resume_session_task(
                         let tx = tx_for_closure.lock().unwrap().take();
 
                         // 1. 初始化
-                        timeout(SESSION_TIMEOUT, connection
+                        let init_result = timeout(SESSION_TIMEOUT, connection
                             .send_request(InitializeRequest::new(ProtocolVersion::V1))
                             .block_task())
-                            .await
-                            .map_err(|_| anyhow::anyhow!("Initialize timeout"))?
-                            .map_err(|e| anyhow::anyhow!("Initialize failed: {}", e))?;
+                            .await;
+                        match init_result {
+                            Ok(Ok(_)) => {},
+                            Ok(Err(e)) => return Err(agent_client_protocol::Error::internal_error().data(format!("Initialize failed: {}", e))),
+                            Err(_) => return Err(agent_client_protocol::Error::internal_error().data("Initialize timeout")),
+                        }
 
                         // 2. 恢复会话
                         let sid = SessionId::new(session_id_clone.clone());
-                        timeout(SESSION_TIMEOUT, connection
+                        let resume_result = timeout(SESSION_TIMEOUT, connection
                             .send_request(ResumeSessionRequest::new(sid, PathBuf::from(&cwd_clone)))
                             .block_task())
-                            .await
-                            .map_err(|_| anyhow::anyhow!("ResumeSession timeout"))?
-                            .map_err(|e| anyhow::anyhow!("ResumeSession failed: {}", e))?;
+                            .await;
+                        match resume_result {
+                            Ok(Ok(_)) => {},
+                            Ok(Err(e)) => return Err(agent_client_protocol::Error::internal_error().data(format!("ResumeSession failed: {}", e))),
+                            Err(_) => return Err(agent_client_protocol::Error::internal_error().data("ResumeSession timeout")),
+                        }
 
                         // 3. 注册到全局管理器
                         manager().register(SessionHandle {
@@ -480,7 +498,7 @@ pub fn resume_session_task(
             if let Err(e) = result {
                 tracing::error!("Resume session connection failed: {}", e);
                 if let Some(tx) = session_id_tx.lock().unwrap().take() {
-                    let _ = tx.send(Err(anyhow::anyhow!("Connection failed: {}", e)));
+                    let _ = tx.send(Err(ErgataiError::network(format!("Connection failed: {}", e))));
                 }
             }
         }

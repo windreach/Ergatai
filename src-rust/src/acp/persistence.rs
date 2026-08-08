@@ -1,6 +1,7 @@
-use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+
+use crate::error::ErgataiResult;
 
 /// 本地保存的会话元数据（用于离线浏览和历史记录）
 #[napi_derive::napi(object)]
@@ -23,7 +24,7 @@ fn sessions_dir() -> PathBuf {
 }
 
 /// 保存会话元数据到磁盘
-pub fn save_session(session: &PersistedSession) -> Result<()> {
+pub fn save_session(session: &PersistedSession) -> ErgataiResult<()> {
     let dir = sessions_dir();
     std::fs::create_dir_all(&dir)?;
 
@@ -34,7 +35,7 @@ pub fn save_session(session: &PersistedSession) -> Result<()> {
 }
 
 /// 加载所有保存的会话
-pub fn load_all_sessions() -> Result<Vec<PersistedSession>> {
+pub fn load_all_sessions() -> ErgataiResult<Vec<PersistedSession>> {
     let dir = sessions_dir();
     if !dir.exists() {
         return Ok(vec![]);
@@ -64,7 +65,7 @@ pub fn load_all_sessions() -> Result<Vec<PersistedSession>> {
 }
 
 /// 加载单个会话
-pub fn load_session(session_id: &str) -> Result<Option<PersistedSession>> {
+pub fn load_session(session_id: &str) -> ErgataiResult<Option<PersistedSession>> {
     let path = session_path(session_id);
     if !path.exists() {
         return Ok(None);
@@ -75,7 +76,7 @@ pub fn load_session(session_id: &str) -> Result<Option<PersistedSession>> {
 }
 
 /// 删除会话文件
-pub fn delete_session(session_id: &str) -> Result<()> {
+pub fn delete_session(session_id: &str) -> ErgataiResult<()> {
     let path = session_path(session_id);
     if path.exists() {
         std::fs::remove_file(&path)?;
@@ -84,7 +85,7 @@ pub fn delete_session(session_id: &str) -> Result<()> {
 }
 
 /// 更新会话标题
-pub fn update_session_title(session_id: &str, title: &str) -> Result<()> {
+pub fn update_session_title(session_id: &str, title: &str) -> ErgataiResult<()> {
     if let Some(mut session) = load_session(session_id)? {
         session.title = Some(title.to_string());
         session.updated_at = chrono::Utc::now().to_rfc3339();

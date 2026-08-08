@@ -1,8 +1,9 @@
-use anyhow::Result;
 use napi_derive::napi;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use url::Url;
+
+use crate::error::{ErgataiError, ErgataiResult};
 
 /// Normalize agent command to canonical identity.
 ///
@@ -204,10 +205,10 @@ pub struct AgentConfig {
 }
 
 /// 获取 agent 配置
-pub fn get_agent_config(name: &str) -> Result<AgentConfig> {
+pub fn get_agent_config(name: &str) -> ErgataiResult<AgentConfig> {
     let config_path = get_config_path(name);
     if !config_path.exists() {
-        anyhow::bail!("Agent config not found: {}", name);
+        return Err(ErgataiError::AgentNotFound(format!("Agent config not found: {}", name)));
     }
     let content = std::fs::read_to_string(&config_path)?;
     let mut config: AgentConfig = serde_json::from_str(&content)?;
@@ -260,7 +261,7 @@ pub fn normalize_agent_config(config: &mut AgentConfig) {
 }
 
 /// 保存 agent 配置
-pub fn save_agent_config(config: &AgentConfig) -> Result<()> {
+pub fn save_agent_config(config: &AgentConfig) -> ErgataiResult<()> {
     let config_dir = get_config_dir();
     std::fs::create_dir_all(&config_dir)?;
 

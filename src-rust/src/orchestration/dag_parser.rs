@@ -18,13 +18,14 @@
 
 use std::collections::HashMap;
 
-use anyhow::{Context, Result};
+use anyhow::Context;
+use crate::error::{ErgataiError, ErgataiResult};
 use uuid::Uuid;
 
 use crate::orchestration::dag_topology::{TaskGraph, TaskNode, TaskStatus};
 
 /// Parse a Markdown DAG specification into a TaskGraph
-pub fn parse_dag_markdown(content: &str) -> Result<TaskGraph> {
+pub fn parse_dag_markdown(content: &str) -> ErgataiResult<TaskGraph> {
     let mut temp_nodes = Vec::new();
     let mut current_node: Option<TaskNodeBuilder> = None;
 
@@ -64,14 +65,14 @@ pub fn parse_dag_markdown(content: &str) -> Result<TaskGraph> {
     }
 
     if temp_nodes.is_empty() {
-        anyhow::bail!("No tasks found in markdown");
+        return Err(ErgataiError::InvalidArgument("No tasks found in markdown".to_string()));
     }
 
     // Check for duplicate task names before building UUID mapping
     let mut seen_names = std::collections::HashSet::new();
     for node in &temp_nodes {
         if !seen_names.insert(&node.id) {
-            anyhow::bail!("Duplicate task name: '{}'", node.id);
+            return Err(ErgataiError::InvalidArgument(format!("Duplicate task name: '{}'", node.id)));
         }
     }
 
@@ -132,7 +133,7 @@ impl TaskNodeBuilder {
     }
 
     /// Build a temporary TaskNode with task name as ID (will be replaced with UUID)
-    fn build_temp(self) -> Result<TaskNode> {
+    fn build_temp(self) -> ErgataiResult<TaskNode> {
         // Merge parent into depends_on if specified
         let mut depends_on = self.depends_on;
         if let Some(ref parent) = self.parent {
@@ -169,25 +170,23 @@ impl TaskNodeBuilder {
 
 /// Parse node header: "## Task description" -> TaskNodeBuilder
 /// ID (UUID) is auto-generated during build()
-fn parse_node_header(line: &str) -> Result<TaskNodeBuilder> {
+fn parse_node_header(line: &str) -> ErgataiResult<TaskNodeBuilder> {
     // Remove markdown header markers
-    let task = if line.starts_with("### ") {
-        line[4..].trim()
-    } else if line.starts_with("## ") {
-        line[3..].trim()
-    } else {
-        anyhow::bail!("Invalid header format: {}", line);
-    };
+    let task = line
+        .strip_prefix("### ")
+        .or_else(|| line.strip_prefix("## "))
+        .map(str::trim)
+        .ok_or_else(|| ErgataiError::InvalidArgument(format!("Invalid header format: {}", line)))?;
 
     if task.is_empty() {
-        anyhow::bail!("Empty task description in: {}", line);
+        return Err(ErgataiError::InvalidArgument(format!("Empty task description in: {}", line)));
     }
 
     Ok(TaskNodeBuilder::new(task.to_string()))
 }
 
 /// Parse a property line: "- **key**: value"
-fn parse_property(builder: &mut TaskNodeBuilder, line: &str) -> Result<()> {
+fn parse_property(builder: &mut TaskNodeBuilder, line: &str) -> ErgataiResult<()> {
     // Extract key and value
     let key_start = line.find("**").with_context(|| "Missing ** in property")? + 2;
     let key_end = line[key_start..]
@@ -234,7 +233,7 @@ fn parse_property(builder: &mut TaskNodeBuilder, line: &str) -> Result<()> {
 }
 
 /// Parse array format: "[n1, n2, n3]" -> Vec<String>
-fn parse_array(value: &str) -> Result<Vec<String>> {
+fn parse_array(value: &str) -> ErgataiResult<Vec<String>> {
     let trimmed = value.trim();
 
     // Remove [ and ]

@@ -288,7 +288,7 @@ pub fn discover_acp_runtimes() -> Vec<AcpRuntimeCatalogEntry> {
         if let (Some(args), Some(binary)) = (&partial.auth_probe_args, &partial.binary_path) {
             let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
             let status = probe_auth_status(binary, &args_refs);
-            partial.entry.auth_status = status.clone();
+            partial.entry.auth_status = status;
 
             // Update availability based on auth status
             if status == AuthStatus::LoggedOut {

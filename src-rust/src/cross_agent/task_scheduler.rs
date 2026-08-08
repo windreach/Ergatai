@@ -4,7 +4,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::Context;
+use crate::error::{ErgataiError, ErgataiResult};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
@@ -80,7 +81,7 @@ impl TaskScheduler {
     }
 
     /// Load pending tasks from disk (call once at startup or when recovering state)
-    pub async fn load_from_disk(&self) -> Result<()> {
+    pub async fn load_from_disk(&self) -> ErgataiResult<()> {
         if tokio::fs::try_exists(&self.queue_file).await.unwrap_or(false) {
             let content = tokio::fs::read_to_string(&self.queue_file)
                 .await
@@ -121,7 +122,7 @@ impl TaskScheduler {
                         }
                         Err(e) => {
                             tracing::error!("Failed to parse queue file: {}", e);
-                            return Err(anyhow::anyhow!("Failed to parse queue file: {}", e));
+                            return Err(ErgataiError::json(format!("Failed to parse queue file: {}", e)));
                         }
                     }
                 }
@@ -137,7 +138,7 @@ impl TaskScheduler {
     }
 
     /// Save pending tasks to disk
-    pub async fn save_to_disk(&self) -> Result<()> {
+    pub async fn save_to_disk(&self) -> ErgataiResult<()> {
         let tasks = self.pending_tasks.lock().await.clone();
         let queue_file = QueueFile {
             version: QUEUE_FILE_VERSION,
@@ -149,7 +150,7 @@ impl TaskScheduler {
     }
 
     /// Submit a new task for scheduling
-    pub async fn submit_task(&self, plan_file: PathBuf) -> Result<String> {
+    pub async fn submit_task(&self, plan_file: PathBuf) -> ErgataiResult<String> {
         use std::time::{SystemTime, UNIX_EPOCH};
 
         // Load from disk once (idempotent, only loads if pending_tasks is empty)
@@ -195,7 +196,7 @@ impl TaskScheduler {
     }
 
     /// Try to schedule a task immediately
-    async fn try_schedule_task(&self, task: &PendingTask, plan: &TaskPlan) -> Result<bool> {
+    async fn try_schedule_task(&self, task: &PendingTask, plan: &TaskPlan) -> ErgataiResult<bool> {
         let availability = self.check_agent_availability(&task.target_agent).await;
 
         match availability {
@@ -228,7 +229,7 @@ impl TaskScheduler {
     }
 
     /// Launch a task (start agent)
-    async fn launch_task(&self, _task: &PendingTask, plan: &TaskPlan) -> Result<()> {
+    async fn launch_task(&self, _task: &PendingTask, plan: &TaskPlan) -> ErgataiResult<()> {
         let coordinator = TaskCoordinator::new(self.project_root.clone());
         let launcher = AgentLauncher::new(self.project_root.clone());
 
@@ -268,7 +269,7 @@ impl TaskScheduler {
     }
 
     /// Process pending tasks (call this periodically or after task completion)
-    pub async fn process_pending(&self) -> Result<usize> {
+    pub async fn process_pending(&self) -> ErgataiResult<usize> {
         let mut scheduled_count = 0;
         let mut tasks = self.pending_tasks.lock().await;
 
@@ -331,7 +332,7 @@ impl TaskScheduler {
     }
 
     /// Cancel a pending task
-    pub async fn cancel_task(&self, task_id: &str) -> Result<bool> {
+    pub async fn cancel_task(&self, task_id: &str) -> ErgataiResult<bool> {
         let mut tasks = self.pending_tasks.lock().await;
         let initial_len = tasks.len();
         tasks.retain(|t| t.task_id != task_id);

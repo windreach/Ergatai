@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use napi_derive::napi;
 use serde::{Deserialize, Serialize};
 
-use crate::error::ErgataiError;
+use crate::error::{ConfigError, ErgataiError};
 
 /// Global agent configuration record.
 ///
@@ -46,7 +46,6 @@ pub struct GlobalAgentConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GlobalAgentConfigSaveResult {
     pub config: GlobalAgentConfig,
-    pub restarted_count: usize,
 }
 
 /// Derived provider/model env keys that must NOT be set as global env vars.
@@ -66,12 +65,12 @@ pub const MAX_ENV_VALUE_BYTES: usize = 8192;
 /// Get the path to the global config file.
 fn global_config_path() -> Result<PathBuf, ErgataiError> {
     let app_data = dirs::config_dir()
-        .ok_or_else(|| ErgataiError::ConfigError("Could not determine config directory".to_string()))?
+        .ok_or(ErgataiError::ConfigError(ConfigError::DirectoryNotFound))?
         .join("ergatai")
         .join("agents");
 
     fs::create_dir_all(&app_data).map_err(|e| {
-        ErgataiError::ConfigError(format!("Failed to create agents config directory: {}", e))
+        ErgataiError::ConfigError(ConfigError::ReadFailed { source: e })
     })?;
 
     Ok(app_data.join("global-agent-config.json"))
@@ -88,11 +87,11 @@ pub fn load_global_agent_config() -> Result<GlobalAgentConfig, ErgataiError> {
     }
 
     let content = fs::read_to_string(&path).map_err(|e| {
-        ErgataiError::ConfigError(format!("Failed to read global agent config: {}", e))
+        ErgataiError::ConfigError(ConfigError::ReadFailed { source: e })
     })?;
 
     let config: GlobalAgentConfig = serde_json::from_str(&content).map_err(|e| {
-        ErgataiError::ConfigError(format!("Failed to parse global agent config: {}", e))
+        ErgataiError::ConfigError(ConfigError::ParseFailed { source: e })
     })?;
 
     Ok(config)
@@ -186,7 +185,7 @@ fn is_well_formed_env_key(key: &str) -> bool {
 /// Validates the config, strips empty values, and writes with restricted permissions (0o600).
 pub fn save_global_agent_config(config: &GlobalAgentConfig) -> Result<GlobalAgentConfigSaveResult, ErgataiError> {
     // Validate first
-    validate_global_config(config).map_err(ErgataiError::ConfigError)?;
+    validate_global_config(config).map_err(|reason| ErgataiError::ConfigError(ConfigError::ValidationFailed { reason }))?;
 
     // Strip empty values
     let mut cleaned = config.clone();
@@ -211,7 +210,7 @@ pub fn save_global_agent_config(config: &GlobalAgentConfig) -> Result<GlobalAgen
 
     let path = global_config_path()?;
     let content = serde_json::to_string_pretty(&cleaned).map_err(|e| {
-        ErgataiError::ConfigError(format!("Failed to serialize global agent config: {}", e))
+        ErgataiError::ConfigError(ConfigError::ParseFailed { source: e })
     })?;
 
     // Write with restricted permissions
@@ -222,26 +221,23 @@ pub fn save_global_agent_config(config: &GlobalAgentConfig) -> Result<GlobalAgen
         options.write(true).create(true).truncate(true).mode(0o600);
 
         let mut file = options.open(&path).map_err(|e| {
-            ErgataiError::ConfigError(format!("Failed to open global agent config for writing: {}", e))
+            ErgataiError::ConfigError(ConfigError::ReadFailed { source: e })
         })?;
 
         use std::io::Write;
         file.write_all(content.as_bytes()).map_err(|e| {
-            ErgataiError::ConfigError(format!("Failed to write global agent config: {}", e))
+            ErgataiError::ConfigError(ConfigError::ReadFailed { source: e })
         })?;
     }
 
     #[cfg(not(unix))]
     {
         fs::write(&path, &content).map_err(|e| {
-            ErgataiError::ConfigError(format!("Failed to write global agent config: {}", e))
+            ErgataiError::ConfigError(ConfigError::ReadFailed { source: e })
         })?;
     }
 
-    Ok(GlobalAgentConfigSaveResult {
-        config: cleaned,
-        restarted_count: 0, // TODO: Implement agent restart on config change
-    })
+    Ok(GlobalAgentConfigSaveResult { config: cleaned })
 }
 
 #[cfg(test)]

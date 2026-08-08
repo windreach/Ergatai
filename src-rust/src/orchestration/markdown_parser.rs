@@ -8,8 +8,7 @@
 //! ## Agent - Sub-task
 //! ### Agent - Sub-sub-task
 
-use anyhow::Result;
-
+use crate::error::{ErgataiError, ErgataiResult};
 use crate::orchestration::{TaskNode, TaskStatus, TaskTree};
 
 /// Parse a Markdown outline into a TaskTree
@@ -23,7 +22,7 @@ use crate::orchestration::{TaskNode, TaskStatus, TaskTree};
 /// ## Dev-2 - Implement UI
 /// # QA - Integration testing
 /// ```
-pub fn parse_markdown_tree(content: &str) -> Result<TaskTree> {
+pub fn parse_markdown_tree(content: &str) -> ErgataiResult<TaskTree> {
     let lines: Vec<&str> = content.lines().collect();
     let mut iter = lines.into_iter().enumerate().peekable();
 
@@ -41,7 +40,7 @@ pub fn parse_markdown_tree(content: &str) -> Result<TaskTree> {
     }
 
     if root_nodes.is_empty() {
-        anyhow::bail!("No tasks found in markdown outline");
+        return Err(ErgataiError::InvalidArgument("No tasks found in markdown outline".to_string()));
     }
 
     // If only one root node, use it directly
@@ -65,10 +64,10 @@ pub fn parse_markdown_tree(content: &str) -> Result<TaskTree> {
 }
 
 /// Parse a heading line: "# Agent - Task" -> (level, "Agent - Task")
-fn parse_heading(line: &str) -> Result<(usize, String)> {
+fn parse_heading(line: &str) -> ErgataiResult<(usize, String)> {
     let level = line.chars().take_while(|c| *c == '#').count();
     if level == 0 {
-        anyhow::bail!("Invalid heading: {}", line);
+        return Err(ErgataiError::InvalidArgument(format!("Invalid heading: {}", line)));
     }
 
     let task_text = line
@@ -80,7 +79,7 @@ fn parse_heading(line: &str) -> Result<(usize, String)> {
         .to_string();
 
     if task_text.is_empty() {
-        anyhow::bail!("Empty heading: {}", line);
+        return Err(ErgataiError::InvalidArgument(format!("Empty heading: {}", line)));
     }
 
     Ok((level, task_text))
@@ -91,7 +90,7 @@ fn parse_node_recursive<'a, I>(
     iter: &mut std::iter::Peekable<I>,
     parent_level: usize,
     task_text: &str,
-) -> Result<TaskNode>
+) -> ErgataiResult<TaskNode>
 where
     I: Iterator<Item = (usize, &'a str)>,
 {
@@ -127,7 +126,7 @@ where
 }
 
 /// Parse "Agent - Task" or "Agent: Task" format
-fn parse_task_format(text: &str) -> Result<(String, String)> {
+fn parse_task_format(text: &str) -> ErgataiResult<(String, String)> {
     // Try "Agent - Task" format
     if let Some((agent, task)) = text.split_once(" - ") {
         return Ok((agent.trim().to_string(), task.trim().to_string()));

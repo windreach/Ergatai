@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::Result;
+use crate::error::{ErgataiError, ErgataiResult};
 use tokio::sync::Mutex;
 
 use super::task_scheduler::{global_scheduler, TaskScheduler};
@@ -38,7 +38,7 @@ impl DagScheduler {
 
     /// Submit the DAG for execution
     /// Extracts all ready tasks and submits them to the scheduler
-    pub async fn submit_graph(&self) -> Result<Vec<String>> {
+    pub async fn submit_graph(&self) -> ErgataiResult<Vec<String>> {
         // Collect ready nodes while holding lock, then release it
         let ready_nodes: Vec<TaskNode> = {
             let graph = self.graph.lock().await;
@@ -70,7 +70,7 @@ impl DagScheduler {
     }
 
     /// Generate plan and submit to scheduler (no lock acquisition)
-    async fn generate_and_submit(&self, node: &TaskNode) -> Result<String> {
+    async fn generate_and_submit(&self, node: &TaskNode) -> ErgataiResult<String> {
         // Release lock before async I/O — generate_node_plan doesn't need the graph
         // (ponytail: held lock across await made future !Send, breaking tokio::spawn callers)
         {
@@ -89,7 +89,7 @@ impl DagScheduler {
 
     /// Generate a plan file for a single node
     /// This reuses the existing plan file infrastructure
-    async fn generate_node_plan(&self, node: &TaskNode) -> Result<PathBuf> {
+    async fn generate_node_plan(&self, node: &TaskNode) -> ErgataiResult<PathBuf> {
         let plan_dir = self.project_root.join(".ergatai").join(".dag-plans");
         tokio::fs::create_dir_all(&plan_dir).await?;
 
@@ -127,7 +127,7 @@ impl DagScheduler {
         &self,
         node_id: &str,
         result_path: Option<String>,
-    ) -> Result<Vec<String>> {
+    ) -> ErgataiResult<Vec<String>> {
         // Update status under lock, then release
         {
             let mut graph = self.graph.lock().await;
@@ -179,7 +179,7 @@ impl DagScheduler {
         // Save updated graph — serialize under lock, then write without holding it
         let graph_json = {
             let graph = self.graph.lock().await;
-            serde_json::to_string(&*graph).map_err(|e| anyhow::anyhow!("Failed to serialize graph: {}", e))?
+            serde_json::to_string(&*graph).map_err(|e| ErgataiError::json_with_source("Failed to serialize graph", e))?
         };
         let graph_file = self.project_root.join(".ergatai").join("dag-state.json");
         tokio::fs::write(&graph_file, graph_json.as_bytes()).await?;
@@ -197,7 +197,7 @@ impl DagScheduler {
     }
 
     /// Called when a node fails
-    pub async fn on_node_failed(&self, node_id: &str, error: &str) -> Result<()> {
+    pub async fn on_node_failed(&self, node_id: &str, error: &str) -> ErgataiResult<()> {
         // Determine retry decision and clone node data under lock
         let (should_retry, retry_count, node_clone) = {
             let mut graph = self.graph.lock().await;
@@ -205,7 +205,7 @@ impl DagScheduler {
             let should_retry = graph.retry_failed(node_id)?;
             let node = graph
                 .find_node(node_id)
-                .ok_or_else(|| anyhow::anyhow!("Node not found: {}", node_id))?;
+                .ok_or_else(|| ErgataiError::InvalidArgument(format!("Node not found: {}", node_id)))?;
             (should_retry, node.retry_count, node.clone())
         }; // Lock released here
 
@@ -242,35 +242,46 @@ impl DagScheduler {
         Ok(())
     }
 
-    /// Recursively skip all nodes that depend on the failed node
-    fn skip_downstream<'a>(&'a self, failed_id: &'a str) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
-        Box::pin(async move {
-            let downstream: Vec<String> = {
-                let graph = self.graph.lock().await;
-                graph
-                    .nodes
-                    .iter()
-                    .filter(|n| n.depends_on.contains(&failed_id.to_string()))
-                    .map(|n| n.id.clone())
-                    .collect()
-            };
+    /// Skip all nodes that (transitively) depend on the failed node.
+    ///
+    /// ponytail: BFS under a single read lock to collect all skip targets,
+    /// then batch-update under a single write lock. Avoids the recursive
+    /// lock/unlock cycles the old implementation had.
+    async fn skip_downstream(&self, failed_id: &str) -> ErgataiResult<()> {
+        // 1. BFS to collect all transitively dependent pending nodes.
+        let to_skip: Vec<String> = {
+            let graph = self.graph.lock().await;
+            let mut queue = vec![failed_id.to_string()];
+            let mut to_skip = Vec::new();
+            let mut seen = std::collections::HashSet::new();  // O(1) lookup
 
-            for node_id in downstream {
-                {
-                    let mut graph = self.graph.lock().await;
-                    if let Some(node) = graph.find_node_mut(&node_id) {
-                        if node.status == TaskStatus::Pending {
-                            node.status = TaskStatus::Skipped;
-                            tracing::info!("Skipped node {} (depends on failed {})", node_id, failed_id);
-                        }
+            while let Some(current) = queue.pop() {
+                for node in &graph.nodes {
+                    if node.depends_on.contains(&current)
+                        && node.status == TaskStatus::Pending
+                        && seen.insert(&node.id)  // O(1) check + insert
+                    {
+                        to_skip.push(node.id.clone());
+                        queue.push(node.id.clone());
                     }
                 }
-                // Recursively skip nodes that depend on this one
-                self.skip_downstream(&node_id).await?;
             }
 
-            Ok(())
-        })
+            to_skip
+        };
+
+        // 2. Batch-update all skipped nodes under a single write lock.
+        if !to_skip.is_empty() {
+            let mut graph = self.graph.lock().await;
+            for node_id in &to_skip {
+                if let Some(node) = graph.find_node_mut(node_id) {
+                    node.status = TaskStatus::Skipped;
+                    tracing::info!("Skipped node {} (depends on failed {})", node_id, failed_id);
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// Get current progress
@@ -293,10 +304,10 @@ impl DagScheduler {
 
     /// Save graph to disk (serializes under lock, writes without holding it)
     /// ponytail: avoids holding MutexGuard across async I/O which would make the future !Send
-    async fn save_graph_unlocked(&self) -> Result<()> {
+    async fn save_graph_unlocked(&self) -> ErgataiResult<()> {
         let graph_json = {
             let graph = self.graph.lock().await;
-            serde_json::to_string(&*graph).map_err(|e| anyhow::anyhow!("Failed to serialize graph: {}", e))?
+            serde_json::to_string(&*graph).map_err(|e| ErgataiError::json_with_source("Failed to serialize graph", e))?
         };
         let graph_file = self.project_root.join(".ergatai").join("dag-state.json");
         tokio::fs::write(&graph_file, graph_json.as_bytes()).await?;
@@ -304,16 +315,16 @@ impl DagScheduler {
     }
 
     /// Load graph from disk (for recovery)
-    pub async fn load_from_disk(project_root: PathBuf) -> Result<Self> {
+    pub async fn load_from_disk(project_root: PathBuf) -> ErgataiResult<Self> {
         let graph_file = project_root.join(".ergatai").join("dag-state.json");
         let graph = TaskGraph::load_from_file(&graph_file).await?;
         Ok(Self::new(project_root, graph))
     }
 
     /// Get a JSON snapshot of the current graph state
-    pub async fn graph_snapshot(&self) -> Result<String> {
+    pub async fn graph_snapshot(&self) -> ErgataiResult<String> {
         let graph = self.graph.lock().await;
-        serde_json::to_string(&*graph).map_err(|e| anyhow::anyhow!("Failed to serialize graph: {}", e))
+        serde_json::to_string(&*graph).map_err(|e| ErgataiError::json_with_source("Failed to serialize graph", e))
     }
 }
 
@@ -329,17 +340,35 @@ fn dag_slot() -> &'static StdMutex<Option<DagScheduler>> {
 
 /// Set the active DAG scheduler (replaces any existing one)
 pub fn set_dag_scheduler(scheduler: DagScheduler) {
-    *dag_slot().lock().unwrap() = Some(scheduler);
+    match dag_slot().lock() {
+        Ok(mut guard) => *guard = Some(scheduler),
+        Err(poisoned) => {
+            tracing::error!("Global DAG scheduler lock poisoned, recovering");
+            *poisoned.into_inner() = Some(scheduler);
+        }
+    }
 }
 
 /// Get a clone of the active DAG scheduler, if any
 pub fn get_dag_scheduler() -> Option<DagScheduler> {
-    dag_slot().lock().unwrap().clone()
+    match dag_slot().lock() {
+        Ok(guard) => guard.clone(),
+        Err(poisoned) => {
+            tracing::error!("Global DAG scheduler lock poisoned, recovering");
+            poisoned.into_inner().clone()
+        }
+    }
 }
 
 /// Clear the active DAG scheduler
 pub fn clear_dag_scheduler() {
-    *dag_slot().lock().unwrap() = None;
+    match dag_slot().lock() {
+        Ok(mut guard) => *guard = None,
+        Err(poisoned) => {
+            tracing::error!("Global DAG scheduler lock poisoned, recovering");
+            *poisoned.into_inner() = None;
+        }
+    }
 }
 
 #[cfg(test)]

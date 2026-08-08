@@ -21,7 +21,8 @@
 
 use std::collections::HashMap;
 
-use anyhow::{Context, Result};
+use anyhow::Context;
+use crate::error::{ErgataiError, ErgataiResult};
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 
@@ -144,7 +145,7 @@ impl TaskGraph {
     }
 
     /// Update a node's status by ID
-    pub fn update_status(&mut self, id: &str, status: TaskStatus) -> Result<()> {
+    pub fn update_status(&mut self, id: &str, status: TaskStatus) -> ErgataiResult<()> {
         let node = self
             .find_node_mut(id)
             .with_context(|| format!("Node not found: {}", id))?;
@@ -153,7 +154,7 @@ impl TaskGraph {
     }
 
     /// Set result path for a completed node
-    pub fn set_result(&mut self, id: &str, result_path: String) -> Result<()> {
+    pub fn set_result(&mut self, id: &str, result_path: String) -> ErgataiResult<()> {
         let node = self
             .find_node_mut(id)
             .with_context(|| format!("Node not found: {}", id))?;
@@ -163,7 +164,7 @@ impl TaskGraph {
     }
 
     /// Increment retry count for a failed node
-    pub fn retry_failed(&mut self, id: &str) -> Result<bool> {
+    pub fn retry_failed(&mut self, id: &str) -> ErgataiResult<bool> {
         let node = self
             .find_node_mut(id)
             .with_context(|| format!("Node not found: {}", id))?;
@@ -201,12 +202,12 @@ impl TaskGraph {
     }
 
     /// Validate the DAG (check for cycles and missing dependencies)
-    pub fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> ErgataiResult<()> {
         // Check for duplicate IDs
         let mut seen_ids = std::collections::HashSet::new();
         for node in &self.nodes {
             if !seen_ids.insert(node.id.as_str()) {
-                anyhow::bail!("Duplicate node ID: {}", node.id);
+                return Err(ErgataiError::InvalidArgument(format!("Duplicate node ID: {}", node.id)));
             }
         }
 
@@ -215,18 +216,18 @@ impl TaskGraph {
         for node in &self.nodes {
             for dep in &node.depends_on {
                 if !all_ids.contains(&dep.as_str()) {
-                    anyhow::bail!(
+                    return Err(ErgataiError::InvalidArgument(format!(
                         "Node {} depends on {}, which doesn't exist",
                         node.id,
                         dep
-                    );
+                    )));
                 }
             }
         }
 
         // Check for cycles using topological sort
         if self.has_cycle() {
-            anyhow::bail!("Graph has cycles");
+            return Err(ErgataiError::InvalidArgument("Graph has cycles".to_string()));
         }
 
         Ok(())
@@ -272,10 +273,11 @@ impl TaskGraph {
 
     /// Serialize to AI-friendly format
     pub fn to_ai_prompt(&self) -> String {
-        let mut output = String::new();
+        use std::fmt::Write;
+        let mut output = String::with_capacity(256);
 
         if let Some(desc) = &self.description {
-            output.push_str(&format!("Goal: {}\n\n", desc));
+            let _ = writeln!(output, "Goal: {}\n", desc);
         }
 
         output.push_str("Task Graph:\n");
@@ -291,32 +293,29 @@ impl TaskGraph {
             // Show task path if available, otherwise show task description
             let task_ref = node.metadata
                 .get("task_path")
-                .map(|p| format!("{}", p))
-                .unwrap_or_else(|| node.task.clone());
+                .map(|p| p.as_str())
+                .unwrap_or(&node.task);
 
-            output.push_str(&format!(
-                "{} {} → {}",
-                status_icon, node.agent, task_ref
-            ));
+            let _ = write!(output, "{} {} → {}", status_icon, node.agent, task_ref);
 
             if !node.depends_on.is_empty() {
-                output.push_str(&format!(" (depends: {})", node.depends_on.join(", ")));
+                let _ = write!(output, " (depends: {})", node.depends_on.join(", "));
             }
 
             output.push('\n');
         }
 
-        output.push_str(&format!("\nProgress: {:.0}%\n", self.progress() * 100.0));
+        let _ = writeln!(output, "\nProgress: {:.0}%", self.progress() * 100.0);
 
         let ready = self.ready_tasks();
         if !ready.is_empty() {
-            output.push_str("\nReady to execute:\n");
+            output.push_str("Ready to execute:\n");
             for node in ready {
                 let task_ref = node.metadata
                     .get("task_path")
                     .map(|p| p.as_str())
                     .unwrap_or(&node.task);
-                output.push_str(&format!("  - {} ({})\n", node.agent, task_ref));
+                let _ = writeln!(output, "  - {} ({})", node.agent, task_ref);
             }
         }
 
@@ -324,14 +323,14 @@ impl TaskGraph {
     }
 
     /// Save to file
-    pub async fn save_to_file(&self, path: &std::path::Path) -> Result<()> {
+    pub async fn save_to_file(&self, path: &std::path::Path) -> ErgataiResult<()> {
         let json = serde_json::to_string_pretty(self)?;
         fs::write(path, json).await?;
         Ok(())
     }
 
     /// Load from file
-    pub async fn load_from_file(path: &std::path::Path) -> Result<Self> {
+    pub async fn load_from_file(path: &std::path::Path) -> ErgataiResult<Self> {
         let content = fs::read_to_string(path).await?;
         let graph: Self = serde_json::from_str(&content)?;
         Ok(graph)

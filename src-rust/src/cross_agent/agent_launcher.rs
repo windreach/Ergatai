@@ -5,7 +5,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
-use anyhow::{Context, Result};
+use anyhow::Context;
+use crate::error::ErgataiResult;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, oneshot};
 
@@ -83,7 +84,7 @@ impl AgentLauncher {
     }
 
     /// Launch all agents for a task plan
-    pub async fn launch_agents(&self, plan: &TaskPlan) -> Result<Vec<String>> {
+    pub async fn launch_agents(&self, plan: &TaskPlan) -> ErgataiResult<Vec<String>> {
         let mut agent_ids = Vec::new();
 
         for assignment in &plan.assignments {
@@ -99,7 +100,7 @@ impl AgentLauncher {
         &self,
         plan: &TaskPlan,
         assignment: &AgentAssignment,
-    ) -> Result<String> {
+    ) -> ErgataiResult<String> {
         let agent_id = Self::make_agent_id(&plan.task_id, &assignment.agent_name);
 
         // Create worktree
@@ -325,7 +326,7 @@ Write your results in markdown:
         agent_name: &str,
         instruction: &str,
         node_id: Option<String>,
-    ) -> Result<()> {
+    ) -> ErgataiResult<()> {
         let mut config = crate::agent::config::get_agent_config(agent_name)
             .with_context(|| format!("Failed to load config for agent '{}'", agent_name))?;
         crate::agent::config::normalize_agent_config(&mut config);
@@ -522,7 +523,7 @@ Write your results in markdown:
     }
 
     /// Clean up agent resources (ACP session + worktree)
-    pub async fn cleanup_agent(&self, agent_id: &str) -> Result<()> {
+    pub async fn cleanup_agent(&self, agent_id: &str) -> ErgataiResult<()> {
         if let Some(agent) = self.running_agents.lock().await.remove(agent_id) {
             // Close ACP session if still active
             if let Some(ref session_id) = agent.session_id {

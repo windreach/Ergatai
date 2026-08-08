@@ -378,7 +378,7 @@ async fn run_sdk_session(
 
     // Handle connection result
     if let Err(e) = result {
-        return Err(ErgataiError::InternalError(format!("SDK connection failed: {}", e)));
+        return Err(ErgataiError::internal(format!("SDK connection failed: {}", e)));
     }
 
     // Return session_id
@@ -386,7 +386,7 @@ async fn run_sdk_session(
         .lock()
         .ok()
         .and_then(|h| h.clone())
-        .ok_or_else(|| ErgataiError::InternalError("Session ID not captured".into()))?;
+        .ok_or_else(|| ErgataiError::internal("Session ID not captured"))?;
 
     Ok(session_id)
 }

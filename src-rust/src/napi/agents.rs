@@ -3,7 +3,6 @@
 //! Exposes Rust agent management functions to TypeScript via NAPI-RS.
 
 use napi_derive::napi;
-use serde::{Deserialize, Serialize};
 
 use crate::agent::{
     custom_harness::{self, HarnessDefinition},

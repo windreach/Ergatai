@@ -3,7 +3,8 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Context;
+use crate::error::{ErgataiError, ErgataiResult};
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 use tokio::process::Command;
@@ -14,9 +15,9 @@ use tokio::process::Command;
 /// `.ergatai/` directory or cause surprising filesystem behavior. Called at the
 /// public-API boundary of every function that interpolates `task_id` or
 /// `agent_name` into a path.
-fn validate_path_component(name: &str, label: &str) -> Result<()> {
+fn validate_path_component(name: &str, label: &str) -> ErgataiResult<()> {
     if name.is_empty() {
-        anyhow::bail!("{} must not be empty", label);
+        return Err(ErgataiError::InvalidArgument(format!("{} must not be empty", label)));
     }
     if name.contains("..")
         || name.contains('/')
@@ -26,11 +27,11 @@ fn validate_path_component(name: &str, label: &str) -> Result<()> {
         || name.contains('*')
         || name.contains('?')
     {
-        anyhow::bail!(
+        return Err(ErgataiError::InvalidArgument(format!(
             "{} contains invalid characters (refusing path traversal): {:?}",
             label,
             name
-        );
+        )));
     }
     Ok(())
 }
@@ -125,7 +126,7 @@ impl TaskCoordinator {
     }
 
     /// Initialize directories
-    pub async fn init(&self) -> Result<()> {
+    pub async fn init(&self) -> ErgataiResult<()> {
         fs::create_dir_all(&self.plan_dir).await?;
         fs::create_dir_all(&self.worktree_dir).await?;
         fs::create_dir_all(&self.results_dir).await?;
@@ -133,7 +134,7 @@ impl TaskCoordinator {
     }
 
     /// Create a new task plan file
-    pub async fn create_plan(&self, task_id: &str, content: &str) -> Result<PathBuf> {
+    pub async fn create_plan(&self, task_id: &str, content: &str) -> ErgataiResult<PathBuf> {
         validate_path_component(task_id, "task_id")?;
         let plan_file = self.plan_dir.join(format!("{}.md", task_id));
         fs::write(&plan_file, content).await?;
@@ -141,7 +142,7 @@ impl TaskCoordinator {
     }
 
     /// Parse a task plan file
-    pub async fn parse_plan(&self, plan_file: &Path) -> Result<TaskPlan> {
+    pub async fn parse_plan(&self, plan_file: &Path) -> ErgataiResult<TaskPlan> {
         let content = fs::read_to_string(plan_file)
             .await
             .with_context(|| format!("Failed to read plan file: {:?}", plan_file))?;
@@ -171,7 +172,7 @@ impl TaskCoordinator {
     }
 
     /// Create git worktree for an agent
-    pub async fn create_worktree(&self, task_id: &str, agent: &str) -> Result<PathBuf> {
+    pub async fn create_worktree(&self, task_id: &str, agent: &str) -> ErgataiResult<PathBuf> {
         validate_path_component(task_id, "task_id")?;
         validate_path_component(agent, "agent")?;
         let worktree_name = format!("{}-{}", task_id, agent);
@@ -211,14 +212,14 @@ impl TaskCoordinator {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("Git worktree add failed: {}", stderr);
+            return Err(ErgataiError::internal(format!("Git worktree add failed: {}", stderr)));
         }
 
         Ok(worktree_path)
     }
 
     /// Get worktree status (changed files)
-    pub async fn get_worktree_status(&self, worktree_path: &Path) -> Result<WorktreeStatus> {
+    pub async fn get_worktree_status(&self, worktree_path: &Path) -> ErgataiResult<WorktreeStatus> {
         let output = Command::new("git")
             .args(["status", "--porcelain"])
             .current_dir(worktree_path)
@@ -257,7 +258,7 @@ impl TaskCoordinator {
     }
 
     /// Merge worktree changes to main branch
-    pub async fn merge_worktree(&self, task_id: &str, agent: &str) -> Result<MergeResult> {
+    pub async fn merge_worktree(&self, task_id: &str, agent: &str) -> ErgataiResult<MergeResult> {
         validate_path_component(task_id, "task_id")?;
         validate_path_component(agent, "agent")?;
         let worktree_name = format!("{}-{}", task_id, agent);
@@ -294,7 +295,7 @@ impl TaskCoordinator {
             .with_context(|| "Failed to invoke git checkout -b")?;
         if !checkout_status.status.success() {
             let stderr = String::from_utf8_lossy(&checkout_status.stderr);
-            anyhow::bail!("git checkout -b {} failed: {}", branch_name, stderr);
+            return Err(ErgataiError::internal(format!("git checkout -b {} failed: {}", branch_name, stderr)));
         }
 
         let add_status = Command::new("git")
@@ -305,7 +306,7 @@ impl TaskCoordinator {
             .with_context(|| "Failed to invoke git add")?;
         if !add_status.status.success() {
             let stderr = String::from_utf8_lossy(&add_status.stderr);
-            anyhow::bail!("git add -A failed: {}", stderr);
+            return Err(ErgataiError::internal(format!("git add -A failed: {}", stderr)));
         }
 
         let commit_msg = format!("Task {}: {} completion", task_id, agent);
@@ -317,7 +318,7 @@ impl TaskCoordinator {
             .with_context(|| "Failed to invoke git commit")?;
         if !commit_status.status.success() {
             let stderr = String::from_utf8_lossy(&commit_status.stderr);
-            anyhow::bail!("git commit failed: {}", stderr);
+            return Err(ErgataiError::internal(format!("git commit failed: {}", stderr)));
         }
 
         // Try to merge to main
@@ -371,7 +372,7 @@ impl TaskCoordinator {
     }
 
     /// Clean up worktree
-    pub async fn cleanup_worktree(&self, task_id: &str, agent: &str) -> Result<()> {
+    pub async fn cleanup_worktree(&self, task_id: &str, agent: &str) -> ErgataiResult<()> {
         validate_path_component(task_id, "task_id")?;
         validate_path_component(agent, "agent")?;
         let worktree_name = format!("{}-{}", task_id, agent);
@@ -398,7 +399,7 @@ impl TaskCoordinator {
     }
 
     /// Clean up all worktrees for a task
-    pub async fn cleanup_task(&self, task_id: &str) -> Result<()> {
+    pub async fn cleanup_task(&self, task_id: &str) -> ErgataiResult<()> {
         validate_path_component(task_id, "task_id")?;
         let pattern = format!("{}-", task_id);
         if let Ok(mut entries) = fs::read_dir(&self.worktree_dir).await {
@@ -447,7 +448,7 @@ impl TaskCoordinator {
     }
 
     /// Check if all assignments in a plan are completed
-    pub async fn check_completion(&self, plan: &TaskPlan) -> Result<bool> {
+    pub async fn check_completion(&self, plan: &TaskPlan) -> ErgataiResult<bool> {
         validate_path_component(&plan.task_id, "task_id")?;
         for assignment in &plan.assignments {
             validate_path_component(&assignment.agent_name, "agent")?;
@@ -463,7 +464,7 @@ impl TaskCoordinator {
     }
 
     /// Get the result file path for an agent
-    pub fn get_result_path(&self, task_id: &str, agent: &str) -> Result<PathBuf> {
+    pub fn get_result_path(&self, task_id: &str, agent: &str) -> ErgataiResult<PathBuf> {
         validate_path_component(task_id, "task_id")?;
         validate_path_component(agent, "agent")?;
         Ok(self.results_dir.join(format!("{}-{}.md", task_id, agent)))
@@ -518,7 +519,7 @@ fn extract_merge_strategy(content: &str) -> Option<String> {
     None
 }
 
-fn parse_assignments(content: &str, task_id: &str) -> Result<Vec<AgentAssignment>> {
+fn parse_assignments(content: &str, task_id: &str) -> ErgataiResult<Vec<AgentAssignment>> {
     let mut assignments = Vec::new();
     let mut current_assignment: Option<AgentAssignmentBuilder> = None;
 
@@ -716,7 +717,7 @@ impl AgentAssignmentBuilder {
         }
     }
 
-    fn build(self) -> Result<AgentAssignment> {
+    fn build(self) -> ErgataiResult<AgentAssignment> {
         let task_type = self.task_type.unwrap_or(TaskType::ReadOnly);
         let objective = self.objective.unwrap_or_else(|| "No objective specified".to_string());
 

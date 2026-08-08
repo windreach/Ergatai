@@ -43,6 +43,26 @@ bun run db:generate      # Generate migrations from schema
 bun run db:push          # Push schema directly (dev only)
 ```
 
+## Architecture Principles
+
+**分层职责：**
+
+| 层 | 语言 | 职责 |
+|---|------|------|
+| **Rust 后端** (`src-rust/`) | Rust | 核心逻辑、性能关键路径、安全保障 |
+| **TypeScript 后端** (`src/main/`) | TypeScript | 表层业务逻辑、调用 Rust（通过 NAPI） |
+| **前端** (`src/renderer/`) | TypeScript | UI 层 |
+
+**Fork 原则：**
+- 前端 + 后端 TS 是从 21st Agents fork 的，可能前后端不一致
+- **默认原则：以后端（`src/main/`）为主**
+- 发现不一致时，告诉用户进行取舍决策
+
+**调用链：**
+```
+Frontend (TS) → tRPC → Main (TS) → NAPI → Rust (核心逻辑)
+```
+
 ## Architecture
 
 ```

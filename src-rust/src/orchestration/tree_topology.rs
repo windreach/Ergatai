@@ -10,7 +10,8 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use anyhow::{Context, Result};
+use anyhow::Context;
+use crate::error::ErgataiResult;
 use tokio::fs;
 
 /// Root of the task tree
@@ -142,7 +143,7 @@ impl TaskTree {
     }
 
     /// Update a node's status by ID
-    pub fn update_status(&mut self, id: &str, status: TaskStatus) -> Result<()> {
+    pub fn update_status(&mut self, id: &str, status: TaskStatus) -> ErgataiResult<()> {
         let node = self
             .find_node_mut(id)
             .with_context(|| format!("Node not found: {}", id))?;
@@ -151,7 +152,7 @@ impl TaskTree {
     }
 
     /// Set result path for a completed node
-    pub fn set_result(&mut self, id: &str, result_path: String) -> Result<()> {
+    pub fn set_result(&mut self, id: &str, result_path: String) -> ErgataiResult<()> {
         let node = self
             .find_node_mut(id)
             .with_context(|| format!("Node not found: {}", id))?;
@@ -245,14 +246,14 @@ impl TaskTree {
     }
 
     /// Save to file
-    pub async fn save_to_file(&self, path: &std::path::Path) -> Result<()> {
+    pub async fn save_to_file(&self, path: &std::path::Path) -> ErgataiResult<()> {
         let json = serde_json::to_string_pretty(self)?;
         fs::write(path, json).await?;
         Ok(())
     }
 
     /// Load from file
-    pub async fn load_from_file(path: &std::path::Path) -> Result<Self> {
+    pub async fn load_from_file(path: &std::path::Path) -> ErgataiResult<Self> {
         let content = fs::read_to_string(path).await?;
         let tree: Self = serde_json::from_str(&content)?;
         Ok(tree)

@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use napi_derive::napi;
 use serde::{Deserialize, Serialize};
 
-use crate::error::ErgataiError;
+use crate::error::{ConfigError, ErgataiError};
 
 /// Custom harness definition loaded from JSON.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,12 +45,14 @@ pub struct HarnessDefinition {
 /// Get the path to the custom harnesses directory.
 fn custom_harnesses_dir() -> Result<PathBuf, ErgataiError> {
     let app_data = dirs::config_dir()
-        .ok_or_else(|| ErgataiError::ConfigError("Could not determine config directory".to_string()))?
+        .ok_or(ErgataiError::ConfigError(ConfigError::DirectoryNotFound))?
         .join("ergatai")
         .join("custom_harnesses");
 
     fs::create_dir_all(&app_data).map_err(|e| {
-        ErgataiError::ConfigError(format!("Failed to create custom harnesses directory: {}", e))
+        ErgataiError::ConfigError(ConfigError::ValidationFailed {
+            reason: format!("Failed to create custom harnesses directory {}: {}", app_data.display(), e),
+        })
     })?;
 
     Ok(app_data)
@@ -69,10 +71,10 @@ pub fn load_custom_harnesses() -> Result<Vec<HarnessDefinition>, ErgataiError> {
     let mut harnesses = Vec::new();
 
     for entry in fs::read_dir(&dir).map_err(|e| {
-        ErgataiError::ConfigError(format!("Failed to read custom harnesses directory: {}", e))
+        ErgataiError::ConfigError(ConfigError::ReadFailed { source: e })
     })? {
         let entry = entry.map_err(|e| {
-            ErgataiError::ConfigError(format!("Failed to read directory entry: {}", e))
+            ErgataiError::ConfigError(ConfigError::ReadFailed { source: e })
         })?;
 
         let path = entry.path();
@@ -101,32 +103,38 @@ pub fn load_custom_harnesses() -> Result<Vec<HarnessDefinition>, ErgataiError> {
 /// Load a single harness definition from a JSON file.
 fn load_harness_from_file(path: &Path) -> Result<HarnessDefinition, ErgataiError> {
     let content = fs::read_to_string(path).map_err(|e| {
-        ErgataiError::ConfigError(format!("Failed to read harness file: {}", e))
+        ErgataiError::ConfigError(ConfigError::ReadFailed { source: e })
     })?;
 
     let harness: HarnessDefinition = serde_json::from_str(&content).map_err(|e| {
-        ErgataiError::ConfigError(format!("Failed to parse harness JSON: {}", e))
+        ErgataiError::ConfigError(ConfigError::ParseFailed { source: e })
     })?;
 
     // Validate that the id matches the filename
     let expected_id = path
         .file_stem()
         .and_then(|s| s.to_str())
-        .ok_or_else(|| ErgataiError::ConfigError("Invalid harness filename".to_string()))?;
+        .ok_or_else(|| ErgataiError::ConfigError(ConfigError::ValidationFailed {
+            reason: "Invalid harness filename".to_string(),
+        }))?;
 
     if harness.id != expected_id {
-        return Err(ErgataiError::ConfigError(format!(
-            "Harness id '{}' does not match filename '{}'",
-            harness.id, expected_id
-        )));
+        return Err(ErgataiError::ConfigError(ConfigError::ValidationFailed {
+            reason: format!(
+                "Harness id '{}' does not match filename '{}'",
+                harness.id, expected_id
+            ),
+        }));
     }
 
     // Validate id format
     if !is_valid_harness_id(&harness.id) {
-        return Err(ErgataiError::ConfigError(format!(
-            "Invalid harness id '{}': must match [a-z0-9_][a-z0-9_-]*",
-            harness.id
-        )));
+        return Err(ErgataiError::ConfigError(ConfigError::ValidationFailed {
+            reason: format!(
+                "Invalid harness id '{}': must match [a-z0-9_][a-z0-9_-]*",
+                harness.id
+            ),
+        }));
     }
 
     Ok(harness)
@@ -148,11 +156,11 @@ pub fn save_custom_harness(harness: &HarnessDefinition) -> Result<(), ErgataiErr
     let path = dir.join(format!("{}.json", harness.id));
 
     let content = serde_json::to_string_pretty(harness).map_err(|e| {
-        ErgataiError::ConfigError(format!("Failed to serialize harness: {}", e))
+        ErgataiError::ConfigError(ConfigError::ParseFailed { source: e })
     })?;
 
     fs::write(&path, content).map_err(|e| {
-        ErgataiError::ConfigError(format!("Failed to write harness file: {}", e))
+        ErgataiError::ConfigError(ConfigError::ReadFailed { source: e })
     })?;
 
     Ok(())
@@ -171,7 +179,7 @@ pub fn delete_custom_harness(id: &str) -> Result<(), ErgataiError> {
     }
 
     fs::remove_file(&path).map_err(|e| {
-        ErgataiError::ConfigError(format!("Failed to delete harness file: {}", e))
+        ErgataiError::ConfigError(ConfigError::ReadFailed { source: e })
     })?;
 
     Ok(())
