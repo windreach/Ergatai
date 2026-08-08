@@ -20,6 +20,8 @@ import {
   IconChevronDown,
   PlanIcon,
   SearchIcon,
+  SparkleIcon,
+  TeamIcon,
 } from "../../../components/ui/icons"
 import {
   Popover,
@@ -41,6 +43,7 @@ import {
   selectedChatIsRemoteAtom,
   selectedDraftIdAtom,
   selectedProjectAtom,
+  AGENT_MODES,
   getNextMode,
   type AgentMode,
 } from "../atoms"
@@ -1708,10 +1711,12 @@ export function NewChatForm({
                         <DropdownMenuTrigger className="flex items-center gap-1.5 px-2 py-1 text-sm text-muted-foreground hover:text-foreground transition-[background-color,color] duration-150 ease-out rounded-md hover:bg-muted/50 outline-offset-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring/70">
                           {agentMode === "plan" ? (
                             <PlanIcon className="h-3.5 w-3.5" />
+                          ) : agentMode === "team" ? (
+                            <TeamIcon className="h-3.5 w-3.5" />
                           ) : (
-                            <AgentIcon className="h-3.5 w-3.5" />
+                            <SparkleIcon className="h-3.5 w-3.5" />
                           )}
-                          <span>{agentMode === "plan" ? "Plan" : "Agent"}</span>
+                          <span>{agentMode === "plan" ? "Plan" : agentMode === "team" ? "Team" : "Auto"}</span>
                           <IconChevronDown className="h-3 w-3 shrink-0 opacity-50" />
                         </DropdownMenuTrigger>
                         <DropdownMenuContent
@@ -1720,117 +1725,75 @@ export function NewChatForm({
                           className="!min-w-[116px] !w-[116px]"
                           onCloseAutoFocus={(e) => e.preventDefault()}
                         >
-                          <DropdownMenuItem
-                            onClick={() => {
-                              // Clear tooltip before closing dropdown (onMouseLeave won't fire)
-                              if (tooltipTimeoutRef.current) {
-                                clearTimeout(tooltipTimeoutRef.current)
-                                tooltipTimeoutRef.current = null
-                              }
-                              setModeTooltip(null)
-                              setAgentMode("agent")
-                              setModeDropdownOpen(false)
-                            }}
-                            className="justify-between gap-2"
-                            onMouseEnter={(e) => {
-                              if (tooltipTimeoutRef.current) {
-                                clearTimeout(tooltipTimeoutRef.current)
-                                tooltipTimeoutRef.current = null
-                              }
-                              const rect =
-                                e.currentTarget.getBoundingClientRect()
-                              const showTooltip = () => {
-                                setModeTooltip({
-                                  visible: true,
-                                  position: {
-                                    top: rect.top,
-                                    left: rect.right + 8,
-                                  },
-                                  mode: "agent",
-                                })
-                                hasShownTooltipRef.current = true
-                                tooltipTimeoutRef.current = null
-                              }
-                              if (hasShownTooltipRef.current) {
-                                showTooltip()
-                              } else {
-                                tooltipTimeoutRef.current = setTimeout(
-                                  showTooltip,
-                                  1000,
-                                )
-                              }
-                            }}
-                            onMouseLeave={() => {
-                              if (tooltipTimeoutRef.current) {
-                                clearTimeout(tooltipTimeoutRef.current)
-                                tooltipTimeoutRef.current = null
-                              }
-                              setModeTooltip(null)
-                            }}
-                          >
-                            <div className="flex items-center gap-2">
-                              <AgentIcon className="w-4 h-4 text-muted-foreground" />
-                              <span>Agent</span>
-                            </div>
-                            {agentMode !== "plan" && (
-                              <CheckIcon className="h-3.5 w-3.5 ml-auto shrink-0" />
-                            )}
-                          </DropdownMenuItem>
-                          <DropdownMenuItem
-                            onClick={() => {
-                              // Clear tooltip before closing dropdown (onMouseLeave won't fire)
-                              if (tooltipTimeoutRef.current) {
-                                clearTimeout(tooltipTimeoutRef.current)
-                                tooltipTimeoutRef.current = null
-                              }
-                              setModeTooltip(null)
-                              setAgentMode("plan")
-                              setModeDropdownOpen(false)
-                            }}
-                            className="justify-between gap-2"
-                            onMouseEnter={(e) => {
-                              if (tooltipTimeoutRef.current) {
-                                clearTimeout(tooltipTimeoutRef.current)
-                                tooltipTimeoutRef.current = null
-                              }
-                              const rect = e.currentTarget.getBoundingClientRect()
-                              const showTooltip = () => {
-                                setModeTooltip({
-                                  visible: true,
-                                  position: {
-                                    top: rect.top,
-                                    left: rect.right + 8,
-                                  },
-                                  mode: "plan",
-                                })
-                                hasShownTooltipRef.current = true
-                                tooltipTimeoutRef.current = null
-                              }
-                              if (hasShownTooltipRef.current) {
-                                showTooltip()
-                              } else {
-                                tooltipTimeoutRef.current = setTimeout(
-                                  showTooltip,
-                                  1000,
-                                )
-                              }
-                            }}
-                            onMouseLeave={() => {
-                              if (tooltipTimeoutRef.current) {
-                                clearTimeout(tooltipTimeoutRef.current)
-                                tooltipTimeoutRef.current = null
-                              }
-                              setModeTooltip(null)
-                            }}
-                          >
-                            <div className="flex items-center gap-2">
-                              <PlanIcon className="w-4 h-4 text-muted-foreground" />
-                              <span>Plan</span>
-                            </div>
-                            {agentMode === "plan" && (
-                              <CheckIcon className="h-3.5 w-3.5 ml-auto shrink-0" />
-                            )}
-                          </DropdownMenuItem>
+                          {AGENT_MODES.map((mode) => (
+                            <DropdownMenuItem
+                              key={mode}
+                              onClick={() => {
+                                if (mode === "team") {
+                                  // Team mode not yet implemented
+                                  toast("Team mode coming soon")
+                                  setModeDropdownOpen(false)
+                                  return
+                                }
+                                if (tooltipTimeoutRef.current) {
+                                  clearTimeout(tooltipTimeoutRef.current)
+                                  tooltipTimeoutRef.current = null
+                                }
+                                setModeTooltip(null)
+                                setAgentMode(mode)
+                                setModeDropdownOpen(false)
+                              }}
+                              className="justify-between gap-2"
+                              onMouseEnter={(e) => {
+                                if (tooltipTimeoutRef.current) {
+                                  clearTimeout(tooltipTimeoutRef.current)
+                                  tooltipTimeoutRef.current = null
+                                }
+                                const rect = e.currentTarget.getBoundingClientRect()
+                                const showTooltip = () => {
+                                  setModeTooltip({
+                                    visible: true,
+                                    position: {
+                                      top: rect.top,
+                                      left: rect.right + 8,
+                                    },
+                                    mode,
+                                  })
+                                  hasShownTooltipRef.current = true
+                                  tooltipTimeoutRef.current = null
+                                }
+                                if (hasShownTooltipRef.current) {
+                                  showTooltip()
+                                } else {
+                                  tooltipTimeoutRef.current = setTimeout(
+                                    showTooltip,
+                                    1000,
+                                  )
+                                }
+                              }}
+                              onMouseLeave={() => {
+                                if (tooltipTimeoutRef.current) {
+                                  clearTimeout(tooltipTimeoutRef.current)
+                                  tooltipTimeoutRef.current = null
+                                }
+                                setModeTooltip(null)
+                              }}
+                            >
+                              <div className="flex items-center gap-2">
+                                {mode === "plan" ? (
+                                  <PlanIcon className="w-4 h-4 text-muted-foreground" />
+                                ) : mode === "team" ? (
+                                  <TeamIcon className="w-4 h-4 text-muted-foreground" />
+                                ) : (
+                                  <SparkleIcon className="w-4 h-4 text-muted-foreground" />
+                                )}
+                                <span>{mode === "plan" ? "Plan" : mode === "team" ? "Team" : "Auto"}</span>
+                              </div>
+                              {agentMode === mode && (
+                                <CheckIcon className="h-3.5 w-3.5 ml-auto shrink-0" />
+                              )}
+                            </DropdownMenuItem>
+                          ))}
                         </DropdownMenuContent>
                         {modeTooltip?.visible &&
                           createPortal(
@@ -1847,9 +1810,11 @@ export function NewChatForm({
                                 className="relative rounded-[12px] bg-popover px-2.5 py-1.5 text-xs text-popover-foreground dark max-w-[150px]"
                               >
                                 <span>
-                                  {modeTooltip.mode === "agent"
-                                    ? "Apply changes directly without a plan"
-                                    : "Create a plan before making changes"}
+                                  {modeTooltip.mode === "plan"
+                                    ? "Create a plan before making changes"
+                                    : modeTooltip.mode === "team"
+                                    ? "Coordinate multiple agents on a task (coming soon)"
+                                    : "AI decides whether to plan or act directly"}
                                 </span>
                               </div>
                             </div>,
