@@ -83,5 +83,6 @@ pub fn delete_custom_harness(id: String) -> napi::Result<()> {
 pub async fn install_acp_runtime(runtime_id: String) -> napi::Result<String> {
     guard();
     install::install_acp_runtime(&runtime_id)
-        .map_err(|e| to_napi(crate::error::ErgataiError::from(e)))
+        .await
+        .map_err(|e| napi::Error::from_reason(e.to_string()))
 }

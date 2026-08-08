@@ -53,6 +53,7 @@ pub struct AcpRuntimeCatalogEntry {
     pub binary_path: Option<String>,
     pub install_hint: String,
     pub install_instructions_url: String,
+    pub has_install_command: bool,  // Whether this runtime has a predefined install command
     pub auth_status: AuthStatus,
     pub login_hint: Option<String>,
     pub source: String, // "builtin" | "custom"
@@ -261,6 +262,7 @@ pub fn discover_acp_runtimes() -> Vec<AcpRuntimeCatalogEntry> {
                 binary_path: binary_path.as_ref().map(|p| p.display().to_string()),
                 install_hint: runtime.install_hint.to_string(),
                 install_instructions_url: runtime.install_instructions_url.to_string(),
+                has_install_command: runtime.install_command.is_some(),
                 auth_status: AuthStatus::Unknown, // Will be updated in Phase 2
                 login_hint: runtime.login_hint.map(|s| s.to_string()),
                 source: "builtin".to_string(),
@@ -325,6 +327,7 @@ pub fn discover_acp_runtimes() -> Vec<AcpRuntimeCatalogEntry> {
                 binary_path: binary_path.map(|p| p.display().to_string()),
                 install_hint: harness.install_hint,
                 install_instructions_url: harness.install_instructions_url,
+                has_install_command: false,  // Custom harnesses don't have predefined install commands
                 auth_status: AuthStatus::NotApplicable, // Custom harnesses don't have auth probes
                 login_hint: None,
                 source: "custom".to_string(),

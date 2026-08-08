@@ -29,6 +29,7 @@ interface AcpRuntimeCatalogEntry {
   binary_path: string | null
   install_hint: string
   install_instructions_url: string
+  has_install_command: boolean  // Whether this runtime has a predefined install command
   auth_status: "logged_in" | "logged_out" | "not_applicable" | "unknown"
   login_hint: string | null
   source: "builtin" | "custom"
@@ -144,10 +145,57 @@ function InstalledAgentRow({
 function AvailableAgentRow({
   runtime,
   onInstall,
+  isInstalling,
 }: {
   runtime: AcpRuntimeCatalogEntry
   onInstall: () => void
+  isInstalling: boolean
 }) {
+  // Hide Install button if no install command is defined
+  if (!runtime.has_install_command) {
+    return (
+      <div className="flex items-center justify-between p-3 border border-dashed border-border rounded-lg opacity-60">
+        <div className="flex items-center gap-3 flex-1 min-w-0">
+          {runtime.avatar_url ? (
+            <img
+              src={runtime.avatar_url}
+              alt={runtime.label}
+              className="w-10 h-10 rounded-md object-cover flex-shrink-0 opacity-70"
+            />
+          ) : (
+            <div className="w-10 h-10 rounded-md bg-muted flex items-center justify-center flex-shrink-0 opacity-70">
+              <Settings className="h-5 w-5 text-muted-foreground" />
+            </div>
+          )}
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2">
+              <span className="font-medium text-sm truncate">{runtime.label}</span>
+              <Badge variant="secondary" className="text-xs">
+                Manual Install
+              </Badge>
+            </div>
+            {runtime.install_hint && (
+              <p className="text-xs text-muted-foreground mt-0.5 line-clamp-1">
+                {runtime.install_hint}
+              </p>
+            )}
+          </div>
+        </div>
+        {runtime.install_instructions_url && (
+          <a
+            href={runtime.install_instructions_url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors flex-shrink-0"
+          >
+            Docs
+            <ExternalLink className="h-3 w-3" />
+          </a>
+        )}
+      </div>
+    )
+  }
+
   return (
     <div className="flex items-center justify-between p-3 border border-dashed border-border rounded-lg hover:bg-accent/30 transition-colors">
       <div className="flex items-center gap-3 flex-1 min-w-0">
@@ -188,9 +236,23 @@ function AvailableAgentRow({
             <ExternalLink className="h-3 w-3" />
           </a>
         )}
-        <Button size="sm" variant="outline" onClick={onInstall}>
-          <Download className="h-4 w-4 mr-1" />
-          Install
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={onInstall}
+          disabled={isInstalling}
+        >
+          {isInstalling ? (
+            <>
+              <div className="h-4 w-4 mr-1 animate-spin rounded-full border-2 border-current border-t-transparent" />
+              Installing...
+            </>
+          ) : (
+            <>
+              <Download className="h-4 w-4 mr-1" />
+              Install
+            </>
+          )}
         </Button>
       </div>
     </div>
@@ -242,7 +304,6 @@ export function AcpAgentManager() {
     },
   })
 
-  // TODO(Plan 7): Backend installRuntime not yet implemented
   // Install runtime mutation
   const installRuntimeMutation = trpc.agents.installRuntime.useMutation({
     onSuccess: () => {
@@ -254,7 +315,7 @@ export function AcpAgentManager() {
     },
   })
 
-  const handleInstallRuntime = (runtimeId: string, runtimeLabel: string) => {
+  const handleInstallRuntime = (runtimeId: string) => {
     installRuntimeMutation.mutate({ runtimeId })
   }
 
@@ -382,7 +443,8 @@ export function AcpAgentManager() {
                 <AvailableAgentRow
                   key={runtime.id}
                   runtime={runtime}
-                  onInstall={() => handleInstallRuntime(runtime.id, runtime.label)}
+                  onInstall={() => handleInstallRuntime(runtime.id)}
+                  isInstalling={installRuntimeMutation.isPending && installRuntimeMutation.variables?.runtimeId === runtime.id}
                 />
               ))
             )}

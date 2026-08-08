@@ -25,7 +25,7 @@ fn validate_install_command(cmd: &str) -> Result<()> {
 }
 
 /// Install a specific ACP runtime by executing its install command
-pub fn install_acp_runtime(runtime_id: &str) -> Result<String> {
+pub async fn install_acp_runtime(runtime_id: &str) -> Result<String> {
     let metadata = crate::agent::runtime_metadata::known_acp_runtime_exact(runtime_id)
         .ok_or_else(|| anyhow::anyhow!("Unknown runtime: {}", runtime_id))?;
 
@@ -35,12 +35,17 @@ pub fn install_acp_runtime(runtime_id: &str) -> Result<String> {
     // Security check: command must be in whitelist
     validate_install_command(install_cmd)?;
 
-    // Execute install command via shell
-    let output = Command::new("sh")
-        .arg("-c")
-        .arg(install_cmd)
-        .output()
-        .context("Failed to execute install command")?;
+    // Execute install command via shell (spawn_blocking to avoid blocking async runtime)
+    let install_cmd = install_cmd.to_string();
+    let output = tokio::task::spawn_blocking(move || {
+        Command::new("sh")
+            .arg("-c")
+            .arg(&install_cmd)
+            .output()
+    })
+    .await
+    .context("Failed to spawn blocking task")?
+    .context("Failed to execute install command")?;
 
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
