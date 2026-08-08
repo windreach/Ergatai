@@ -3,6 +3,7 @@
 //! Exposes Rust agent management functions to TypeScript via NAPI-RS.
 
 use napi_derive::napi;
+use napi::bindgen_prelude::*;
 
 use crate::agent::{
     custom_harness::{self, HarnessDefinition},
@@ -17,7 +18,7 @@ use super::{guard, to_napi};
 ///
 /// Returns a list of catalog entries for both builtin and custom agents.
 #[napi]
-pub fn discover_acp_runtimes() -> napi::Result<Vec<AcpRuntimeCatalogEntry>> {
+pub async fn discover_acp_runtimes() -> Result<Vec<AcpRuntimeCatalogEntry>> {
     guard();
     Ok(discovery::discover_acp_runtimes())
 }
@@ -26,7 +27,7 @@ pub fn discover_acp_runtimes() -> napi::Result<Vec<AcpRuntimeCatalogEntry>> {
 ///
 /// Returns the current global config (env_vars, provider, model, preferred_runtime).
 #[napi]
-pub fn get_global_agent_config() -> napi::Result<GlobalAgentConfig> {
+pub async fn get_global_agent_config() -> Result<GlobalAgentConfig> {
     guard();
     global_config::load_global_agent_config()
         .map_err(to_napi)
@@ -36,7 +37,7 @@ pub fn get_global_agent_config() -> napi::Result<GlobalAgentConfig> {
 ///
 /// Validates and persists the config to disk with restricted permissions (0o600).
 #[napi]
-pub fn set_global_agent_config(config: GlobalAgentConfig) -> napi::Result<()> {
+pub async fn set_global_agent_config(config: GlobalAgentConfig) -> Result<()> {
     guard();
     global_config::save_global_agent_config(&config)
         .map_err(to_napi)?;
@@ -47,7 +48,7 @@ pub fn set_global_agent_config(config: GlobalAgentConfig) -> napi::Result<()> {
 ///
 /// Creates or updates a custom agent harness in the custom_harnesses directory.
 #[napi]
-pub fn save_custom_harness(harness: HarnessDefinition) -> napi::Result<AcpRuntimeCatalogEntry> {
+pub async fn save_custom_harness(harness: HarnessDefinition) -> Result<AcpRuntimeCatalogEntry> {
     guard();
     custom_harness::save_custom_harness(&harness)
         .map_err(to_napi)?;
@@ -58,7 +59,7 @@ pub fn save_custom_harness(harness: HarnessDefinition) -> napi::Result<AcpRuntim
     runtimes
         .into_iter()
         .find(|r| r.id == harness.id)
-        .ok_or_else(|| napi::Error::from_reason(format!(
+        .ok_or_else(|| Error::from_reason(format!(
             "Failed to find harness '{}' after save",
             harness.id
         )))
@@ -68,7 +69,7 @@ pub fn save_custom_harness(harness: HarnessDefinition) -> napi::Result<AcpRuntim
 ///
 /// Removes the harness JSON file from the custom_harnesses directory.
 #[napi]
-pub fn delete_custom_harness(id: String) -> napi::Result<()> {
+pub async fn delete_custom_harness(id: String) -> Result<()> {
     guard();
     custom_harness::delete_custom_harness(&id)
         .map_err(to_napi)
@@ -80,9 +81,9 @@ pub fn delete_custom_harness(id: String) -> napi::Result<()> {
 /// The command must be in the whitelist to prevent injection attacks.
 /// Returns the stdout output on success.
 #[napi]
-pub async fn install_acp_runtime(runtime_id: String) -> napi::Result<String> {
+pub async fn install_acp_runtime(runtime_id: String) -> Result<String> {
     guard();
     install::install_acp_runtime(&runtime_id)
         .await
-        .map_err(|e| napi::Error::from_reason(e.to_string()))
+        .map_err(|e| Error::from_reason(e.to_string()))
 }

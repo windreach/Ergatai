@@ -201,3 +201,52 @@ export declare function dagIsComplete(): Promise<boolean>
 export declare function dagStatus(): Promise<string>
 /** Get full DAG state as JSON. */
 export declare function dagGetState(): Promise<string>
+
+/** ACP Runtime availability status */
+export type AcpAvailabilityStatus = 'available' | 'not_installed' | 'auth_required'
+/** ACP Runtime auth status */
+export type AuthStatus = 'logged_in' | 'logged_out' | 'not_applicable' | 'unknown'
+/** ACP Runtime catalog entry */
+export interface AcpRuntimeCatalogEntry {
+  id: string
+  label: string
+  avatarUrl: string
+  availability: AcpAvailabilityStatus
+  command?: string | null
+  binaryPath?: string | null
+  installHint: string
+  installInstructionsUrl: string
+  hasInstallCommand: boolean
+  authStatus: AuthStatus
+  loginHint?: string | null
+  source: string
+}
+/** Custom harness definition */
+export interface HarnessDefinition {
+  id: string
+  label: string
+  command: string
+  args?: Array<string>
+  envVars?: Record<string, string>
+  avatarUrl?: string
+  source: string
+}
+/** Global agent configuration */
+export interface GlobalAgentConfig {
+  envVars?: Record<string, string>
+  provider?: string | null
+  model?: string | null
+  preferredRuntime?: string | null
+}
+/** Discover all available ACP runtimes and their status */
+export declare function discoverAcpRuntimes(): Array<AcpRuntimeCatalogEntry>
+/** Load the global agent configuration */
+export declare function getGlobalAgentConfig(): Promise<GlobalAgentConfig>
+/** Save the global agent configuration */
+export declare function setGlobalAgentConfig(config: GlobalAgentConfig): Promise<void>
+/** Save a custom harness definition */
+export declare function saveCustomHarness(harness: HarnessDefinition): Promise<AcpRuntimeCatalogEntry>
+/** Delete a custom harness by id */
+export declare function deleteCustomHarness(id: string): Promise<void>
+/** Install an ACP runtime by executing its predefined install command */
+export declare function installAcpRuntime(runtimeId: string): Promise<string>

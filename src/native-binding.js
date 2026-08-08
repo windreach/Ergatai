@@ -310,7 +310,7 @@ if (!nativeBinding) {
   throw new Error(`Failed to load native binding`)
 }
 
-const { scanSkills, getSkillDetail, scanMcpServers, getMcpServerConfig, checkBuiltinServices, startMcpServer, stopMcpServer, scanLocalAgents, getAgentConfig, saveAgentConfig, generateLaunchScript, acpCreateSession, acpSendPrompt, acpCloseSession, acpListSessions, acpCloseAllSessions, acpPollEvents, acpListAgentSessions, acpLoadSession, acpResumeSession, acpRespondPermission, acpSetSessionMode, acpSetConfigOption, acpDeleteSession, acpGetPersistedSessions, acpSaveSessionMeta, acpUpdateSessionTitle, networkRegister, networkUnregister, networkSendTask, networkSendResult, networkBroadcast, networkListAgents, networkGetState, networkInitNats, networkSendFriendly, networkBroadcastFriendly, networkCreateTask, networkGetTask, networkListTasks, dagSubmit, dagProgress, dagIsComplete, dagStatus, dagGetState } = nativeBinding
+const { scanSkills, getSkillDetail, scanMcpServers, getMcpServerConfig, checkBuiltinServices, startMcpServer, stopMcpServer, scanLocalAgents, getAgentConfig, saveAgentConfig, generateLaunchScript, acpCreateSession, acpSendPrompt, acpCloseSession, acpListSessions, acpCloseAllSessions, acpPollEvents, acpListAgentSessions, acpLoadSession, acpResumeSession, acpRespondPermission, acpSetSessionMode, acpSetConfigOption, acpDeleteSession, acpGetPersistedSessions, acpSaveSessionMeta, acpUpdateSessionTitle, networkRegister, networkUnregister, networkSendTask, networkSendResult, networkBroadcast, networkListAgents, networkGetState, networkInitNats, networkSendFriendly, networkBroadcastFriendly, networkCreateTask, networkGetTask, networkListTasks, dagSubmit, dagProgress, dagIsComplete, dagStatus, dagGetState, discoverAcpRuntimes, getGlobalAgentConfig, setGlobalAgentConfig, saveCustomHarness, deleteCustomHarness, installAcpRuntime } = nativeBinding
 
 module.exports.scanSkills = scanSkills
 module.exports.getSkillDetail = getSkillDetail
@@ -357,3 +357,9 @@ module.exports.dagProgress = dagProgress
 module.exports.dagIsComplete = dagIsComplete
 module.exports.dagStatus = dagStatus
 module.exports.dagGetState = dagGetState
+module.exports.discoverAcpRuntimes = discoverAcpRuntimes
+module.exports.getGlobalAgentConfig = getGlobalAgentConfig
+module.exports.setGlobalAgentConfig = setGlobalAgentConfig
+module.exports.saveCustomHarness = saveCustomHarness
+module.exports.deleteCustomHarness = deleteCustomHarness
+module.exports.installAcpRuntime = installAcpRuntime

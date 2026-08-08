@@ -43,7 +43,7 @@ mod skills;
 mod mcp;
 
 // ── NAPI binding layer ──
-mod napi;
+pub mod napi;
 
 use std::sync::Once;
 
