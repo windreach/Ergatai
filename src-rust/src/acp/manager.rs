@@ -312,7 +312,13 @@ pub fn event_tx() -> &'static mpsc::UnboundedSender<SessionEvent> {
 
 /// 取出所有待处理事件（TS 侧轮询调用）
 pub fn poll_events() -> Vec<NapiSessionEvent> {
-    let mut rx = state().event_rx.lock().unwrap();
+    let mut rx = match state().event_rx.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            tracing::error!("event_rx mutex poisoned, recovering");
+            poisoned.into_inner()
+        }
+    };
     let mut events = vec![];
     while let Ok(event) = rx.try_recv() {
         events.push(event.into());

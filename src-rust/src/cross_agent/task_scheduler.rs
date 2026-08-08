@@ -271,16 +271,20 @@ impl TaskScheduler {
     /// Process pending tasks (call this periodically or after task completion)
     pub async fn process_pending(&self) -> ErgataiResult<usize> {
         let mut scheduled_count = 0;
-        let mut tasks = self.pending_tasks.lock().await;
 
-        // Sort by priority and submission time
-        tasks.sort_by(|a, b| {
-            a.priority
-                .cmp(&b.priority)
-                .then(a.submitted_at.cmp(&b.submitted_at))
-        });
+        // Collect and sort tasks, then release lock immediately to avoid
+        // holding it across await points (file I/O below)
+        let mut tasks: Vec<PendingTask> = {
+            let mut pending = self.pending_tasks.lock().await;
+            pending.sort_by(|a, b| {
+                a.priority
+                    .cmp(&b.priority)
+                    .then(a.submitted_at.cmp(&b.submitted_at))
+            });
+            pending.drain(..).collect()
+        }; // lock released here
 
-        // Try to schedule pending tasks
+        // Try to schedule pending tasks (no lock held during I/O)
         let mut remaining = Vec::new();
         let coordinator = TaskCoordinator::new(self.project_root.clone());
         for task in tasks.drain(..) {
@@ -312,10 +316,11 @@ impl TaskScheduler {
         }
 
         // Put back unscheduled tasks
-        *tasks = remaining;
+        if !remaining.is_empty() {
+            let mut pending = self.pending_tasks.lock().await;
+            pending.extend(remaining);
+        }
 
-        // Save to disk
-        drop(tasks);
         self.save_to_disk().await?;
 
         Ok(scheduled_count)

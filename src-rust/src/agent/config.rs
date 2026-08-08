@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use url::Url;
 
-use crate::error::{ErgataiError, ErgataiResult};
+use crate::error::{ConfigError, ErgataiError, ErgataiResult};
 
 /// Normalize agent command to canonical identity.
 ///
@@ -206,7 +206,7 @@ pub struct AgentConfig {
 
 /// 获取 agent 配置
 pub fn get_agent_config(name: &str) -> ErgataiResult<AgentConfig> {
-    let config_path = get_config_path(name);
+    let config_path = get_config_path(name)?;
     if !config_path.exists() {
         return Err(ErgataiError::AgentNotFound(format!("Agent config not found: {}", name)));
     }
@@ -262,10 +262,10 @@ pub fn normalize_agent_config(config: &mut AgentConfig) {
 
 /// 保存 agent 配置
 pub fn save_agent_config(config: &AgentConfig) -> ErgataiResult<()> {
-    let config_dir = get_config_dir();
+    let config_dir = get_config_dir()?;
     std::fs::create_dir_all(&config_dir)?;
 
-    let config_path = get_config_path(&config.name);
+    let config_path = get_config_path(&config.name)?;
     let content = serde_json::to_string_pretty(config)?;
     std::fs::write(&config_path, content)?;
 
@@ -281,15 +281,14 @@ pub fn save_agent_config(config: &AgentConfig) -> ErgataiResult<()> {
     Ok(())
 }
 
-fn get_config_dir() -> PathBuf {
-    dirs::config_dir()
-        .expect("Could not determine config directory")
-        .join("ergatai")
-        .join("agents")
+fn get_config_dir() -> ErgataiResult<PathBuf> {
+    let config_dir = dirs::config_dir()
+        .ok_or(ConfigError::DirectoryNotFound)?;
+    Ok(config_dir.join("ergatai").join("agents"))
 }
 
-fn get_config_path(name: &str) -> PathBuf {
-    get_config_dir().join(format!("{}.json", name))
+fn get_config_path(name: &str) -> ErgataiResult<PathBuf> {
+    Ok(get_config_dir()?.join(format!("{}.json", name)))
 }
 
 #[cfg(test)]

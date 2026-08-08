@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-use crate::error::ErgataiResult;
+use crate::error::{ConfigError, ErgataiResult};
 
 /// 本地保存的会话元数据（用于离线浏览和历史记录）
 #[napi_derive::napi(object)]
@@ -16,19 +16,18 @@ pub struct PersistedSession {
 }
 
 /// 获取会话存储目录
-fn sessions_dir() -> PathBuf {
-    dirs::config_dir()
-        .expect("Could not determine config directory")
-        .join("ergatai")
-        .join("sessions")
+fn sessions_dir() -> ErgataiResult<PathBuf> {
+    let config_dir = dirs::config_dir()
+        .ok_or(ConfigError::DirectoryNotFound)?;
+    Ok(config_dir.join("ergatai").join("sessions"))
 }
 
 /// 保存会话元数据到磁盘
 pub fn save_session(session: &PersistedSession) -> ErgataiResult<()> {
-    let dir = sessions_dir();
+    let dir = sessions_dir()?;
     std::fs::create_dir_all(&dir)?;
 
-    let path = session_path(&session.session_id);
+    let path = session_path(&session.session_id)?;
     let content = serde_json::to_string_pretty(session)?;
     std::fs::write(&path, content)?;
     Ok(())
@@ -36,7 +35,7 @@ pub fn save_session(session: &PersistedSession) -> ErgataiResult<()> {
 
 /// 加载所有保存的会话
 pub fn load_all_sessions() -> ErgataiResult<Vec<PersistedSession>> {
-    let dir = sessions_dir();
+    let dir = sessions_dir()?;
     if !dir.exists() {
         return Ok(vec![]);
     }
@@ -66,7 +65,7 @@ pub fn load_all_sessions() -> ErgataiResult<Vec<PersistedSession>> {
 
 /// 加载单个会话
 pub fn load_session(session_id: &str) -> ErgataiResult<Option<PersistedSession>> {
-    let path = session_path(session_id);
+    let path = session_path(session_id)?;
     if !path.exists() {
         return Ok(None);
     }
@@ -77,7 +76,7 @@ pub fn load_session(session_id: &str) -> ErgataiResult<Option<PersistedSession>>
 
 /// 删除会话文件
 pub fn delete_session(session_id: &str) -> ErgataiResult<()> {
-    let path = session_path(session_id);
+    let path = session_path(session_id)?;
     if path.exists() {
         std::fs::remove_file(&path)?;
     }
@@ -94,11 +93,11 @@ pub fn update_session_title(session_id: &str, title: &str) -> ErgataiResult<()> 
     Ok(())
 }
 
-fn session_path(session_id: &str) -> PathBuf {
+fn session_path(session_id: &str) -> ErgataiResult<PathBuf> {
     // 用 session_id 的安全版本做文件名
     let safe_name: String = session_id
         .chars()
         .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
         .collect();
-    sessions_dir().join(format!("{}.json", safe_name))
+    Ok(sessions_dir()?.join(format!("{}.json", safe_name)))
 }

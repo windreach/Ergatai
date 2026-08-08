@@ -171,7 +171,7 @@ pub fn load_session_task(
                     let session_id_clone = session_id.clone();
                     let cwd_clone = cwd.clone();
                     move |connection: ConnectionTo<Agent>| async move {
-                        let tx = tx_for_closure.lock().unwrap().take();
+                        let tx = tx_for_closure.lock().ok().and_then(|mut g| g.take());
 
                         // 1. 初始化
                         let init_result = timeout(SESSION_TIMEOUT, connection
@@ -293,7 +293,7 @@ pub fn load_session_task(
 
             if let Err(e) = result {
                 tracing::error!("Load session connection failed: {}", e);
-                if let Some(tx) = session_id_tx.lock().unwrap().take() {
+                if let Some(tx) = session_id_tx.lock().ok().and_then(|mut g| g.take()) {
                     let _ = tx.send(Err(ErgataiError::network(format!("Connection failed: {}", e))));
                 }
             }
@@ -380,7 +380,7 @@ pub fn resume_session_task(
                     let session_id_clone = session_id.clone();
                     let cwd_clone = cwd.clone();
                     move |connection: ConnectionTo<Agent>| async move {
-                        let tx = tx_for_closure.lock().unwrap().take();
+                        let tx = tx_for_closure.lock().ok().and_then(|mut g| g.take());
 
                         // 1. 初始化
                         let init_result = timeout(SESSION_TIMEOUT, connection
@@ -497,7 +497,7 @@ pub fn resume_session_task(
 
             if let Err(e) = result {
                 tracing::error!("Resume session connection failed: {}", e);
-                if let Some(tx) = session_id_tx.lock().unwrap().take() {
+                if let Some(tx) = session_id_tx.lock().ok().and_then(|mut g| g.take()) {
                     let _ = tx.send(Err(ErgataiError::network(format!("Connection failed: {}", e))));
                 }
             }

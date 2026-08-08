@@ -68,9 +68,9 @@ mod tests {
         assert!(validate_install_command("curl | sh").is_err());
     }
 
-    #[test]
-    fn test_install_unknown_runtime() {
-        let result = install_acp_runtime("nonexistent-runtime");
+    #[tokio::test]
+    async fn test_install_unknown_runtime() {
+        let result = install_acp_runtime("nonexistent-runtime").await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Unknown runtime"));
     }
