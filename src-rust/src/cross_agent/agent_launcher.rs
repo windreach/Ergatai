@@ -374,8 +374,8 @@ Write your results in markdown:
 
         // Build the full instruction with DAG orchestration context if this is a DAG task
         let full_instruction = if node_id.is_some() {
-            // Load DAG orchest prompt template
-            let dag_prompt = include_str!("../orchestration/prompts/dag_orchestration.md");
+            // Load DAG orchest prompt template from prompts directory
+            let dag_prompt = include_str!("../../prompts/dag_orchestration.md");
 
             // Get list of available agents
             let agents = crate::agent::discovery::discover_acp_runtimes();
