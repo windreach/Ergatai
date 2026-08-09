@@ -14,6 +14,8 @@ pub mod skills;
 pub mod tasks;
 
 use napi::Error as NapiError;
+use napi_derive::napi;
+use std::path::PathBuf;
 
 use crate::error::ErgataiError;
 
@@ -31,4 +33,14 @@ pub fn guard() {
 #[inline(always)]
 pub fn to_napi(e: ErgataiError) -> NapiError {
     e.into()
+}
+
+/// Set the resources directory path for bundled assets.
+///
+/// Called from TypeScript on app startup to tell Rust where to find
+/// bundled resources like agent icons.
+#[napi]
+pub fn set_resources_path(path: String) {
+    guard();
+    crate::set_resources_path(PathBuf::from(path));
 }

@@ -6,6 +6,7 @@ use napi_derive::napi;
 use napi::bindgen_prelude::*;
 
 use crate::agent::{
+    config::{self, AgentConfig},
     custom_harness::{self, HarnessDefinition},
     discovery::{self, AcpRuntimeCatalogEntry},
     global_config::{self, GlobalAgentConfig},
@@ -86,4 +87,24 @@ pub async fn install_acp_runtime(runtime_id: String) -> Result<String> {
     install::install_acp_runtime(&runtime_id)
         .await
         .map_err(|e| Error::from_reason(e.to_string()))
+}
+
+/// Get agent configuration by name.
+///
+/// Returns the full agent config (command, args, env, model, etc.)
+#[napi]
+pub async fn get_agent_config(name: String) -> Result<AgentConfig> {
+    guard();
+    config::get_agent_config(&name)
+        .map_err(to_napi)
+}
+
+/// Save agent configuration.
+///
+/// Creates or updates an agent config file in the agents directory.
+#[napi]
+pub async fn save_agent_config(cfg: AgentConfig) -> Result<()> {
+    guard();
+    config::save_agent_config(&cfg)
+        .map_err(to_napi)
 }

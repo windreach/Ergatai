@@ -185,6 +185,10 @@
       {
         "from": "resources/bin/VERSION",
         "to": "bin/VERSION"
+      },
+      {
+        "from": "resources/agent-icons",
+        "to": "agent-icons"
       }
     ],
     "asar": true,

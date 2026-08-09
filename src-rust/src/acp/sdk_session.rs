@@ -29,7 +29,7 @@ use super::manager::{
 };
 use crate::agent::config::{
     codex_network_env, default_agent_env, normalize_agent_args, normalize_agent_command_identity,
-    AgentConfig,
+    read_claude_settings_env, AgentConfig,
 };
 use crate::error::{ErgataiError, ErgataiResult};
 
@@ -65,27 +65,40 @@ pub fn spawn_session_task_with_kind(
     let evt_tx = event_tx().clone();
     let pending_perms: PendingPermissions = Arc::new(Mutex::new(std::collections::HashMap::new()));
 
-    let session_id_tx = Mutex::new(Some(session_id_tx));
-
     tokio::spawn(async move {
-        let result = run_sdk_session(config, cwd, kind, cmd_rx, evt_tx.clone(), pending_perms.clone(), cmd_tx.clone()).await;
+        // Create a channel to signal when session is ready (created + registered)
+        let (session_ready_tx, session_ready_rx) = oneshot::channel::<ErgataiResult<String>>();
 
-        match result {
-            Ok(session_id) => {
+        // Run session in background - it will signal when ready via session_ready_tx
+        tokio::spawn(async move {
+            let _ = run_sdk_session(
+                config,
+                cwd,
+                kind,
+                cmd_rx,
+                evt_tx.clone(),
+                pending_perms.clone(),
+                cmd_tx.clone(),
+                Some(session_ready_tx),
+            )
+            .await;
+        });
+
+        // Wait for session to be ready and forward to caller
+        match session_ready_rx.await {
+            Ok(Ok(session_id)) => {
                 tracing::info!(agent = %agent_name, session_id = %session_id, "SDK session created successfully");
-                if let Ok(mut guard) = session_id_tx.lock() {
-                    if let Some(tx) = guard.take() {
-                        let _ = tx.send(Ok(session_id));
-                    }
-                }
+                let _ = session_id_tx.send(Ok(session_id));
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 tracing::error!(agent = %agent_name, error = %e, "SDK session failed");
-                if let Ok(mut guard) = session_id_tx.lock() {
-                    if let Some(tx) = guard.take() {
-                        let _ = tx.send(Err(e));
-                    }
-                }
+                let _ = session_id_tx.send(Err(e));
+            }
+            Err(_) => {
+                tracing::error!(agent = %agent_name, "Session ready channel dropped");
+                let _ = session_id_tx.send(Err(crate::error::ErgataiError::ChannelError(
+                    "Session ready channel dropped".into(),
+                )));
             }
         }
     });
@@ -100,6 +113,7 @@ async fn run_sdk_session(
     evt_tx: mpsc::UnboundedSender<SessionEvent>,
     pending_perms: PendingPermissions,
     cmd_tx: mpsc::UnboundedSender<SessionCommand>,
+    session_ready_tx: Option<oneshot::Sender<ErgataiResult<String>>>,
 ) -> ErgataiResult<String> {
     // 1. Normalize agent config
     let command = normalize_agent_command_identity(&config.command);
@@ -114,14 +128,35 @@ async fn run_sdk_session(
 
     // 2. Build AcpAgent config
     let mut agent_config = AcpAgentConfig::new(&command).args(args.clone());
+    tracing::info!("[DEBUG] Building agent config for command: '{}'", command);
     for (k, v) in &config.env {
+        tracing::info!("[DEBUG] Setting env from agent config: {} = {}", k, if v.len() > 20 { &v[..20] } else { v });
         agent_config = agent_config.env(k, v);
     }
     // Apply default env vars for known agents
     for &(key, value) in default_agent_env(&command) {
         if !config.env.contains_key(key) {
+            tracing::info!("[DEBUG] Setting default env: {} = {}", key, value);
             agent_config = agent_config.env(key, value);
         }
+    }
+    // For Claude agents, read env vars from ~/.claude/settings.json
+    // This ensures claude-agent-acp uses the same auth as the claude CLI
+    tracing::info!("[DEBUG] Checking if command is claude: '{}'", command);
+    if command == "claude" || command == "claude-code" || command == "claude-agent-acp" {
+        tracing::info!("[DEBUG] YES - reading Claude settings env");
+        let claude_env = read_claude_settings_env();
+        tracing::info!("[DEBUG] Got {} env vars from Claude settings", claude_env.len());
+        for (k, v) in &claude_env {
+            if !config.env.contains_key(k) {
+                tracing::info!("[DEBUG] Setting Claude settings env: {} = {}", k, if v.len() > 20 { &v[..20] } else { v });
+                agent_config = agent_config.env(k, v);
+            } else {
+                tracing::info!("[DEBUG] Skipping {} (already in config.env)", k);
+            }
+        }
+    } else {
+        tracing::info!("[DEBUG] NO - command is '{}', not a claude variant", command);
     }
     // Apply Codex network config if needed (only when BUZZ_RELAY_URL is set)
     if let Ok(relay_url) = std::env::var("BUZZ_RELAY_URL") {
@@ -294,6 +329,12 @@ async fn run_sdk_session(
                     kind,
                 }).await;
 
+                // Signal that session is ready (created + registered)
+                if let Some(tx) = session_ready_tx {
+                    tracing::info!(session_id = %session_id, "Signaling session ready to caller");
+                    let _ = tx.send(Ok(session_id.clone()));
+                }
+
                 // Command loop
                 let session_id_arc = SessionId::new(session_id.clone());
                 loop {
@@ -311,6 +352,15 @@ async fn run_sdk_session(
 
                             // Send usage event if available (from UsageUpdate notifications)
                             // Note: SDK's UsageUpdate is handled via notification handler above
+
+                            // Signal completion: send closed event after prompt completes
+                            if result.is_ok() {
+                                let _ = evt_tx.send(SessionEvent {
+                                    session_id: session_id.clone(),
+                                    event_type: "closed".to_string(),
+                                    data: serde_json::Value::Null,
+                                });
+                            }
 
                             let _ = reply_tx.send(result.map(|_| ()));
                         }

@@ -309,14 +309,14 @@ export function AcpAgentManager() {
 
   if (isLoading) {
     return (
-      <div className="h-full flex items-center justify-center">
+      <div className="h-full overflow-y-auto flex items-center justify-center">
         <div className="text-muted-foreground">Loading agents…</div>
       </div>
     )
   }
 
   return (
-    <div className="space-y-8 p-6">
+    <div className="h-full overflow-y-auto space-y-8 p-6">
       {/* Default Agent Selector */}
       <section className="space-y-4">
         <div>

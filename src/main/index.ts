@@ -950,6 +950,76 @@ if (gotTheLock) {
       console.error("[App] Failed to initialize database:", error)
     }
 
+    // Initialize Rust resources path (for agent icons, etc.)
+    let nativeBinding: any = null
+    try {
+      nativeBinding = require(join(app.getAppPath(), "src/native-binding"))
+      const resourcesPath = app.isPackaged
+        ? process.resourcesPath
+        : join(app.getAppPath(), "resources")
+      nativeBinding.setResourcesPath(resourcesPath)
+      console.log("[App] Rust resources path set:", resourcesPath)
+    } catch (error) {
+      console.error("[App] Failed to set Rust resources path:", error)
+    }
+
+    // Initialize default agent configs if they don't exist
+    if (nativeBinding) {
+      try {
+      const defaultAgents = [
+        {
+          name: "claude",
+          command: "claude-agent-acp",
+          args: [],
+          env: {},
+          agent_type: "claude-code",
+        },
+        {
+          name: "goose",
+          command: "goose",
+          args: [],
+          env: { GOOSE_MODE: "auto" },
+          agent_type: "goose",
+        },
+        {
+          name: "codex",
+          command: "codex-acp",
+          args: [],
+          env: {},
+          agent_type: "codex",
+        },
+        {
+          name: "hermes",
+          command: "hermes",
+          args: [],
+          env: { HERMES_ACP_SKIP_CONFIGURED_MCP: "1" },
+          agent_type: "hermes",
+        },
+      ]
+
+      for (const agent of defaultAgents) {
+        try {
+          // Check if config exists
+          const existing = await nativeBinding.getAgentConfig(agent.name)
+          if (!existing || !existing.command) {
+            // Config doesn't exist or is invalid, create default
+            await nativeBinding.saveAgentConfig(agent)
+            console.log(`[App] Created default config for ${agent.name}`)
+          }
+        } catch (error) {
+          // Config doesn't exist, create it
+          try {
+            await nativeBinding.saveAgentConfig(agent)
+            console.log(`[App] Created default config for ${agent.name}`)
+          } catch (saveError) {
+            console.error(`[App] Failed to create config for ${agent.name}:`, saveError)
+          }
+        }
+      }
+    } catch (error) {
+      console.error("[App] Failed to initialize agent configs:", error)
+    }
+
     // Create main window
     createMainWindow()
 

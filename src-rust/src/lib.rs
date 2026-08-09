@@ -47,11 +47,30 @@ mod mcp;
 pub mod napi;
 
 use std::sync::Once;
+use std::path::PathBuf;
+use std::sync::Mutex;
 
 // ── One-time init ──
 
 static INIT_LOGGING: Once = Once::new();
 static INIT_PANIC_HOOK: Once = Once::new();
+
+// ── Global resources path ──
+static RESOURCES_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+/// Set the resources directory path (called from TypeScript on app startup).
+///
+/// This path is used to locate bundled assets like agent icons.
+pub fn set_resources_path(path: PathBuf) {
+    if let Ok(mut guard) = RESOURCES_PATH.lock() {
+        *guard = Some(path);
+    }
+}
+
+/// Get the resources directory path.
+pub fn get_resources_path() -> Option<PathBuf> {
+    RESOURCES_PATH.lock().ok().and_then(|guard| guard.clone())
+}
 
 /// Initialize the `tracing` subscriber exactly once.
 ///

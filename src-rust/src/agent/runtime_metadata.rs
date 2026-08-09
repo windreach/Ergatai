@@ -11,7 +11,7 @@ pub struct KnownAcpRuntime {
     pub label: &'static str,
     pub commands: &'static [&'static str],
     pub aliases: &'static [&'static str],
-    pub avatar_url: &'static str,
+    pub avatar_file: &'static str,
     pub underlying_cli: Option<&'static str>,
     pub model_env_var: Option<&'static str>,
     pub provider_env_var: Option<&'static str>,
@@ -25,11 +25,11 @@ pub struct KnownAcpRuntime {
     pub auth_probe_args: Option<&'static [&'static str]>,
 }
 
-// Avatar URLs (using public CDNs)
-const GOOSE_AVATAR_URL: &str = "https://goose-docs.ai/img/logo_dark.png";
-const CLAUDE_CODE_AVATAR_URL: &str = "https://anthropic.gallerycdn.vsassets.io/extensions/anthropic/claude-code/2.1.77/1773707456892/Microsoft.VisualStudio.Services.Icons.Default";
-const CODEX_AVATAR_URL: &str = "https://openai.gallerycdn.vsassets.io/extensions/openai/chatgpt/26.5313.41514/1773706730621/Microsoft.VisualStudio.Services.Icons.Default";
-const HERMES_AVATAR_URL: &str = "https://raw.githubusercontent.com/NousResearch/hermes-agent/main/assets/hermes-logo.png";
+// Avatar filenames (bundled in resources/agent-icons/)
+const GOOSE_AVATAR: &str = "goose.png";
+const CLAUDE_CODE_AVATAR: &str = "claude-code.png";
+const CODEX_AVATAR: &str = "codex.png";
+const HERMES_AVATAR: &str = "hermes.png";
 
 /// Known ACP runtimes with their metadata.
 pub static KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
@@ -38,7 +38,7 @@ pub static KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         label: "Goose",
         commands: &["goose"],
         aliases: &[],
-        avatar_url: GOOSE_AVATAR_URL,
+        avatar_file: GOOSE_AVATAR,
         underlying_cli: Some("goose"),
         model_env_var: Some("GOOSE_MODEL"),
         provider_env_var: Some("GOOSE_PROVIDER"),
@@ -56,7 +56,7 @@ pub static KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         label: "Claude Code",
         commands: &["claude-agent-acp", "claude-code-acp"],
         aliases: &["claude-code", "claudecode"],
-        avatar_url: CLAUDE_CODE_AVATAR_URL,
+        avatar_file: CLAUDE_CODE_AVATAR,
         underlying_cli: Some("claude"),
         model_env_var: None,
         provider_env_var: None,
@@ -74,7 +74,7 @@ pub static KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         label: "Codex",
         commands: &["codex-acp"],
         aliases: &[],
-        avatar_url: CODEX_AVATAR_URL,
+        avatar_file: CODEX_AVATAR,
         underlying_cli: Some("codex"),
         model_env_var: None,
         provider_env_var: None,
@@ -92,7 +92,7 @@ pub static KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         label: "Hermes",
         commands: &["hermes-acp", "hermes"],
         aliases: &[],
-        avatar_url: HERMES_AVATAR_URL,
+        avatar_file: HERMES_AVATAR,
         underlying_cli: Some("hermes"),
         model_env_var: None,
         provider_env_var: None,
@@ -111,7 +111,7 @@ pub static KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         label: "Devin",
         commands: &["devin"],
         aliases: &[],
-        avatar_url: "",
+        avatar_file: "",
         underlying_cli: None,
         model_env_var: None,
         provider_env_var: None,
@@ -129,7 +129,7 @@ pub static KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         label: "Cursor",
         commands: &["cursor-agent"],
         aliases: &[],
-        avatar_url: "",
+        avatar_file: "",
         underlying_cli: None,
         model_env_var: None,
         provider_env_var: None,
@@ -147,7 +147,7 @@ pub static KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         label: "Oh My Pi",
         commands: &["omp"],
         aliases: &[],
-        avatar_url: "",
+        avatar_file: "",
         underlying_cli: None,
         model_env_var: None,
         provider_env_var: None,
@@ -165,7 +165,7 @@ pub static KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         label: "Grok Build",
         commands: &["grok"],
         aliases: &[],
-        avatar_url: "",
+        avatar_file: "",
         underlying_cli: None,
         model_env_var: None,
         provider_env_var: None,
@@ -183,7 +183,7 @@ pub static KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         label: "OpenCode",
         commands: &["opencode"],
         aliases: &[],
-        avatar_url: "",
+        avatar_file: "",
         underlying_cli: None,
         model_env_var: None,
         provider_env_var: None,
@@ -201,7 +201,7 @@ pub static KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         label: "Kimi Code",
         commands: &["kimi"],
         aliases: &[],
-        avatar_url: "",
+        avatar_file: "",
         underlying_cli: None,
         model_env_var: None,
         provider_env_var: None,
@@ -219,7 +219,7 @@ pub static KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         label: "Amp",
         commands: &["amp-acp"],
         aliases: &[],
-        avatar_url: "",
+        avatar_file: "",
         underlying_cli: Some("amp"),
         model_env_var: None,
         provider_env_var: None,
@@ -237,7 +237,7 @@ pub static KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         label: "OpenClaw",
         commands: &["openclaw"],
         aliases: &[],
-        avatar_url: "",
+        avatar_file: "",
         underlying_cli: None,
         model_env_var: None,
         provider_env_var: None,

@@ -192,7 +192,10 @@ export class IPCChatTransport implements ChatTransport<UIMessage> {
       (useAgentSubChatStore
         .getState()
         .allSubChats.find((subChat) => subChat.id === this.config.subChatId)
-        ?.mode as "plan" | "agent" | undefined) || this.config.mode
+        ?.mode as AgentMode | undefined) || this.config.mode
+
+    // Convert frontend AgentMode ("auto"|"plan"|"team") to backend mode ("plan"|"agent")
+    const backendMode: "plan" | "agent" = currentMode === "plan" ? "plan" : "agent"
 
     // Stream debug logging
     const subId = this.config.subChatId.slice(-8)
@@ -204,6 +207,9 @@ export class IPCChatTransport implements ChatTransport<UIMessage> {
       start: (controller) => {
         const subChatRuntimeId = appStore.get(subChatRuntimeIdAtomFamily(this.config.subChatId))
         const agentName = this.config.agentName || subChatRuntimeId || "claude"
+        // Track whether the stream has become unusable (consumer cancelled, stream errored, etc.)
+        // When true, skip all further enqueue/close attempts to avoid log spam and orphan subscriptions.
+        let streamDone = false
         const sub = trpcClient.claude.chat.subscribe(
           {
             subChatId: this.config.subChatId,
@@ -211,7 +217,7 @@ export class IPCChatTransport implements ChatTransport<UIMessage> {
             prompt,
             cwd: this.config.cwd,
             projectPath: this.config.projectPath, // Original project path for MCP config lookup
-            mode: currentMode,
+            mode: backendMode,
             sessionId,
             agentName,
             ...(maxThinkingTokens && { maxThinkingTokens }),
@@ -227,6 +233,19 @@ export class IPCChatTransport implements ChatTransport<UIMessage> {
             onData: (chunk: UIMessageChunk) => {
               chunkCount++
               lastChunkType = chunk.type
+
+              // If the consumer cancelled the stream (e.g. Chat was recreated by
+              // getOrCreateChat re-rendering), skip processing and tear down the
+              // orphan tRPC subscription to stop the flood of ENQUEUE_ERR logs.
+              if (streamDone) {
+                try { sub.unsubscribe() } catch { /* ignore */ }
+                return
+              }
+
+              // Debug: Log every chunk received
+              if (chunkCount <= 5 || chunkCount % 10 === 0) {
+                console.log(`[SD] R:ONDATA sub=${subId} n=${chunkCount} type=${chunk.type} data=${JSON.stringify(chunk).slice(0, 100)}`)
+              }
 
               // Handle AskUserQuestion - show question UI
               if (chunk.type === "ask-user-question") {
@@ -368,7 +387,14 @@ export class IPCChatTransport implements ChatTransport<UIMessage> {
                 // the SDK Chat properly resets status from "streaming" to "ready"
                 // This allows user to retry sending messages after failed auth
                 console.log(`[SD] R:AUTH_ERR sub=${subId}`)
-                controller.error(new Error("Authentication required"))
+                streamDone = true
+                try {
+                  sub.unsubscribe()
+                  controller.error(new Error("Authentication required"))
+                  console.log(`[SD] R:AUTH_ERR_OK sub=${subId}`)
+                } catch (e) {
+                  console.log(`[SD] R:AUTH_ERR_ERR sub=${subId} err=${e}`)
+                }
                 return
               }
 
@@ -460,22 +486,32 @@ export class IPCChatTransport implements ChatTransport<UIMessage> {
 
               // Try to enqueue, but don't crash if stream is already closed
               try {
+                console.log(`[SD] R:ENQUEUE sub=${subId} type=${chunk.type} n=${chunkCount}`)
                 controller.enqueue(chunk)
+                console.log(`[SD] R:ENQUEUE_OK sub=${subId} type=${chunk.type} n=${chunkCount}`)
               } catch (e) {
-                // CRITICAL: Log when enqueue fails - this could explain missing chunks!
-                console.log(`[SD] R:ENQUEUE_ERR sub=${subId} type=${chunk.type} n=${chunkCount} err=${e}`)
+                // Stream was closed by consumer (e.g. Chat reader cancelled during re-render).
+                // Mark done and tear down the orphan tRPC subscription to stop the flood.
+                streamDone = true
+                try { sub.unsubscribe() } catch { /* ignore */ }
+                console.log(`[SD] R:ENQUEUE_ERR sub=${subId} type=${chunk.type} n=${chunkCount} err=${e} (unsubscribed)`)
               }
 
-              if (chunk.type === "finish") {
+              if (chunk.type === "finish" && !streamDone) {
                 console.log(`[SD] R:FINISH sub=${subId} n=${chunkCount}`)
+                streamDone = true
                 try {
+                  sub.unsubscribe()
                   controller.close()
-                } catch {
-                  // Already closed
+                  console.log(`[SD] R:FINISH_OK sub=${subId}`)
+                } catch (e) {
+                  console.log(`[SD] R:FINISH_ERR sub=${subId} err=${e}`)
                 }
               }
             },
             onError: (err: Error) => {
+              if (streamDone) return
+              streamDone = true
               console.log(`[SD] R:ERROR sub=${subId} n=${chunkCount} last=${lastChunkType} err=${err.message}`)
               // Track transport errors in Sentry
               Sentry.captureException(err, {
@@ -490,17 +526,27 @@ export class IPCChatTransport implements ChatTransport<UIMessage> {
                 },
               })
 
-              controller.error(err)
+              try {
+                sub.unsubscribe()
+                controller.error(err)
+                console.log(`[SD] R:ERROR_OK sub=${subId}`)
+              } catch (e) {
+                console.log(`[SD] R:ERROR_ERR sub=${subId} err=${e}`)
+              }
             },
             onComplete: () => {
-              console.log(`[SD] R:COMPLETE sub=${subId} n=${chunkCount} last=${lastChunkType}`)
+              if (streamDone) return
+              streamDone = true
+              console.log(`[SD] R:COMPLETE sub=${subId} n=${chunkCount} last=${lastChunkType} stack=${new Error().stack?.split('\n').slice(0, 3).join(' | ')}`)
               // Note: Don't clear pending questions here - let active-chat.tsx handle it
               // via the stream stop detection effect. Clearing here causes race conditions
               // where sync effect immediately restores from messages.
               try {
+                sub.unsubscribe()
                 controller.close()
-              } catch {
-                // Already closed
+                console.log(`[SD] R:COMPLETE_OK sub=${subId}`)
+              } catch (e) {
+                console.log(`[SD] R:COMPLETE_ERR sub=${subId} err=${e}`)
               }
             },
           },
@@ -508,13 +554,16 @@ export class IPCChatTransport implements ChatTransport<UIMessage> {
 
         // Handle abort
         options.abortSignal?.addEventListener("abort", () => {
-          console.log(`[SD] R:ABORT sub=${subId} n=${chunkCount} last=${lastChunkType}`)
+          if (streamDone) return
+          streamDone = true
+          console.log(`[SD] R:ABORT sub=${subId} n=${chunkCount} last=${lastChunkType} stack=${new Error().stack?.split('\n').slice(0, 3).join(' | ')}`)
           sub.unsubscribe()
           // trpcClient.claude.cancel.mutate({ subChatId: this.config.subChatId })
           try {
             controller.close()
-          } catch {
-            // Already closed
+            console.log(`[SD] R:ABORT_OK sub=${subId}`)
+          } catch (e) {
+            console.log(`[SD] R:ABORT_ERR sub=${subId} err=${e}`)
           }
         })
       },

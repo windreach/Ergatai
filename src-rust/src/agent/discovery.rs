@@ -253,10 +253,62 @@ pub fn discover_acp_runtimes() -> Vec<AcpRuntimeCatalogEntry> {
                 AcpAvailabilityStatus::NotInstalled
             };
 
+            // Construct avatar URL: use local file as base64 data URL if available
+            let avatar_url = if !runtime.avatar_file.is_empty() {
+                let icon_path = if let Some(resources_path) = crate::get_resources_path() {
+                    let path = resources_path.join("agent-icons").join(runtime.avatar_file);
+                    if path.exists() {
+                        Some(path)
+                    } else {
+                        tracing::debug!(path = %path.display(), "Icon not found in resources path, trying dev path");
+                        // Fallback: try development path (project root/resources)
+                        std::env::current_dir()
+                            .ok()
+                            .map(|d| d.join("resources").join("agent-icons").join(runtime.avatar_file))
+                            .filter(|p| p.exists())
+                    }
+                } else {
+                    tracing::debug!(agent = %runtime.id, "Resources path not set, trying dev path");
+                    // No resources path set, try dev path directly
+                    std::env::current_dir()
+                        .ok()
+                        .map(|d| d.join("resources").join("agent-icons").join(runtime.avatar_file))
+                        .filter(|p| p.exists())
+                };
+
+                if let Some(path) = icon_path {
+                    tracing::debug!(path = %path.display(), "Loading agent icon");
+                    // Read file and convert to base64 data URL
+                    match std::fs::read(&path) {
+                        Ok(data) => {
+                            use base64::{Engine as _, engine::general_purpose};
+                            let base64_data = general_purpose::STANDARD.encode(&data);
+                            let mime_type = if path.extension().and_then(|e| e.to_str()) == Some("png") {
+                                "image/png"
+                            } else {
+                                "image/jpeg"
+                            };
+                            let url = format!("data:{};base64,{}", mime_type, base64_data);
+                            tracing::debug!(agent = %runtime.id, url_len = url.len(), "Icon loaded successfully");
+                            url
+                        }
+                        Err(e) => {
+                            tracing::warn!(path = %path.display(), error = %e, "Failed to read agent icon");
+                            String::new()
+                        }
+                    }
+                } else {
+                    tracing::debug!(agent = %runtime.id, file = %runtime.avatar_file, "Icon file not found");
+                    String::new()
+                }
+            } else {
+                String::new()
+            };
+
             let entry = AcpRuntimeCatalogEntry {
                 id: runtime.id.to_string(),
                 label: runtime.label.to_string(),
-                avatar_url: runtime.avatar_url.to_string(),
+                avatar_url,
                 availability,
                 command: resolved_command,
                 binary_path: binary_path.as_ref().map(|p| p.display().to_string()),

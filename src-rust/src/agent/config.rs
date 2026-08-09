@@ -1,5 +1,6 @@
 use napi_derive::napi;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use url::Url;
 
@@ -62,6 +63,62 @@ pub fn default_agent_env(command: &str) -> &'static [(&'static str, &'static str
     match normalize_agent_command_identity(command).as_str() {
         "hermes" | "hermes-agent" | "hermes-acp" => &[("HERMES_ACP_SKIP_CONFIGURED_MCP", "1")],
         _ => &[],
+    }
+}
+
+/// Claude Code settings.json structure (partial — we only need the `env` field)
+#[derive(Deserialize, Default)]
+struct ClaudeSettings {
+    #[serde(default)]
+    env: HashMap<String, String>,
+}
+
+/// Read environment variables from Claude Code's settings.json (~/.claude/settings.json).
+///
+/// Claude Code stores user-configured environment variables (like ANTHROPIC_AUTH_TOKEN,
+/// ANTHROPIC_BASE_URL) in ~/.claude/settings.json. When spawning claude-agent-acp,
+/// we need to pass these env vars so the subprocess can authenticate.
+///
+/// Returns an empty HashMap if the file doesn't exist or can't be parsed.
+pub fn read_claude_settings_env() -> HashMap<String, String> {
+    let home = match std::env::var("HOME") {
+        Ok(h) => h,
+        Err(_) => {
+            tracing::warn!("[DEBUG] HOME env not set, cannot read Claude settings");
+            return HashMap::new();
+        }
+    };
+
+    let settings_path = PathBuf::from(&home).join(".claude").join("settings.json");
+    tracing::info!("[DEBUG] Checking Claude settings at: {:?} (HOME={})", settings_path, home);
+
+    if !settings_path.exists() {
+        tracing::warn!("[DEBUG] Claude settings file does not exist: {:?}", settings_path);
+        return HashMap::new();
+    }
+
+    match std::fs::read_to_string(&settings_path) {
+        Ok(contents) => {
+            tracing::info!("[DEBUG] Read settings file, {} bytes", contents.len());
+            match serde_json::from_str::<ClaudeSettings>(&contents) {
+                Ok(settings) => {
+                    tracing::info!(
+                        "[DEBUG] Parsed Claude settings: {} env vars found: {:?}",
+                        settings.env.len(),
+                        settings.env.keys().collect::<Vec<_>>()
+                    );
+                    settings.env
+                }
+                Err(e) => {
+                    tracing::warn!("[DEBUG] Failed to parse Claude settings JSON: {}", e);
+                    HashMap::new()
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!("[DEBUG] Failed to read Claude settings file: {}", e);
+            HashMap::new()
+        }
     }
 }
 

@@ -202,6 +202,9 @@ export declare function dagStatus(): Promise<string>
 /** Get full DAG state as JSON. */
 export declare function dagGetState(): Promise<string>
 
+/** Set the resources directory path for bundled assets */
+export declare function setResourcesPath(path: string): void
+
 /** ACP Runtime availability status */
 export type AcpAvailabilityStatus = 'available' | 'not_installed' | 'auth_required'
 /** ACP Runtime auth status */

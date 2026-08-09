@@ -5815,6 +5815,14 @@ export function ChatView({
       if (worktreePath && chatId) {
         const result = await trpcClient.chats.getParsedDiff.query({ chatId })
 
+        // During streaming, don't update any state to avoid interfering with ReadableStream
+        // Just cache the result and update after streaming completes
+        if (chatId && useStreamingStatusStore.getState().isStreaming(chatId)) {
+          console.log("[fetchDiffStats] Streaming detected, caching result for later")
+          // TODO: Cache result and apply after streaming
+          return
+        }
+
         if (result.files.length > 0) {
           // Store parsed files directly (already parsed on server)
           setParsedFileDiffs(result.files)

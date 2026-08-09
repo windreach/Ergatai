@@ -88,9 +88,17 @@ function translateEvent(event: NapiSessionEvent): any[] {
     case "agent_message_chunk": {
       const content = data?.content || data?.ContentBlock || data
       if (typeof content === "string") {
-        chunks.push({ type: "text-delta", textDelta: content })
+        chunks.push({
+          type: "text-delta",
+          id: `text-${event.sessionId}`,
+          delta: content,
+        })
       } else if (content?.text) {
-        chunks.push({ type: "text-delta", textDelta: content.text })
+        chunks.push({
+          type: "text-delta",
+          id: `text-${event.sessionId}`,
+          delta: content.text,
+        })
       }
       break
     }
@@ -99,7 +107,11 @@ function translateEvent(event: NapiSessionEvent): any[] {
       const content = data?.content || data?.ContentBlock || data
       const text = typeof content === "string" ? content : content?.text || ""
       if (text) {
-        chunks.push({ type: "reasoning-delta", textDelta: text })
+        chunks.push({
+          type: "reasoning-delta",
+          id: `reasoning-${event.sessionId}`,
+          delta: text,
+        })
       }
       break
     }
@@ -161,16 +173,21 @@ function translateEvent(event: NapiSessionEvent): any[] {
       const usage = data?.usage || data
       chunks.push({
         type: "message-metadata",
-        usage: {
-          inputTokens: usage?.input_tokens || usage?.inputTokens || 0,
-          outputTokens: usage?.output_tokens || usage?.outputTokens || 0,
+        messageMetadata: {
+          usage: {
+            inputTokens: usage?.input_tokens || usage?.inputTokens || 0,
+            outputTokens: usage?.output_tokens || usage?.outputTokens || 0,
+          },
         },
       })
       break
     }
 
     case "closed": {
-      chunks.push({ type: "finish" })
+      chunks.push({
+        type: "finish",
+        finishReason: "stop" as const,
+      })
       break
     }
 
@@ -308,24 +325,48 @@ export const acpRouter = router({
 
       return observable<any>((emit) => {
         let cancelled = false
+        let started = false
+        // Track which text/reasoning stream IDs have had their *-start chunk emitted
+        // AI SDK's processUIMessageStream requires text-start/reasoning-start before
+        // text-delta/reasoning-delta, otherwise it throws UIMessageStreamError which
+        // kills the TransformStream and closes the reader.
+        const startedTextStreams = new Set<string>()
+        const startedReasoningStreams = new Set<string>()
 
         const start = async () => {
+          // Prevent multiple start() calls (e.g., from React Strict Mode)
+          if (started) {
+            console.log(`[ACP] start() already called, skipping duplicate call`)
+            return
+          }
+          started = true
+
           let acpSessionId: string
+
+          console.log(`[ACP] Starting session for agent=${agent}, cwd=${cwd}`)
 
           try {
             if (sessionId) {
+              console.log(`[ACP] Trying to resume session: ${sessionId}`)
               try {
                 acpSessionId = await acpResumeSession(agent, sessionId, cwd)
-              } catch {
+                console.log(`[ACP] Resumed session: ${acpSessionId}`)
+              } catch (e) {
+                console.log(`[ACP] Resume failed, creating new: ${e}`)
                 acpSessionId = await acpCreateSession(agent, cwd)
               }
             } else {
+              console.log(`[ACP] Creating new session for agent=${agent}`)
               acpSessionId = await acpCreateSession(agent, cwd)
+              console.log(`[ACP] Session created: ${acpSessionId}`)
             }
 
             sessionMap.set(subChatId, acpSessionId)
             acpSaveSessionMeta(acpSessionId, agent, cwd)
+
+            console.log(`[ACP] Sending prompt (length=${prompt.length}): ${prompt.slice(0, 100)}...`)
             await acpSendPrompt(acpSessionId, prompt)
+            console.log(`[ACP] Prompt sent successfully`)
 
             console.log(`[ACP] Session ready: ${acpSessionId}`)
           } catch (err) {
@@ -336,19 +377,51 @@ export const acpRouter = router({
           }
 
           // Poll events
-          const timer = setInterval(() => {
-            if (cancelled) return
+          let pollCount = 0
+          let isPolling = false
+          const timer = setInterval(async () => {
+            // Prevent overlapping poll iterations
+            if (isPolling) {
+              return
+            }
+            isPolling = true
 
             try {
+              pollCount++
+              if (pollCount % 50 === 0) {
+                console.log(`[ACP] Polling... ${pollCount} iterations`)
+              }
+              if (cancelled) return
+
               const events = acpPollEvents()
+              if (events.length > 0) {
+                console.log(`[ACP] Got ${events.length} events, polling iteration ${pollCount}, types: ${events.map(e => e.eventType).join(", ")}`)
+              }
               const acpSessionId = sessionMap.get(subChatId)
-              if (!acpSessionId) return
+              if (!acpSessionId) {
+                console.log(`[ACP] No session mapped for subChatId=${subChatId}`)
+                return
+              }
 
               for (const event of events) {
                 if (event.sessionId !== acpSessionId) continue
 
                 const chunks = translateEvent(event)
                 for (const chunk of chunks) {
+                  // AI SDK requires *-start before *-delta chunks.
+                  // Inject text-start/reasoning-start on first occurrence per stream ID.
+                  if (chunk.type === "text-delta") {
+                    if (!startedTextStreams.has(chunk.id)) {
+                      startedTextStreams.add(chunk.id)
+                      emit.next({ type: "text-start", id: chunk.id })
+                    }
+                  } else if (chunk.type === "reasoning-delta") {
+                    if (!startedReasoningStreams.has(chunk.id)) {
+                      startedReasoningStreams.add(chunk.id)
+                      emit.next({ type: "reasoning-start", id: chunk.id })
+                    }
+                  }
+
                   // Update permission map with subChatId
                   if (chunk.type === "ask-user-question") {
                     const mapping = permissionMap.get(chunk.toolUseId)
@@ -360,9 +433,21 @@ export const acpRouter = router({
                     dagDetector.appendChunk(acpSessionId, chunk.textDelta)
                   }
 
+                  // Add small delay between chunks to avoid overwhelming the stream
+                  await new Promise(resolve => setTimeout(resolve, 1))
+
                   emit.next(chunk)
+                  console.log(`[ACP] Emitted chunk: type=${chunk.type} subChatId=${subChatId.slice(-8)}`)
 
                   if (chunk.type === "finish") {
+                    console.log(`[ACP] Finish chunk received, completing subscription`)
+                    // Close any open text/reasoning streams so the AI SDK finalizes them
+                    for (const id of startedTextStreams) {
+                      emit.next({ type: "text-end", id })
+                    }
+                    for (const id of startedReasoningStreams) {
+                      emit.next({ type: "reasoning-end", id })
+                    }
                     // Check for DAG before finishing
                     dagDetector.checkAndSubmit(acpSessionId).catch((err) => {
                       console.error("[ACP] DAG auto-submit failed:", err)
@@ -379,10 +464,19 @@ export const acpRouter = router({
               }
             } catch (err) {
               console.error("[ACP] Poll error:", err)
+              // Close any open text/reasoning streams
+              for (const id of startedTextStreams) {
+                emit.next({ type: "text-end", id })
+              }
+              for (const id of startedReasoningStreams) {
+                emit.next({ type: "reasoning-end", id })
+              }
               emit.next({ type: "error", errorText: String(err) })
               clearInterval(timer)
               activePollers.delete(subChatId)
               emit.complete()
+            } finally {
+              isPolling = false
             }
           }, POLL_INTERVAL)
 
@@ -392,6 +486,7 @@ export const acpRouter = router({
         start()
 
         return () => {
+          console.log(`[ACP] Subscription cleanup called for subChatId=${subChatId.slice(-8)}`)
           cancelled = true
           stopPolling(subChatId)
           const sid = sessionMap.get(subChatId)

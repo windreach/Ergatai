@@ -160,4 +160,52 @@ export const agentsRouter = router({
       const output = await nativeBinding.installAcpRuntime(input.runtimeId)
       return { success: true, output }
     }),
+
+  /**
+   * Get agent configuration by name.
+   *
+   * Returns the full agent config (command, args, env, model, etc.)
+   */
+  getAgentConfig: publicProcedure
+    .input(z.object({ name: z.string() }))
+    .query(async ({ input }) => {
+      try {
+        const config = await nativeBinding.getAgentConfig(input.name)
+        return config
+      } catch (error) {
+        console.error(`[Agents] Failed to get config for ${input.name}:`, error)
+        return null
+      }
+    }),
+
+  /**
+   * Save agent configuration.
+   *
+   * Creates or updates an agent config file.
+   */
+  saveAgentConfig: publicProcedure
+    .input(
+      z.object({
+        name: z.string(),
+        command: z.string(),
+        args: z.array(z.string()).optional(),
+        env: z.record(z.string()).optional(),
+        model: z.string().nullable().optional(),
+        provider: z.string().nullable().optional(),
+        agent_type: z.string().nullable().optional(),
+      }),
+    )
+    .mutation(async ({ input }) => {
+      const config = {
+        name: input.name,
+        command: input.command,
+        args: input.args ?? [],
+        env: input.env ?? {},
+        model: input.model ?? null,
+        provider: input.provider ?? null,
+        agent_type: input.agent_type ?? null,
+      }
+      await nativeBinding.saveAgentConfig(config)
+      return { success: true }
+    }),
 })
