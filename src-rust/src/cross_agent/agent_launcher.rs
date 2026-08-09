@@ -372,11 +372,33 @@ Write your results in markdown:
                 anyhow::anyhow!("Session {} lost immediately after creation", session_id)
             })?;
 
+        // Build the full instruction with DAG orchestration context if this is a DAG task
+        let full_instruction = if node_id.is_some() {
+            // Load DAG orchest prompt template
+            let dag_prompt = include_str!("../orchestration/prompts/dag_orchestration.md");
+
+            // Get list of available agents
+            let agents = crate::agent::discovery::discover_acp_runtimes();
+            let agent_list = agents
+                .iter()
+                .map(|a| format!("- **{}** — {}", a.id, a.label))
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            // Replace {{agent_list}} placeholder
+            let dag_prompt = dag_prompt.replace("{{agent_list}}", &agent_list);
+
+            // Combine: DAG orchestration guide + actual task instruction
+            format!("{}\n\n---\n\n{}", dag_prompt, instruction)
+        } else {
+            instruction.to_string()
+        };
+
         // Send instruction as prompt
         let (reply_tx, reply_rx) = oneshot::channel();
         cmd_tx
             .send(SessionCommand::SendPrompt {
-                text: instruction.to_string(),
+                text: full_instruction,
                 reply_tx,
             })
             .map_err(|_| {
