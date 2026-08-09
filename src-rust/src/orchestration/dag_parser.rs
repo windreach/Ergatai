@@ -18,7 +18,6 @@
 
 use std::collections::HashMap;
 
-use anyhow::Context;
 use crate::error::{ErgataiError, ErgataiResult};
 use uuid::Uuid;
 
@@ -198,10 +197,15 @@ fn parse_node_header(line: &str) -> ErgataiResult<TaskNodeBuilder> {
 /// Parse a property line: "- **key**: value"
 fn parse_property(builder: &mut TaskNodeBuilder, line: &str) -> ErgataiResult<()> {
     // Extract key and value
-    let key_start = line.find("**").with_context(|| "Missing ** in property")? + 2;
+    let key_start = line
+        .find("**")
+        .ok_or_else(|| ErgataiError::InvalidArgument(format!("Missing ** in property: {}", line)))?
+        + 2;
     let key_end = line[key_start..]
         .find("**")
-        .with_context(|| "Missing closing ** in property")?
+        .ok_or_else(|| {
+            ErgataiError::InvalidArgument(format!("Missing closing ** in property: {}", line))
+        })?
         + key_start;
 
     let key = line[key_start..key_end].trim().to_string();
@@ -209,7 +213,9 @@ fn parse_property(builder: &mut TaskNodeBuilder, line: &str) -> ErgataiResult<()
     // Find the value (after ": ")
     let value_start = line[key_end + 2..]
         .find(':')
-        .with_context(|| "Missing : in property")?
+        .ok_or_else(|| {
+            ErgataiError::InvalidArgument(format!("Missing : in property '{}': {}", key, line))
+        })?
         + key_end
         + 3;
 
@@ -240,11 +246,21 @@ fn parse_property(builder: &mut TaskNodeBuilder, line: &str) -> ErgataiResult<()
             builder.priority = Some(value);
         }
         "timeout" => {
-            // Parse as seconds (integer)
-            builder.timeout = value.parse::<u64>().ok();
+            // Parse as seconds (integer) — warn on invalid values instead of silently ignoring
+            match value.parse::<u64>() {
+                Ok(v) => builder.timeout = Some(v),
+                Err(_) => {
+                    tracing::warn!(value = %value, key = %key, "Invalid timeout value in DAG markdown, ignoring");
+                }
+            }
         }
         "retry" | "max_retries" => {
-            builder.max_retries = value.parse::<u32>().ok();
+            match value.parse::<u32>() {
+                Ok(v) => builder.max_retries = Some(v),
+                Err(_) => {
+                    tracing::warn!(value = %value, key = %key, "Invalid retry count in DAG markdown, ignoring");
+                }
+            }
         }
         _ => {
             // Store in metadata

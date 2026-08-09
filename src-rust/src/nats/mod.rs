@@ -16,6 +16,6 @@ pub mod event_bus;
 pub use server::NatsServer;
 pub use connection::NatsConnection;
 pub use task_queue::NatsTaskQueue;
-pub use manager::{init_nats, get_nats_connection, is_nats_initialized, shutdown_nats};
+pub use manager::{init_nats, get_nats_connection, is_nats_initialized, shutdown_nats, get_nats_server_port};
 pub use events::{TaskSubmitPayload, NodeCompletePayload, NodeFailedPayload, DagCompletePayload, AgentMessagePayload, DagEvent};
 pub use event_bus::EventBus;

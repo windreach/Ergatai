@@ -219,11 +219,12 @@ impl TaskGraph {
             }
         }
 
-        // Check for missing dependencies
-        let all_ids: Vec<&str> = self.nodes.iter().map(|n| n.id.as_str()).collect();
+        // Check for missing dependencies (O(N) with HashSet lookup)
+        let all_ids: std::collections::HashSet<&str> =
+            self.nodes.iter().map(|n| n.id.as_str()).collect();
         for node in &self.nodes {
             for dep in &node.depends_on {
-                if !all_ids.contains(&dep.as_str()) {
+                if !all_ids.contains(dep.as_str()) {
                     return Err(ErgataiError::InvalidArgument(format!(
                         "Node {} depends on {}, which doesn't exist",
                         node.id,
@@ -254,6 +255,11 @@ impl TaskGraph {
         false
     }
 
+    /// DFS helper for cycle detection.
+    ///
+    /// Uses `HashSet<String>` because `dep` borrows from `node.depends_on`
+    /// (tied to `&self` lifetime), which differs from the `id` lifetime.
+    /// For typical DAG sizes (< 100 nodes), the allocation overhead is negligible.
     fn dfs_cycle(
         &self,
         id: &str,
@@ -265,11 +271,11 @@ impl TaskGraph {
 
         if let Some(node) = self.find_node(id) {
             for dep in &node.depends_on {
-                if !visited.contains(dep) {
+                if !visited.contains(dep.as_str()) {
                     if self.dfs_cycle(dep, visited, rec_stack) {
                         return true;
                     }
-                } else if rec_stack.contains(dep) {
+                } else if rec_stack.contains(dep.as_str()) {
                     return true;
                 }
             }

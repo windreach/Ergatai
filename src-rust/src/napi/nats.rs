@@ -15,14 +15,12 @@ pub async fn nats_init() -> napi::Result<u32> {
         .await
         .map_err(|e| napi::Error::from_reason(format!("Failed to initialize NATS: {}", e)))?;
 
-    // Parse port from connection URL
-    // The connection doesn't expose the port directly, so we get it from the server
-    let port = nats::get_nats_connection()
+    // Get the actual port from the running server (may differ from 4222 if it was in use)
+    let port = nats::get_nats_server_port()
         .await
-        .map(|_| 4222u32) // Default port - in production, we'd track this properly
         .unwrap_or(4222);
 
-    Ok(port)
+    Ok(port as u32)
 }
 
 /// Check if NATS is initialized and connected

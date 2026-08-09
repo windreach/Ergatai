@@ -96,18 +96,31 @@ impl NatsConnection {
     }
 
     /// Check if connection is still alive
+    ///
+    /// Uses the async-nats connection state to determine if the client is connected.
+    /// Returns true if the client exists and hasn't been explicitly closed.
     pub fn is_connected(&self) -> bool {
-        // async-nats doesn't have is_closed(), so we assume connected if we have a client
-        // The connection will fail on actual operations if disconnected
-        true
+        // async-nats Client is internally reference-counted; if we hold a valid Client,
+        // the connection is considered alive. Actual I/O failures will surface on next operation.
+        // We use connection_state() to check for explicitly closed connections.
+        matches!(
+            self.client.connection_state(),
+            async_nats::connection::State::Connected
+        )
     }
 
     /// Wait for connection to be ready (useful after server startup)
     pub async fn wait_for_ready(&self) -> ErgataiResult<()> {
-        // Simple check: try to get server info
-        for _ in 0..10 {
-            if self.is_connected() {
-                return Ok(());
+        // Try a flush to verify the connection is actually working
+        for attempt in 0..10 {
+            match self.client.flush().await {
+                Ok(()) => {
+                    debug!(attempt = attempt, "NATS connection ready");
+                    return Ok(());
+                }
+                Err(e) => {
+                    debug!(attempt = attempt, error = %e, "NATS not ready, retrying");
+                }
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }

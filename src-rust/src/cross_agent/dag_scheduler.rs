@@ -110,12 +110,6 @@ impl DagScheduler {
     /// Prefers NATS event publishing when available (decoupled, event-driven).
     /// Falls back to direct `task_scheduler.submit_task()` call otherwise.
     async fn generate_and_submit(&self, node: &TaskNode) -> ErgataiResult<String> {
-        // Release lock before async I/O — generate_node_plan doesn't need the graph
-        {
-            let _graph = self.graph.lock().await;
-            // Lock intentionally dropped here before async work below
-        }
-
         // Generate plan file (still needed — agents read it as a document)
         let plan_file = self.generate_node_plan(node).await?;
         let task_id = node.id.clone();
@@ -458,12 +452,14 @@ impl DagScheduler {
                     let bus = crate::nats::EventBus::new(conn);
                     let graph = self.graph.lock().await;
                     let total = graph.nodes.len() as u32;
-                    let completed = graph.nodes.iter()
-                        .filter(|n| matches!(n.status, TaskStatus::Completed))
-                        .count() as u32;
-                    let failed = graph.nodes.iter()
-                        .filter(|n| matches!(n.status, TaskStatus::Failed))
-                        .count() as u32;
+                    let (completed, failed) = graph.nodes.iter().fold(
+                        (0u32, 0u32),
+                        |(c, f), n| match n.status {
+                            TaskStatus::Completed => (c + 1, f),
+                            TaskStatus::Failed => (c, f + 1),
+                            _ => (c, f),
+                        },
+                    );
                     drop(graph);
 
                     let payload = crate::nats::DagCompletePayload {

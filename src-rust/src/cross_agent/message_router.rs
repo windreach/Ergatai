@@ -10,19 +10,24 @@ use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use regex::Regex;
+use std::sync::LazyLock;
 use tracing::{debug, info, warn};
 
 use crate::error::ErgataiResult;
 use crate::nats::{AgentMessagePayload, EventBus, is_nats_initialized, get_nats_connection};
+
+// Compile regex once at startup.
+static MENTION_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"@([a-zA-Z0-9_-]+)").expect("valid regex")
+});
 
 /// Detect @agent mentions in text
 ///
 /// Returns a list of agent names mentioned (without the @ prefix).
 /// Example: "@codex please review" → ["codex"]
 pub fn extract_mentions(text: &str) -> Vec<String> {
-    // Match @word (alphanumeric + dash/underscore)
-    let re = Regex::new(r"@([a-zA-Z0-9_-]+)").expect("Invalid regex");
-    re.captures_iter(text)
+    MENTION_RE
+        .captures_iter(text)
         .filter_map(|cap| cap.get(1).map(|m| m.as_str().to_string()))
         .collect()
 }

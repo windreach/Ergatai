@@ -386,12 +386,11 @@ impl TaskScheduler {
     /// Tasks arrive as `TaskSubmitPayload` messages with inline plan content.
     ///
     /// Returns a `JoinHandle` that can be aborted to stop consuming.
-    pub fn start_nats_consumer(self: &Arc<Self>) -> Option<tokio::task::JoinHandle<()>> {
+    /// If NATS is not initialized, the spawned task exits immediately.
+    pub fn start_nats_consumer(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
         let scheduler = Arc::clone(self);
 
-        // Check NATS availability synchronously (via try_read on the manager state)
-        // The actual connection check happens inside the spawned task
-        Some(tokio::spawn(async move {
+        tokio::spawn(async move {
             let conn = match crate::nats::get_nats_connection().await {
                 Some(c) => c,
                 None => {
@@ -434,7 +433,7 @@ impl TaskScheduler {
             }
 
             tracing::warn!("NATS task consumer subscription closed");
-        }))
+        })
     }
 
     /// Handle a task received via NATS

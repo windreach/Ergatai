@@ -71,6 +71,15 @@ pub async fn is_nats_initialized() -> bool {
     state.connection.as_ref().map(|c| c.is_connected()).unwrap_or(false)
 }
 
+/// Get the port the NATS server is listening on
+///
+/// Returns None if NATS is not initialized or the server has been shut down.
+pub async fn get_nats_server_port() -> Option<u16> {
+    let state = nats_state();
+    let state = state.read().await;
+    state.server.as_ref().map(|s| s.port())
+}
+
 /// Shutdown NATS (kill server + disconnect)
 pub async fn shutdown_nats() {
     let state = nats_state();
