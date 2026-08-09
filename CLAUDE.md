@@ -65,6 +65,107 @@ Frontend (TS) → tRPC → Main (TS) → NAPI → Rust (核心逻辑)
 
 ## Architecture
 
+### 通信架构（重要！）
+
+```
+用户
+ │ "重构这个模块"
+ ▼
+主 Agent (claude-code) ←── ACP ──→ Ergatai (Rust)
+ │ 输出 DAG markdown
+ ▼
+Ergatai 解析 DAG → NATS 分发任务 → 子 Agent A/B/C (ACP 执行)
+                   ↑ NATS 事件回传完成
+```
+
+**两层通信，各管各的：**
+
+| 层 | 技术 | 方向 | 内容 |
+|---|------|------|------|
+| **Agent ↔ Ergatai** | ACP (JSON-RPC over stdin/stdout) | 双向 | prompt、response、tool call |
+| **Ergatai 内部组件** | NATS (事件总线) | 事件流 | task.submit、node.complete |
+
+- **ACP** = Client(Ergatai) ↔ Agent 协议，双向
+- **NATS** = Ergatai 内部事件总线，保证消息可靠传递
+- **NATS 不跟 Agent 说话**，Agent 之间也不能直接对话
+- Agent 间如需对话，必须经 Ergatai 中转（Phase 5）
+
+### Rust 后端 (`src-rust/`)
+
+```
+src-rust/src/
+├── acp/                     # ACP 协议层
+│   ├── manager.rs           # Session 管理、事件总线 (poll_events)
+│   ├── sdk_session.rs       # 单个 ACP session 生命周期
+│   └── sdk_pool_manager.rs  # Agent pool: NATS 任务队列 + 调度
+│
+├── nats/                    # NATS 集成（事件总线）
+│   ├── server.rs            # nats-server 子进程管理
+│   ├── connection.rs        # async-nats client 封装
+│   ├── task_queue.rs        # JetStream WorkQueue
+│   ├── events.rs            # DAG 事件 payload 定义
+│   ├── event_bus.rs         # 类型化 pub/sub 封装
+│   └── manager.rs           # 全局 NATS 状态 (init/shutdown)
+│
+├── orchestration/           # DAG 编排
+│   ├── dag_topology.rs      # TaskGraph / TaskNode 数据结构
+│   ├── dag_parser.rs        # Markdown → TaskGraph 解析器
+│   ├── template.rs          # {{var}} 模板引擎
+│   └── context.rs           # DagContext (全局变量 + 节点输出)
+│
+├── cross_agent/             # 跨 Agent 协调
+│   ├── dag_scheduler.rs     # DAG 事件驱动调度器
+│   ├── task_scheduler.rs    # 任务调度 (NATS consumer / 轮询 fallback)
+│   ├── agent_launcher.rs    # Agent 启动 + 完成检测
+│   └── task_coordinator.rs  # Plan 文件解析
+│
+├── agent/                   # Agent 发现与配置
+│   ├── config.rs            # Agent JSON 配置加载
+│   ├── discovery.rs         # 自动发现已安装 agent
+│   └── runtime_metadata.rs  # 13 个内置 agent 元数据
+│
+└── napi/                    # NAPI 绑定 (Rust → TypeScript)
+    ├── nats.rs              # nats_init / nats_is_initialized / nats_shutdown
+    └── ...
+```
+
+### NATS Subject 命名规范
+
+```
+ergatai.
+├── task.submit.{agent}        # DagScheduler → TaskScheduler (任务提交)
+├── task.complete.{task_id}    # Agent 完成通知
+├── task.fail.{task_id}        # Agent 失败通知
+├── dag.node_complete.{node}   # AgentLauncher → DagScheduler
+├── dag.node_failed.{node}     # AgentLauncher → DagScheduler
+├── dag.complete.{dag_id}      # DAG 全部完成
+├── agent.spawned.{agent_id}   # Agent 启动
+└── agent.stopped.{agent_id}   # Agent 停止
+```
+
+### DAG 编排流程
+
+```markdown
+## Task A (分析代码)
+- **agent**: agent-a
+- **task**: tasks/analyze.md
+
+## Task B (写测试)
+- **agent**: agent-b
+- **task**: tasks/test.md
+- **depends_on**: [Task A]
+- **input**: 分析结果: {{TaskA.review_result}}
+- **output**: test_result, coverage
+- **retry**: 3
+- **timeout**: 300
+```
+
+- `{{global.*}}` = 全局变量（DagContext.global_vars）
+- `{{node_id.*}}` = 上游节点输出（DagContext.node_outputs）
+- 模板在 `generate_node_plan()` 时自动渲染
+
+### Frontend / Main / Renderer
+
 ```
 src/
 ├── main/                    # Electron main process
@@ -154,8 +255,42 @@ const projectChats = db.select().from(chats).where(eq(chats.projectId, id)).all(
 | Components | Radix UI, Lucide icons, Motion, Sonner |
 | State | Jotai, Zustand, React Query |
 | Backend | tRPC, Drizzle ORM, better-sqlite3 |
-| AI | @anthropic-ai/claude-code |
+| AI | ACP Protocol (agent-client-protocol SDK) |
+| Agent 通信 | NATS (async-nats 0.38) + nats-server 子进程 |
+| DAG 编排 | 自研 TaskGraph + 模板引擎 + DagContext |
 | Package Manager | bun |
+
+## Rust 测试
+
+```bash
+# 全部库测试（排除已知挂起的 agent::discovery）
+cargo test --lib -- --skip agent::discovery
+
+# 特定模块测试
+cargo test --lib orchestration          # 模板引擎 + DAG 解析 (37 测试)
+cargo test --lib cross_agent::dag       # DAG 调度器 (6 测试)
+cargo test --lib nats::events           # 事件类型序列化 (8 测试)
+cargo test --lib nats::event_bus        # 事件总线 (需要 nats-server)
+
+# NATS 集成测试需要 nats-server 二进制
+# 设置: export ERGATAI_NATS_BINARY=/path/to/nats-server
+```
+
+## Current Status
+
+**已完成：**
+- ✅ Phase 1: NATS 基础设施 + Pool 任务队列（VecDeque → JetStream 双模式）
+- ✅ Phase 2: 模板引擎 + 数据流管线（DagContext + `{{var}}` 渲染）
+- ✅ Phase 3: DAG 事件驱动（NATS pub/sub 替代直接调用，fallback 保留）
+- ✅ Phase 4: Markdown 编排增强（input/output/retry/timeout/priority）
+
+**进行中：**
+- 前端 mock-api.ts → 真实 tRPC 调用替换
+
+**待做 (Phase 5)：**
+- Agent 间双向对话（Ergatai 中间人路由，`@agent` 提及检测）
+- NATS Request-Reply 封装
+- 前端通过 NATS 订阅实时事件（替代 poll_events 轮询）
 
 ## File Naming
 
@@ -254,22 +389,6 @@ npm version patch --no-git-tag-version  # 0.0.27 → 0.0.28
 2. If version in manifest > current version, shows "Update Available" banner
 3. User clicks Download → downloads ZIP in background
 4. User clicks "Restart Now" → installs update and restarts
-
-## Current Status (WIP)
-
-**Done:**
-- Drizzle ORM setup with schema (projects, chats, sub_chats)
-- Auto-migration on app startup
-- tRPC routers structure
-
-**In Progress:**
-- Replacing `mock-api.ts` with real tRPC calls in renderer
-- ProjectSelector component (local folder picker)
-
-**Planned:**
-- Git worktree per chat (isolation)
-- Claude Code execution in worktree path
-- Full feature parity with web app
 
 ## Debug Mode
 

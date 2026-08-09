@@ -4,10 +4,12 @@
 //! Main Agent submits a DAG → DagScheduler extracts ready tasks → TaskScheduler executes them
 //! → On completion → DagScheduler checks for newly ready nodes → Repeat
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::error::{ErgataiError, ErgataiResult};
+use crate::orchestration::context::DagContext;
 use tokio::sync::Mutex;
 
 use super::task_scheduler::{global_scheduler, TaskScheduler};
@@ -19,6 +21,9 @@ pub struct DagScheduler {
     /// The task graph being executed
     graph: Arc<Mutex<TaskGraph>>,
 
+    /// Execution context (global vars + per-node outputs) for template rendering
+    context: Arc<Mutex<DagContext>>,
+
     /// Project root for file paths
     project_root: PathBuf,
 
@@ -27,13 +32,44 @@ pub struct DagScheduler {
 }
 
 impl DagScheduler {
-    /// Create a new DAG scheduler
+    /// Create a new DAG scheduler with an empty context
     pub fn new(project_root: PathBuf, graph: TaskGraph) -> Self {
+        Self::with_context(project_root, graph, DagContext::empty())
+    }
+
+    /// Create a new DAG scheduler with the given context
+    pub fn with_context(
+        project_root: PathBuf,
+        graph: TaskGraph,
+        context: DagContext,
+    ) -> Self {
         Self {
             graph: Arc::new(Mutex::new(graph)),
+            context: Arc::new(Mutex::new(context)),
             project_root: project_root.clone(),
             scheduler: global_scheduler(Some(project_root)),
         }
+    }
+
+    /// Get a clone of the execution context
+    pub fn context(&self) -> Arc<Mutex<DagContext>> {
+        self.context.clone()
+    }
+
+    /// Set a global variable in the context
+    pub async fn set_global(&self, key: impl Into<String>, value: impl Into<String>) {
+        let mut ctx = self.context.lock().await;
+        ctx.set_global(key, value);
+    }
+
+    /// Record outputs from a completed node into the context
+    pub async fn record_outputs(
+        &self,
+        node_id: &str,
+        outputs: HashMap<String, String>,
+    ) {
+        let mut ctx = self.context.lock().await;
+        ctx.record_output(node_id, outputs);
     }
 
     /// Submit the DAG for execution
@@ -70,6 +106,9 @@ impl DagScheduler {
     }
 
     /// Generate plan and submit to scheduler (no lock acquisition)
+    ///
+    /// Prefers NATS event publishing when available (decoupled, event-driven).
+    /// Falls back to direct `task_scheduler.submit_task()` call otherwise.
     async fn generate_and_submit(&self, node: &TaskNode) -> ErgataiResult<String> {
         // Release lock before async I/O — generate_node_plan doesn't need the graph
         {
@@ -77,38 +116,223 @@ impl DagScheduler {
             // Lock intentionally dropped here before async work below
         }
 
-        // Generate a simple plan file for this node
+        // Generate plan file (still needed — agents read it as a document)
         let plan_file = self.generate_node_plan(node).await?;
+        let task_id = node.id.clone();
 
-        // Submit to scheduler
-        let task_id = self.scheduler.submit_task(plan_file).await?;
+        if crate::nats::is_nats_initialized().await {
+            // NATS path: publish task submission event with inline plan content
+            if let Some(conn) = crate::nats::get_nats_connection().await {
+                let bus = crate::nats::EventBus::new(conn);
+                let plan_content = tokio::fs::read_to_string(&plan_file).await?;
+                let dag_id = self.dag_id();
 
-        Ok(task_id)
+                let payload = crate::nats::TaskSubmitPayload {
+                    task_id: task_id.clone(),
+                    plan_content,
+                    plan_file: plan_file.to_string_lossy().to_string(),
+                    target_agent: node.agent.clone(),
+                    priority: 1,
+                    timeout_secs: node.timeout,
+                    dag_id: Some(dag_id),
+                };
+
+                bus.publish_task_submit(&payload).await?;
+                tracing::info!(task_id = task_id, "Submitted node via NATS event");
+                return Ok(task_id);
+            }
+        }
+
+        // Fallback: direct task_scheduler call
+        let tid = self.scheduler.submit_task(plan_file).await?;
+        Ok(tid)
+    }
+
+    /// Get a DAG identifier (derived from project root)
+    fn dag_id(&self) -> String {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.project_root.hash(&mut hasher);
+        format!("dag-{:x}", hasher.finish())
+    }
+
+    /// Start listening for NATS DAG events (node_complete, node_failed)
+    ///
+    /// Spawns a background task that subscribes to:
+    /// - `ergatai.dag.node_complete.*` — triggers `on_node_completed()`
+    /// - `ergatai.dag.node_failed.*`   — triggers `on_node_failed()`
+    ///
+    /// Returns a `JoinHandle` that can be aborted to stop listening.
+    pub fn start_event_listener(self) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let conn = match crate::nats::get_nats_connection().await {
+                Some(c) => c,
+                None => {
+                    tracing::warn!("NATS not initialized, event listener not started");
+                    return;
+                }
+            };
+
+            let bus = crate::nats::EventBus::new(conn);
+
+            // Subscribe to all node completion events
+            let mut complete_sub = match bus.subscribe_all_node_complete().await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to subscribe to node_complete events");
+                    return;
+                }
+            };
+
+            // Subscribe to all node failure events
+            let mut failed_sub = match bus.subscribe_all_node_failed().await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to subscribe to node_failed events");
+                    return;
+                }
+            };
+
+            tracing::info!("DAG event listener started");
+
+            use futures_util::StreamExt;
+            loop {
+                tokio::select! {
+                    // Handle node completion
+                    msg = complete_sub.next() => {
+                        match msg {
+                            Some(nats_msg) => {
+                                match serde_json::from_slice::<crate::nats::NodeCompletePayload>(&nats_msg.payload) {
+                                    Ok(payload) => {
+                                        tracing::info!(
+                                            node_id = %payload.node_id,
+                                            "Received NATS node_complete event"
+                                        );
+                                        // Record outputs into context
+                                        if !payload.outputs.is_empty() {
+                                            self.record_outputs(&payload.node_id, payload.outputs).await;
+                                        }
+                                        // Trigger downstream nodes
+                                        match self.on_node_completed(&payload.node_id, payload.result_file).await {
+                                            Ok(newly_submitted) => {
+                                                tracing::info!(
+                                                    node_id = %payload.node_id,
+                                                    newly_submitted = newly_submitted.len(),
+                                                    "Processed node_complete, submitted downstream"
+                                                );
+                                            }
+                                            Err(e) => {
+                                                tracing::error!(
+                                                    node_id = %payload.node_id,
+                                                    error = %e,
+                                                    "Failed to process node_complete"
+                                                );
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(error = %e, "Failed to deserialize node_complete event");
+                                    }
+                                }
+                            }
+                            None => {
+                                tracing::warn!("node_complete subscription closed");
+                                break;
+                            }
+                        }
+                    }
+
+                    // Handle node failure
+                    msg = failed_sub.next() => {
+                        match msg {
+                            Some(nats_msg) => {
+                                match serde_json::from_slice::<crate::nats::NodeFailedPayload>(&nats_msg.payload) {
+                                    Ok(payload) => {
+                                        tracing::info!(
+                                            node_id = %payload.node_id,
+                                            error = %payload.error,
+                                            "Received NATS node_failed event"
+                                        );
+                                        match self.on_node_failed(&payload.node_id, &payload.error).await {
+                                            Ok(()) => {
+                                                tracing::info!(
+                                                    node_id = %payload.node_id,
+                                                    "Processed node_failed"
+                                                );
+                                            }
+                                            Err(e) => {
+                                                tracing::error!(
+                                                    node_id = %payload.node_id,
+                                                    error = %e,
+                                                    "Failed to process node_failed"
+                                                );
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(error = %e, "Failed to deserialize node_failed event");
+                                    }
+                                }
+                            }
+                            None => {
+                                tracing::warn!("node_failed subscription closed");
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            tracing::info!("DAG event listener stopped");
+        })
     }
 
     /// Generate a plan file for a single node
-    /// This reuses the existing plan file infrastructure
+    ///
+    /// This is where data flow happens: we read the task document (if present),
+    /// render all `{{var}}` templates against the current `DagContext` (global
+    /// vars + upstream outputs), and include upstream dependency context so the
+    /// agent can see what previous nodes produced.
     async fn generate_node_plan(&self, node: &TaskNode) -> ErgataiResult<PathBuf> {
         let plan_dir = self.project_root.join(".ergatai").join(".dag-plans");
         tokio::fs::create_dir_all(&plan_dir).await?;
 
         let plan_file = plan_dir.join(format!("{}.md", node.id));
 
-        // Generate simple plan content
+        // 1. Render the node's input template (if any)
+        let rendered_input = if let Some(ref input_tmpl) = node.input {
+            let ctx = self.context.lock().await;
+            Some(ctx.render_template(input_tmpl))
+        } else {
+            None
+        };
+
+        // 2. Read upstream dependency outputs from the context
+        let upstream_context = self.build_upstream_context_block(node).await;
+
+        // 3. Build the plan content
+        let result_path = format!(".ergatai/.dag-results/{}.md", node.id);
         let content = format!(
             r#"# Task: {}
 
 ### @{} - {}
 - **Objective**: {}
 - **Type**: {}
-- **Result**: .ergatai/.dag-results/{}.md
+- **Result**: {}
+{}
+{}
 "#,
             node.task,
             node.agent,
             node.id,
             node.task,
-            "CreateNew", // Default task type
-            node.id
+            "CreateNew",
+            result_path,
+            rendered_input
+                .as_ref()
+                .map(|s| format!("- **Input**: {}", s))
+                .unwrap_or_default(),
+            upstream_context,
         );
 
         tokio::fs::write(&plan_file, content).await?;
@@ -118,6 +342,45 @@ impl DagScheduler {
         tokio::fs::create_dir_all(&results_dir).await?;
 
         Ok(plan_file)
+    }
+
+    /// Build a markdown block describing upstream node outputs
+    ///
+    /// For each completed dependency, render a section showing what keys it produced.
+    async fn build_upstream_context_block(&self, node: &TaskNode) -> String {
+        if node.depends_on.is_empty() {
+            return String::new();
+        }
+
+        let graph = self.graph.lock().await;
+        let ctx = self.context.lock().await;
+
+        let mut lines = Vec::new();
+        lines.push(String::new());
+        lines.push("### Upstream Context".to_string());
+
+        for dep_id in &node.depends_on {
+            // Find the dependency node to get its human-readable name
+            let dep_name = graph
+                .find_node(dep_id)
+                .map(|n| n.task.as_str())
+                .unwrap_or(dep_id);
+
+            if let Some(outputs) = ctx.get_node_outputs(dep_id) {
+                if !outputs.is_empty() {
+                    lines.push(format!("\n**{}** ({}) outputs:", dep_name, dep_id));
+                    for (k, v) in outputs {
+                        lines.push(format!("  - {}: {}", k, v));
+                    }
+                } else {
+                    lines.push(format!("\n**{}** ({}) — completed (no outputs recorded)", dep_name, dep_id));
+                }
+            } else {
+                lines.push(format!("\n**{}** ({}) — completed", dep_name, dep_id));
+            }
+        }
+
+        lines.join("\n")
     }
 
     /// Called when a node completes
@@ -178,13 +441,8 @@ impl DagScheduler {
             }
         }
 
-        // Save updated graph — serialize under lock, then write without holding it
-        let graph_json = {
-            let graph = self.graph.lock().await;
-            serde_json::to_string(&*graph).map_err(|e| ErgataiError::json_with_source("Failed to serialize graph", e))?
-        };
-        let graph_file = self.project_root.join(".ergatai").join("dag-state.json");
-        tokio::fs::write(&graph_file, graph_json.as_bytes()).await?;
+        // Save graph + context together
+        self.save_graph_unlocked().await?;
 
         // Check if all done
         let is_done = {
@@ -193,6 +451,33 @@ impl DagScheduler {
         };
         if is_done {
             tracing::info!("All nodes completed! DAG execution complete.");
+
+            // Publish DAG completion event via NATS
+            if crate::nats::is_nats_initialized().await {
+                if let Some(conn) = crate::nats::get_nats_connection().await {
+                    let bus = crate::nats::EventBus::new(conn);
+                    let graph = self.graph.lock().await;
+                    let total = graph.nodes.len() as u32;
+                    let completed = graph.nodes.iter()
+                        .filter(|n| matches!(n.status, TaskStatus::Completed))
+                        .count() as u32;
+                    let failed = graph.nodes.iter()
+                        .filter(|n| matches!(n.status, TaskStatus::Failed))
+                        .count() as u32;
+                    drop(graph);
+
+                    let payload = crate::nats::DagCompletePayload {
+                        dag_id: self.dag_id(),
+                        total_nodes: total,
+                        completed_nodes: completed,
+                        failed_nodes: failed,
+                        duration_secs: 0, // TODO: track start time
+                    };
+                    if let Err(e) = bus.publish_dag_complete(&payload).await {
+                        tracing::error!(error = %e, "Failed to publish DAG complete event");
+                    }
+                }
+            }
         }
 
         Ok(newly_submitted)
@@ -300,22 +585,43 @@ impl DagScheduler {
         graph.is_complete()
     }
 
-    /// Save graph to disk (serializes under lock, writes without holding it)
+    /// Save graph and context to disk (serializes under lock, writes without holding it)
     async fn save_graph_unlocked(&self) -> ErgataiResult<()> {
+        let ergatai_dir = self.project_root.join(".ergatai");
+
+        // Serialize graph
         let graph_json = {
             let graph = self.graph.lock().await;
             serde_json::to_string(&*graph).map_err(|e| ErgataiError::json_with_source("Failed to serialize graph", e))?
         };
-        let graph_file = self.project_root.join(".ergatai").join("dag-state.json");
+        let graph_file = ergatai_dir.join("dag-state.json");
         tokio::fs::write(&graph_file, graph_json.as_bytes()).await?;
+
+        // Serialize context
+        let context_json = {
+            let ctx = self.context.lock().await;
+            serde_json::to_string(&*ctx).map_err(|e| ErgataiError::json_with_source("Failed to serialize context", e))?
+        };
+        let context_file = ergatai_dir.join("dag-context.json");
+        tokio::fs::write(&context_file, context_json.as_bytes()).await?;
+
         Ok(())
     }
 
-    /// Load graph from disk (for recovery)
+    /// Load graph and context from disk (for recovery)
     pub async fn load_from_disk(project_root: PathBuf) -> ErgataiResult<Self> {
         let graph_file = project_root.join(".ergatai").join("dag-state.json");
         let graph = TaskGraph::load_from_file(&graph_file).await?;
-        Ok(Self::new(project_root, graph))
+
+        // Restore context if available (it may not exist in older DAGs)
+        let context_file = project_root.join(".ergatai").join("dag-context.json");
+        let context = if context_file.exists() {
+            DagContext::load_from_file(&context_file).await?
+        } else {
+            DagContext::empty()
+        };
+
+        Ok(Self::with_context(project_root, graph, context))
     }
 
     /// Get a JSON snapshot of the current graph state
@@ -458,6 +764,75 @@ mod tests {
         assert_eq!(s.progress().await, 0.0);
 
         clear_dag_scheduler();
+    }
+
+    /// Integration test: verify end-to-end data flow through template rendering.
+    /// A → B (B depends on A), with B's input referencing A's output and a global var.
+    #[tokio::test]
+    async fn test_data_flow_template_rendering() {
+        // Setup: 2-node DAG with B depending on A
+        let mut node_a = TaskNode::new("n1", "agent-a", "Review code");
+        let _ = &mut node_a; // use it
+        let node_b = TaskNode::new("n2", "agent-b", "Fix issues")
+            .with_dependencies(vec!["n1".into()])
+            .with_input("Fix issues found in review: {{n1.review_result}}. Query: {{global.user_query}}");
+
+        let graph = TaskGraph::new(vec![
+            TaskNode::new("n1", "agent-a", "Review code"),
+            node_b,
+        ]);
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let ctx = DagContext::new({
+            let mut m = HashMap::new();
+            m.insert("user_query".to_string(), "improve performance".to_string());
+            m
+        });
+
+        let scheduler = DagScheduler::with_context(temp_dir.path().to_path_buf(), graph, ctx);
+
+        // Simulate: node n1 completes with outputs
+        let mut outputs = HashMap::new();
+        outputs.insert("review_result".to_string(), "3 issues found: unused imports".to_string());
+        scheduler.record_outputs("n1", outputs).await;
+
+        // Now generate plan for n2 and verify template was rendered
+        let graph = scheduler.graph.lock().await;
+        let n2 = graph.find_node("n2").unwrap().clone();
+        drop(graph);
+
+        let plan_file = scheduler.generate_node_plan(&n2).await.unwrap();
+        let plan_content = tokio::fs::read_to_string(&plan_file).await.unwrap();
+
+        // The plan should contain the RESOLVED values, not the raw templates
+        assert!(
+            plan_content.contains("3 issues found: unused imports"),
+            "Plan should contain rendered upstream output, got:\n{}",
+            plan_content
+        );
+        assert!(
+            plan_content.contains("improve performance"),
+            "Plan should contain rendered global var, got:\n{}",
+            plan_content
+        );
+        assert!(
+            !plan_content.contains("{{n1.review_result}}"),
+            "Plan should NOT contain unresolved template"
+        );
+        assert!(
+            !plan_content.contains("{{global.user_query}}"),
+            "Plan should NOT contain unresolved template"
+        );
+
+        // Upstream context block should show n1's outputs
+        assert!(
+            plan_content.contains("Upstream Context"),
+            "Plan should include upstream context section"
+        );
+        assert!(
+            plan_content.contains("review_result"),
+            "Upstream context should list output keys"
+        );
     }
 }
 

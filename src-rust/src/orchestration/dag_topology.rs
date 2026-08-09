@@ -65,6 +65,14 @@ pub struct TaskNode {
     #[serde(default)]
     pub retry_count: u32,
 
+    /// Optional: execution priority (high / medium / low)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority: Option<String>,
+
+    /// Optional: execution timeout in seconds
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<u64>,
+
     /// Optional: metadata (for AI to attach context)
     #[serde(default)]
     pub metadata: HashMap<String, String>,
@@ -351,6 +359,8 @@ impl TaskNode {
             result_path: None,
             max_retries: 0,
             retry_count: 0,
+            priority: None,
+            timeout: None,
             metadata: HashMap::new(),
         }
     }

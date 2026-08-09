@@ -116,6 +116,10 @@ struct TaskNodeBuilder {
     parent: Option<String>,
     depends_on: Vec<String>,    // Task names (will be mapped to UUIDs later)
     input: Option<String>,
+    output: Option<String>,
+    priority: Option<String>,
+    timeout: Option<u64>,
+    max_retries: Option<u32>,
     metadata: HashMap<String, String>,
 }
 
@@ -128,6 +132,10 @@ impl TaskNodeBuilder {
             parent: None,
             depends_on: Vec::new(),
             input: None,
+            output: None,
+            priority: None,
+            timeout: None,
+            max_retries: None,
             metadata: HashMap::new(),
         }
     }
@@ -159,10 +167,12 @@ impl TaskNodeBuilder {
             status: TaskStatus::Pending,
             depends_on,
             input: self.input,
-            output: None,
+            output: self.output,
             result_path: None,
-            max_retries: 0,
+            max_retries: self.max_retries.unwrap_or(0),
             retry_count: 0,
+            priority: self.priority,
+            timeout: self.timeout,
             metadata,
         })
     }
@@ -222,6 +232,19 @@ fn parse_property(builder: &mut TaskNodeBuilder, line: &str) -> ErgataiResult<()
         }
         "input" => {
             builder.input = Some(value);
+        }
+        "output" => {
+            builder.output = Some(value);
+        }
+        "priority" => {
+            builder.priority = Some(value);
+        }
+        "timeout" => {
+            // Parse as seconds (integer)
+            builder.timeout = value.parse::<u64>().ok();
+        }
+        "retry" | "max_retries" => {
+            builder.max_retries = value.parse::<u32>().ok();
         }
         _ => {
             // Store in metadata

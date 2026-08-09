@@ -2,17 +2,18 @@
 //!
 //! Maintains high-level abstractions: agent pool, task queue, load balancing.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use napi_derive::napi;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot, RwLock};
 
 use crate::acp::manager::{SessionCommand, SessionEvent, event_tx, manager as session_manager};
 use crate::agent::config::AgentConfig;
 use crate::error::{ErgataiError, ErgataiResult};
+use crate::nats::{NatsTaskQueue, get_nats_connection, is_nats_initialized};
 
 /// Global task ID counter.
 static TASK_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -75,6 +76,14 @@ struct PoolAgent {
 struct PendingTask {
     task_id: String,
     prompt: String,
+}
+
+/// Serializable task payload for NATS.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PendingTaskPayload {
+    task_id: String,
+    prompt: String,
+    agent_name: String,
 }
 
 /// Commands sent to the pool's event loop.
@@ -360,124 +369,281 @@ async fn pool_event_loop(
     }
 
     // 2. Task queue and event loop.
+    // Use NATS if available, otherwise fallback to VecDeque
+    let use_nats = is_nats_initialized().await;
+    let nats_queue: Option<NatsTaskQueue<PendingTaskPayload>> = if use_nats {
+        match get_nats_connection().await {
+            Some(conn) => {
+                let stream_name = format!("pool_tasks_{}", agent_name.replace('-', "_"));
+                let consumer_name = format!("pool_worker_{}", agent_name.replace('-', "_"));
+                let subject = format!("ergatai.task.submit.pool_{}", agent_name.replace('-', "_"));
+
+                match NatsTaskQueue::new(conn, stream_name, consumer_name, subject).await {
+                    Ok(queue) => {
+                        tracing::info!(agent = %agent_name, "Using NATS task queue");
+                        Some(queue)
+                    }
+                    Err(e) => {
+                        tracing::warn!(agent = %agent_name, error = %e, "Failed to create NATS queue, falling back to VecDeque");
+                        None
+                    }
+                }
+            }
+            None => {
+                tracing::info!(agent = %agent_name, "NATS not connected, using VecDeque");
+                None
+            }
+        }
+    } else {
+        tracing::info!(agent = %agent_name, "NATS not initialized, using VecDeque");
+        None
+    };
+
+    // Fallback to VecDeque if NATS not available
     let mut task_queue: VecDeque<PendingTask> = VecDeque::new();
+    let mut cancelled_tasks: HashSet<String> = HashSet::new(); // Track cancelled tasks for NATS mode
     let evt_tx = event_tx().clone();
     let pool_cwd = cwd.clone();
 
     loop {
         // Try to dispatch queued tasks to idle agents.
-        while let Some(task) = task_queue.pop_front() {
-            let idle_idx = agents.iter().position(|a| !a.busy);
-            let Some(idx) = idle_idx else {
-                // No idle agents — put the task back at the front and stop.
-                task_queue.push_front(task);
-                break;
-            };
-
-            let task_id = task.task_id.clone();
-            let prompt_preview = task.prompt.chars().take(80).collect::<String>();
-
-            // Mark agent as busy.
-            agents[idx].busy = true;
-            agents[idx].current_task_id = Some(task_id.clone());
-
-            // Emit task_dispatched event.
-            let _ = evt_tx.send(SessionEvent {
-                session_id: agents[idx].session_id.clone(),
-                event_type: "task_dispatched".to_string(),
-                data: serde_json::json!({
-                    "task_id": task_id,
-                    "agent_index": idx,
-                    "prompt_preview": prompt_preview,
-                }),
-            });
-
-            // Execute the task via SDK session.
-            let session_id = agents[idx].session_id.clone();
-            let cmd_tx = agents[idx].cmd_tx.clone();
-            let task_id_clone = task_id.clone();
-            let evt_tx_clone = evt_tx.clone();
-            let completion_tx_local = completion_tx.clone();
-
-            tokio::spawn(async move {
-                // CompletionGuard ensures the completion signal is sent even on panic,
-                // preventing the agent from being permanently stuck as `busy = true`.
-                let _completion_guard = CompletionGuard {
-                    task_id: task_id_clone.clone(),
-                    tx: completion_tx_local,
+        // NATS mode: consume from queue
+        if let Some(ref queue) = nats_queue {
+            // Try to consume and dispatch tasks
+            loop {
+                let idle_idx = agents.iter().position(|a| !a.busy);
+                let Some(idx) = idle_idx else {
+                    break; // No idle agents
                 };
 
-                let (reply_tx, reply_rx) = oneshot::channel();
+                // Try to consume a task from NATS
+                match queue.consume().await {
+                    Ok(Some((msg, ack))) => {
+                        // Check if this task was cancelled
+                        if cancelled_tasks.contains(&msg.payload.task_id) {
+                            tracing::info!(task_id = %msg.payload.task_id, "Skipping cancelled task");
+                            let _ = ack.ack().await;
+                            cancelled_tasks.remove(&msg.payload.task_id);
+                            continue;
+                        }
 
-                // Send prompt to SDK session
-                if let Err(e) = cmd_tx.send(SessionCommand::SendPrompt {
-                    text: task.prompt.clone(),
-                    reply_tx,
-                }) {
-                    tracing::error!(error = %e, task_id = %task_id_clone, "Failed to send prompt to session");
-                    let _ = evt_tx_clone.send(SessionEvent {
-                        session_id: session_id.clone(),
-                        event_type: "task_failed".to_string(),
-                        data: serde_json::json!({
-                            "task_id": task_id_clone,
-                            "error": format!("Failed to send prompt: {}", e),
-                        }),
-                    });
-                    return; // _completion_guard dropped here, sends completion signal
+                        let task = PendingTask {
+                            task_id: msg.payload.task_id.clone(),
+                            prompt: msg.payload.prompt.clone(),
+                        };
+
+                        // Dispatch the task (see below)
+                        let task_id = task.task_id.clone();
+                        let prompt_preview = task.prompt.chars().take(80).collect::<String>();
+
+                        agents[idx].busy = true;
+                        agents[idx].current_task_id = Some(task_id.clone());
+
+                        let _ = evt_tx.send(SessionEvent {
+                            session_id: agents[idx].session_id.clone(),
+                            event_type: "task_dispatched".to_string(),
+                            data: serde_json::json!({
+                                "task_id": task_id,
+                                "agent_index": idx,
+                                "prompt_preview": prompt_preview,
+                            }),
+                        });
+
+                        let session_id = agents[idx].session_id.clone();
+                        let cmd_tx = agents[idx].cmd_tx.clone();
+                        let task_id_clone = task_id.clone();
+                        let evt_tx_clone = evt_tx.clone();
+                        let completion_tx_local = completion_tx.clone();
+
+                        tokio::spawn(async move {
+                            let _completion_guard = CompletionGuard {
+                                task_id: task_id_clone.clone(),
+                                tx: completion_tx_local,
+                            };
+
+                            let (reply_tx, reply_rx) = oneshot::channel();
+
+                            if let Err(e) = cmd_tx.send(SessionCommand::SendPrompt {
+                                text: task.prompt.clone(),
+                                reply_tx,
+                            }) {
+                                tracing::error!(error = %e, task_id = %task_id_clone, "Failed to send prompt to session");
+                                let _ = evt_tx_clone.send(SessionEvent {
+                                    session_id: session_id.clone(),
+                                    event_type: "task_failed".to_string(),
+                                    data: serde_json::json!({
+                                        "task_id": task_id_clone,
+                                        "error": format!("Failed to send prompt: {}", e),
+                                    }),
+                                });
+                                return;
+                            }
+
+                            match tokio::time::timeout(PROMPT_MAX_DURATION, reply_rx).await {
+                                Ok(Ok(Ok(()))) => {
+                                    tracing::info!(task_id = %task_id_clone, "Pool task completed");
+                                    let _ = evt_tx_clone.send(SessionEvent {
+                                        session_id: session_id.clone(),
+                                        event_type: "task_completed".to_string(),
+                                        data: serde_json::json!({
+                                            "task_id": task_id_clone,
+                                        }),
+                                    });
+                                    // Ack the NATS message on success
+                                    let _ = ack.ack().await;
+                                }
+                                Ok(Ok(Err(e))) => {
+                                    tracing::error!(error = %e, task_id = %task_id_clone, "Pool task failed");
+                                    let _ = evt_tx_clone.send(SessionEvent {
+                                        session_id: session_id.clone(),
+                                        event_type: "task_failed".to_string(),
+                                        data: serde_json::json!({
+                                            "task_id": task_id_clone,
+                                            "error": format!("{}", e),
+                                        }),
+                                    });
+                                    // Ack on failure too (don't retry)
+                                    let _ = ack.ack().await;
+                                }
+                                Ok(Err(_)) => {
+                                    tracing::error!(task_id = %task_id_clone, "Reply channel died");
+                                    let _ = evt_tx_clone.send(SessionEvent {
+                                        session_id: session_id.clone(),
+                                        event_type: "task_failed".to_string(),
+                                        data: serde_json::json!({
+                                            "task_id": task_id_clone,
+                                            "error": "Reply channel died",
+                                        }),
+                                    });
+                                    let _ = ack.ack().await;
+                                }
+                                Err(_) => {
+                                    tracing::error!(task_id = %task_id_clone, "Pool task timed out");
+                                    let _ = evt_tx_clone.send(SessionEvent {
+                                        session_id: session_id.clone(),
+                                        event_type: "task_failed".to_string(),
+                                        data: serde_json::json!({
+                                            "task_id": task_id_clone,
+                                            "error": "Task timed out",
+                                        }),
+                                    });
+                                    // Nack on timeout (allow retry)
+                                    let _ = ack.nack().await;
+                                }
+                            }
+                        });
+                    }
+                    Ok(None) => {
+                        break; // No more tasks in queue
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "Failed to consume from NATS queue");
+                        break;
+                    }
                 }
+            }
+        } else {
+            // VecDeque mode (original logic)
+            while let Some(task) = task_queue.pop_front() {
+                let idle_idx = agents.iter().position(|a| !a.busy);
+                let Some(idx) = idle_idx else {
+                    task_queue.push_front(task);
+                    break;
+                };
 
-                // Wait for completion with timeout
-                match tokio::time::timeout(PROMPT_MAX_DURATION, reply_rx).await {
-                    Ok(Ok(Ok(()))) => {
-                        tracing::info!(task_id = %task_id_clone, "Pool task completed");
-                        let _ = evt_tx_clone.send(SessionEvent {
-                            session_id: session_id.clone(),
-                            event_type: "task_completed".to_string(),
-                            data: serde_json::json!({
-                                "task_id": task_id_clone,
-                            }),
-                        });
-                    }
-                    Ok(Ok(Err(e))) => {
-                        tracing::error!(error = %e, task_id = %task_id_clone, "Pool task failed");
+                let task_id = task.task_id.clone();
+                let prompt_preview = task.prompt.chars().take(80).collect::<String>();
+
+                agents[idx].busy = true;
+                agents[idx].current_task_id = Some(task_id.clone());
+
+                let _ = evt_tx.send(SessionEvent {
+                    session_id: agents[idx].session_id.clone(),
+                    event_type: "task_dispatched".to_string(),
+                    data: serde_json::json!({
+                        "task_id": task_id,
+                        "agent_index": idx,
+                        "prompt_preview": prompt_preview,
+                    }),
+                });
+
+                let session_id = agents[idx].session_id.clone();
+                let cmd_tx = agents[idx].cmd_tx.clone();
+                let task_id_clone = task_id.clone();
+                let evt_tx_clone = evt_tx.clone();
+                let completion_tx_local = completion_tx.clone();
+
+                tokio::spawn(async move {
+                    let _completion_guard = CompletionGuard {
+                        task_id: task_id_clone.clone(),
+                        tx: completion_tx_local,
+                    };
+
+                    let (reply_tx, reply_rx) = oneshot::channel();
+
+                    if let Err(e) = cmd_tx.send(SessionCommand::SendPrompt {
+                        text: task.prompt.clone(),
+                        reply_tx,
+                    }) {
+                        tracing::error!(error = %e, task_id = %task_id_clone, "Failed to send prompt to session");
                         let _ = evt_tx_clone.send(SessionEvent {
                             session_id: session_id.clone(),
                             event_type: "task_failed".to_string(),
                             data: serde_json::json!({
                                 "task_id": task_id_clone,
-                                "error": format!("{}", e),
+                                "error": format!("Failed to send prompt: {}", e),
                             }),
                         });
+                        return;
                     }
-                    Ok(Err(_)) => {
-                        tracing::error!(task_id = %task_id_clone, "Reply channel died");
-                        let _ = evt_tx_clone.send(SessionEvent {
-                            session_id: session_id.clone(),
-                            event_type: "task_failed".to_string(),
-                            data: serde_json::json!({
-                                "task_id": task_id_clone,
-                                "error": "Reply channel died",
-                            }),
-                        });
-                    }
-                    Err(_) => {
-                        tracing::error!(task_id = %task_id_clone, "Pool task timed out");
-                        let _ = evt_tx_clone.send(SessionEvent {
-                            session_id: session_id.clone(),
-                            event_type: "task_failed".to_string(),
-                            data: serde_json::json!({
-                                "task_id": task_id_clone,
-                                "error": "Task timed out",
-                            }),
-                        });
-                    }
-                }
 
-                // _completion_guard dropped here, sends completion signal
-            });
-
-            // Agent remains busy until the spawned task above sends a completion
-            // message back via completion_tx — handled in the select! below.
+                    match tokio::time::timeout(PROMPT_MAX_DURATION, reply_rx).await {
+                        Ok(Ok(Ok(()))) => {
+                            tracing::info!(task_id = %task_id_clone, "Pool task completed");
+                            let _ = evt_tx_clone.send(SessionEvent {
+                                session_id: session_id.clone(),
+                                event_type: "task_completed".to_string(),
+                                data: serde_json::json!({
+                                    "task_id": task_id_clone,
+                                }),
+                            });
+                        }
+                        Ok(Ok(Err(e))) => {
+                            tracing::error!(error = %e, task_id = %task_id_clone, "Pool task failed");
+                            let _ = evt_tx_clone.send(SessionEvent {
+                                session_id: session_id.clone(),
+                                event_type: "task_failed".to_string(),
+                                data: serde_json::json!({
+                                    "task_id": task_id_clone,
+                                    "error": format!("{}", e),
+                                }),
+                            });
+                        }
+                        Ok(Err(_)) => {
+                            tracing::error!(task_id = %task_id_clone, "Reply channel died");
+                            let _ = evt_tx_clone.send(SessionEvent {
+                                session_id: session_id.clone(),
+                                event_type: "task_failed".to_string(),
+                                data: serde_json::json!({
+                                    "task_id": task_id_clone,
+                                    "error": "Reply channel died",
+                                }),
+                            });
+                        }
+                        Err(_) => {
+                            tracing::error!(task_id = %task_id_clone, "Pool task timed out");
+                            let _ = evt_tx_clone.send(SessionEvent {
+                                session_id: session_id.clone(),
+                                event_type: "task_failed".to_string(),
+                                data: serde_json::json!({
+                                    "task_id": task_id_clone,
+                                    "error": "Task timed out",
+                                }),
+                            });
+                        }
+                    }
+                });
+            }
         }
 
         // Wait for the next command or task-completion signal.
@@ -498,35 +664,66 @@ async fn pool_event_loop(
                         }
                         tracing::info!(task_id = %task_id, agent = %agent_name, "Task submitted to pool");
                         let _ = reply_tx.send(Ok(task_id.clone()));
-                        task_queue.push_back(PendingTask {
-                            task_id,
-                            prompt,
-                        });
+
+                        // NATS mode: publish to queue
+                        if let Some(ref queue) = nats_queue {
+                            let payload = PendingTaskPayload {
+                                task_id: task_id.clone(),
+                                prompt: prompt.clone(),
+                                agent_name: agent_name.clone(),
+                            };
+                            if let Err(e) = queue.submit(agent_name.clone(), payload).await {
+                                tracing::error!(error = %e, task_id = %task_id, "Failed to submit to NATS queue");
+                                // Fallback: add to local VecDeque
+                                task_queue.push_back(PendingTask { task_id, prompt });
+                            }
+                        } else {
+                            // VecDeque mode
+                            task_queue.push_back(PendingTask { task_id, prompt });
+                        }
                     }
                     Some(PoolCommand::CancelTask { task_id }) => {
                         tracing::info!(task_id = %task_id, agent = %agent_name, "Task cancel requested");
-                        // Remove from queue if pending.
-                        let was_pending = task_queue.iter().any(|t| t.task_id == task_id);
-                        task_queue.retain(|t| t.task_id != task_id);
-                        if !was_pending {
-                            // Running-task cancel requires SDK session support; for now
-                            // we surface the limitation rather than silently no-op.
-                            tracing::warn!(
-                                task_id = %task_id,
-                                "Cancel requested for a running task — not yet supported by SDK session; \
-                                 task will continue until completion"
-                            );
+
+                        if nats_queue.is_some() {
+                            // NATS mode: add to cancelled set (can't iterate NATS queue)
+                            let was_pending = task_queue.iter().any(|t| t.task_id == task_id);
+                            if was_pending {
+                                task_queue.retain(|t| t.task_id != task_id);
+                            } else {
+                                cancelled_tasks.insert(task_id.clone());
+                                tracing::info!(task_id = %task_id, "Task added to cancelled set for NATS");
+                            }
+                        } else {
+                            // VecDeque mode
+                            let was_pending = task_queue.iter().any(|t| t.task_id == task_id);
+                            task_queue.retain(|t| t.task_id != task_id);
+                            if !was_pending {
+                                tracing::warn!(
+                                    task_id = %task_id,
+                                    "Cancel requested for a running task — not yet supported by SDK session; \
+                                     task will continue until completion"
+                                );
+                            }
                         }
                     }
                     Some(PoolCommand::GetStatus { reply_tx }) => {
                         let idle = agents.iter().filter(|a| !a.busy).count();
                         let busy = agents.iter().filter(|a| a.busy).count();
+
+                        // Get pending count from NATS or VecDeque
+                        let pending = if let Some(ref queue) = nats_queue {
+                            queue.pending_count().await.unwrap_or(0) as u32
+                        } else {
+                            task_queue.len() as u32
+                        };
+
                         let _ = reply_tx.send(NapiPoolStatus {
                             agent_name: agent_name.clone(),
                             pool_size: agents.len() as u32,
                             idle_agents: idle as u32,
                             busy_agents: busy as u32,
-                            pending_tasks: task_queue.len() as u32,
+                            pending_tasks: pending,
                             in_flight_tasks: busy as u32,
                         });
                     }

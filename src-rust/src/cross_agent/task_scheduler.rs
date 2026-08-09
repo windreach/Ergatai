@@ -9,7 +9,7 @@ use crate::error::{ErgataiError, ErgataiResult};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
-use super::task_coordinator::{TaskCoordinator, TaskPlan};
+use super::task_coordinator::{TaskCoordinator, TaskPlan, AgentAssignment};
 use super::agent_launcher::AgentLauncher;
 
 /// Queue file format version — increment when PendingTask schema changes.
@@ -379,6 +379,126 @@ impl TaskScheduler {
             }
         });
     }
+
+    /// Start NATS consumer loop — receives task submissions via NATS events
+    ///
+    /// When NATS is available, this replaces the 5-second polling loop.
+    /// Tasks arrive as `TaskSubmitPayload` messages with inline plan content.
+    ///
+    /// Returns a `JoinHandle` that can be aborted to stop consuming.
+    pub fn start_nats_consumer(self: &Arc<Self>) -> Option<tokio::task::JoinHandle<()>> {
+        let scheduler = Arc::clone(self);
+
+        // Check NATS availability synchronously (via try_read on the manager state)
+        // The actual connection check happens inside the spawned task
+        Some(tokio::spawn(async move {
+            let conn = match crate::nats::get_nats_connection().await {
+                Some(c) => c,
+                None => {
+                    tracing::warn!("NATS not initialized, consumer not started");
+                    return;
+                }
+            };
+
+            let bus = crate::nats::EventBus::new(conn);
+
+            // Subscribe to ALL task submissions (across all agents)
+            let mut sub = match bus.subscribe_all_task_submits().await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to subscribe to task submissions");
+                    return;
+                }
+            };
+
+            tracing::info!("NATS task consumer started");
+
+            use futures_util::StreamExt;
+            while let Some(nats_msg) = sub.next().await {
+                match serde_json::from_slice::<crate::nats::TaskSubmitPayload>(&nats_msg.payload) {
+                    Ok(payload) => {
+                        tracing::info!(
+                            task_id = %payload.task_id,
+                            agent = %payload.target_agent,
+                            "Received NATS task submission"
+                        );
+
+                        if let Err(e) = scheduler.handle_nats_task(payload).await {
+                            tracing::error!(error = %e, "Failed to handle NATS task");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Failed to deserialize task submission");
+                    }
+                }
+            }
+
+            tracing::warn!("NATS task consumer subscription closed");
+        }))
+    }
+
+    /// Handle a task received via NATS
+    ///
+    /// Writes the inline plan content to a file (for agent readability),
+    /// then processes it through the normal scheduling pipeline.
+    async fn handle_nats_task(&self, payload: crate::nats::TaskSubmitPayload) -> ErgataiResult<()> {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        // Write plan file from inline content (agents read files, not NATS messages)
+        let plan_file = PathBuf::from(&payload.plan_file);
+        if let Some(parent) = plan_file.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        tokio::fs::write(&plan_file, payload.plan_content.as_bytes()).await?;
+
+        // Build a PendingTask
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let pending = PendingTask {
+            task_id: payload.task_id.clone(),
+            plan_file: plan_file.clone(),
+            target_agent: payload.target_agent.clone(),
+            submitted_at: now,
+            priority: payload.priority,
+        };
+
+        // Build a minimal TaskPlan from the payload
+        let plan = TaskPlan {
+            task_id: payload.task_id.clone(),
+            task_name: payload.task_id.clone(),
+            coordinator: "nats".to_string(),
+            status: super::task_coordinator::PlanStatus::InProgress,
+            assignments: vec![AgentAssignment {
+                agent_name: payload.target_agent.clone(),
+                objective: String::new(),
+                files_to_create: vec![],
+                files_to_modify: vec![],
+                files_to_read: vec![],
+                task_type: super::task_coordinator::TaskType::CreateNew,
+                worktree_name: payload.task_id.clone(),
+                depends_on: vec![],
+            }],
+            merge_strategy: "none".to_string(),
+            plan_file,
+        };
+
+        // Try to schedule immediately
+        match self.try_schedule_task(&pending, &plan).await? {
+            true => {
+                tracing::info!(task_id = %payload.task_id, "NATS task scheduled immediately");
+            }
+            false => {
+                tracing::info!(task_id = %payload.task_id, "NATS task queued (agent busy)");
+                self.pending_tasks.lock().await.push(pending);
+                self.save_to_disk().await?;
+            }
+        }
+
+        Ok(())
+    }
 }
 
 /// Global scheduler instance
@@ -391,8 +511,11 @@ pub fn global_scheduler(project_root: Option<PathBuf>) -> Arc<TaskScheduler> {
         let root = project_root.unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
         let scheduler = Arc::new(TaskScheduler::new(root, ScheduleStrategy::WaitForAgent));
 
-        // Start background scheduler
+        // Start background scheduler (polling fallback)
         scheduler.start_background_scheduler();
+
+        // Start NATS consumer if available (event-driven, replaces polling when active)
+        scheduler.start_nats_consumer();
 
         scheduler
     }).clone()

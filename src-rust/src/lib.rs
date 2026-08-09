@@ -37,6 +37,7 @@ pub mod acp;
 pub mod agent;
 pub mod cross_agent;
 pub mod orchestration;
+pub mod nats;
 
 // Internal modules (not exported to NAPI directly)
 mod skills;

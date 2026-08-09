@@ -9,6 +9,7 @@ pub mod acp;
 pub mod agents;
 pub mod dag;
 pub mod mcp;
+pub mod nats;
 pub mod skills;
 pub mod tasks;
 

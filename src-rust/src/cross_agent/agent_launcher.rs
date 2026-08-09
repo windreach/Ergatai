@@ -448,13 +448,64 @@ Write your results in markdown:
             };
 
             // Notify DagScheduler if this agent is part of a DAG.
-            // Note: on_node_completed/on_node_failed return !Send futures (they internally
-            // call spawn_acp_session which holds non-Send state across await points).
-            // We use spawn_blocking + block_on to bridge from the current async context.
-            // This is safe because DAG node count is small (<50) and won't exhaust the
-            // blocking thread pool (default 512 threads).
+            // Prefer NATS event publishing (event-driven, decoupled).
+            // Fallback to direct function call if NATS is unavailable.
             if let Some(nid) = node_id_owned {
-                if let Some(scheduler) = super::dag_scheduler::get_dag_scheduler() {
+                if crate::nats::is_nats_initialized().await {
+                    // NATS path: publish event, let DagScheduler subscribe and react
+                    if let Some(conn) = crate::nats::get_nats_connection().await {
+                        let bus = crate::nats::EventBus::new(conn);
+                        if completed_ok {
+                            let payload = crate::nats::NodeCompletePayload {
+                                node_id: nid.clone(),
+                                task_id: nid.clone(),
+                                agent_name: agent_id_owned.clone(),
+                                result_summary: None,
+                                outputs: HashMap::new(), // Agent output extraction deferred to Phase 5
+                                result_file: None,
+                            };
+                            if let Err(e) = bus.publish_node_complete(&payload).await {
+                                tracing::error!(
+                                    node_id = %nid,
+                                    error = %e,
+                                    "Failed to publish NATS node_complete event"
+                                );
+                            } else {
+                                tracing::info!(
+                                    node_id = %nid,
+                                    "Published NATS node_complete event"
+                                );
+                            }
+                        } else {
+                            let err_msg = format!("ACP session failed for agent {}", agent_id_owned);
+                            let payload = crate::nats::NodeFailedPayload {
+                                node_id: nid.clone(),
+                                task_id: nid.clone(),
+                                agent_name: agent_id_owned.clone(),
+                                error: err_msg,
+                                retryable: false,
+                            };
+                            if let Err(e) = bus.publish_node_failed(&payload).await {
+                                tracing::error!(
+                                    node_id = %nid,
+                                    error = %e,
+                                    "Failed to publish NATS node_failed event"
+                                );
+                            } else {
+                                tracing::info!(
+                                    node_id = %nid,
+                                    "Published NATS node_failed event"
+                                );
+                            }
+                        }
+                    }
+                } else if let Some(scheduler) = super::dag_scheduler::get_dag_scheduler() {
+                    // Fallback: direct function call (NATS unavailable)
+                    // Note: on_node_completed/on_node_failed return !Send futures (they internally
+                    // call spawn_acp_session which holds non-Send state across await points).
+                    // We use spawn_blocking + block_on to bridge from the current async context.
+                    // This is safe because DAG node count is small (<50) and won't exhaust the
+                    // blocking thread pool (default 512 threads).
                     let agent_c = agent_id_owned.clone();
                     if completed_ok {
                         let nid_c = nid.clone();
@@ -465,7 +516,7 @@ Write your results in markdown:
                                     tracing::info!(
                                         node_id = %nid_c,
                                         newly_submitted = ?newly_submitted,
-                                        "DAG node completed, triggered downstream"
+                                        "DAG node completed, triggered downstream (fallback)"
                                     );
                                 }
                                 Err(e) => {
