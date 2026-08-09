@@ -3,6 +3,7 @@ import { z } from "zod"
 import { publicProcedure, router } from "../index"
 import { join } from "path"
 import { app } from "electron"
+import { dagDetector } from "../../dag-detector"
 
 // Load native binding — resolve from app root
 function loadNativeBinding(): any {
@@ -354,12 +355,23 @@ export const acpRouter = router({
                     if (mapping) mapping.subChatId = subChatId
                   }
 
+                  // Accumulate text for DAG detection
+                  if (chunk.type === "text-delta" && chunk.textDelta) {
+                    dagDetector.appendChunk(acpSessionId, chunk.textDelta)
+                  }
+
                   emit.next(chunk)
 
                   if (chunk.type === "finish") {
+                    // Check for DAG before finishing
+                    dagDetector.checkAndSubmit(acpSessionId).catch((err) => {
+                      console.error("[ACP] DAG auto-submit failed:", err)
+                    })
+
                     clearInterval(timer)
                     activePollers.delete(subChatId)
                     sessionMap.delete(subChatId)
+                    dagDetector.clearSession(acpSessionId)
                     emit.complete()
                     return
                   }
