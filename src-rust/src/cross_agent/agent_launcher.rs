@@ -372,9 +372,9 @@ Write your results in markdown:
                 anyhow::anyhow!("Session {} lost immediately after creation", session_id)
             })?;
 
-        // Build the full instruction with DAG orchestration context if this is a DAG task
+        // Build the full instruction with appropriate prompt context
         let full_instruction = if node_id.is_some() {
-            // Load DAG orchest prompt template from prompts directory
+            // DAG task: inject orchest prompt (teaches agent how to collaborate)
             let dag_prompt = include_str!("../../prompts/dag_orchestration.md");
 
             // Get list of available agents
@@ -391,7 +391,23 @@ Write your results in markdown:
             // Combine: DAG orchestration guide + actual task instruction
             format!("{}\n\n---\n\n{}", dag_prompt, instruction)
         } else {
-            instruction.to_string()
+            // Regular session (possibly primary agent): inject generation prompt
+            // (teaches agent how to generate DAG when needed)
+            let gen_prompt = include_str!("../../prompts/dag_generation.md");
+
+            // Get list of available agents
+            let agents = crate::agent::discovery::discover_acp_runtimes();
+            let agent_list = agents
+                .iter()
+                .map(|a| format!("- **{}** — {}", a.id, a.label))
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            // Replace {{agent_list}} placeholder
+            let gen_prompt = gen_prompt.replace("{{agent_list}}", &agent_list);
+
+            // Combine: DAG generation guide + user instruction
+            format!("{}\n\n---\n\n{}", gen_prompt, instruction)
         };
 
         // Send instruction as prompt
