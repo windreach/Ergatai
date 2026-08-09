@@ -158,6 +158,19 @@ pub mod subjects {
         format!("ergatai.agent.stopped.{}", agent_id)
     }
 
+    /// Agent-to-agent message subject
+    ///
+    /// Used for bidirectional communication between agents.
+    /// Example: `ergatai.agent.message.codex` for messages sent to the codex agent.
+    pub fn agent_message(agent_id: &str) -> String {
+        format!("ergatai.agent.message.{}", agent_id)
+    }
+
+    /// Wildcard subject for all agent messages
+    pub fn all_agent_messages() -> &'static str {
+        "ergatai.agent.message.*"
+    }
+
     /// Wildcard subject for all task events
     pub fn all_tasks() -> &'static str {
         "ergatai.task.*"

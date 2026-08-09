@@ -56,6 +56,15 @@ impl EventBus {
         self.publish(&subject, payload).await
     }
 
+    /// Publish an agent-to-agent message
+    ///
+    /// Routes the message to the target agent's inbox subject.
+    /// Example: message to "codex" → `ergatai.agent.message.codex`
+    pub async fn publish_agent_message(&self, payload: &AgentMessagePayload) -> ErgataiResult<()> {
+        let subject = format!("ergatai.agent.message.{}", sanitize_agent_name(&payload.to_agent));
+        self.publish(&subject, payload).await
+    }
+
     // ── Subscribe helpers ──
 
     /// Subscribe to task submission events for a specific agent
@@ -100,6 +109,21 @@ impl EventBus {
     /// Subscribe to ALL DAG events (wildcard)
     pub async fn subscribe_all_dag_events(&self) -> ErgataiResult<async_nats::Subscriber> {
         self.connection.subscribe("ergatai.dag.*").await
+    }
+
+    /// Subscribe to messages for a specific agent
+    ///
+    /// Example: `subscribe_agent_message("codex")` subscribes to `ergatai.agent.message.codex`
+    pub async fn subscribe_agent_message(&self, agent_name: &str) -> ErgataiResult<async_nats::Subscriber> {
+        let subject = format!("ergatai.agent.message.{}", sanitize_agent_name(agent_name));
+        self.connection.subscribe(&subject).await
+    }
+
+    /// Subscribe to ALL agent messages (wildcard)
+    ///
+    /// Useful for a central router that forwards messages to the appropriate ACP session.
+    pub async fn subscribe_all_agent_messages(&self) -> ErgataiResult<async_nats::Subscriber> {
+        self.connection.subscribe("ergatai.agent.message.*").await
     }
 
     // ── Generic publish ──

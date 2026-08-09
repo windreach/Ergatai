@@ -287,10 +287,12 @@ cargo test --lib nats::event_bus        # 事件总线 (需要 nats-server)
 **进行中：**
 - 前端 mock-api.ts → 真实 tRPC 调用替换
 
-**待做 (Phase 5)：**
-- Agent 间双向对话（Ergatai 中间人路由，`@agent` 提及检测）
-- NATS Request-Reply 封装
-- 前端通过 NATS 订阅实时事件（替代 poll_events 轮询）
+**已完成 (Phase 5)：**
+- ✅ Agent 间双向对话（Ergatai 中转移消息，`@agent` 提及检测）
+- ✅ 消息路由器（`message_router.rs`）：检测 @mentions，通过 NATS 路由
+- ✅ AgentMessagePayload：agent-to-agent 消息类型
+- ✅ NAPI 绑定：`nats_route_agent_message` / `nats_scan_and_route_mentions`
+- ✅ Subject: `ergatai.agent.message.{agent_id}`
 
 ## File Naming
 

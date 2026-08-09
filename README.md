@@ -200,9 +200,11 @@ brew install ergatai
 
 **Phase 4 — Markdown Orchestration Enhancement** ✅ Complete (merged into Phase 2)
 
-**Phase 5 — Agent Message Routing** 🔲 Pending
+**Phase 5 — Agent Message Routing** ✅ Complete
 - Agent-to-agent messaging via NATS relay (Ergatai as middleman)
-- ACP bridge detecting `@agent_name` mentions for automatic routing
+- Message router detects `@agent_name` mentions and routes automatically
+- NAPI bindings: `nats_route_agent_message` / `nats_scan_and_route_mentions`
+- Subject: `ergatai.agent.message.{agent_id}`
 
 ## Community
 

@@ -89,6 +89,27 @@ pub struct DagCompletePayload {
     pub duration_secs: u64,
 }
 
+/// Agent-to-agent message: Agent A → Ergatai → Agent B
+///
+/// Enables bidirectional conversation between agents.
+/// Ergatai acts as relay: detects @agent mentions in ACP messages,
+/// routes via NATS, and forwards to the target agent's ACP session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentMessagePayload {
+    /// Source agent ID (sender)
+    pub from_agent: String,
+    /// Target agent ID (receiver)
+    pub to_agent: String,
+    /// Message content (the text mentioning @target_agent)
+    pub content: String,
+    /// Optional: conversation thread ID (for multi-turn dialogs)
+    pub thread_id: Option<String>,
+    /// Timestamp (Unix epoch seconds)
+    pub timestamp: u64,
+    /// Optional: structured data payload (JSON)
+    pub metadata: HashMap<String, String>,
+}
+
 /// Enum wrapping all event types — useful for a single subscriber
 /// that wants to handle multiple event kinds.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,6 +119,7 @@ pub enum DagEvent {
     NodeComplete(NodeCompletePayload),
     NodeFailed(NodeFailedPayload),
     DagComplete(DagCompletePayload),
+    AgentMessage(AgentMessagePayload),
 }
 
 #[cfg(test)]
@@ -281,11 +303,64 @@ mod tests {
                 failed_nodes: 0,
                 duration_secs: 60,
             }),
+            DagEvent::AgentMessage(AgentMessagePayload {
+                from_agent: "claude-code".to_string(),
+                to_agent: "codex".to_string(),
+                content: "@codex please review this code".to_string(),
+                thread_id: Some("thread-123".to_string()),
+                timestamp: 1234567890,
+                metadata: HashMap::new(),
+            }),
         ];
 
         for event in &events {
             let json = serde_json::to_string(event).unwrap();
             let _: DagEvent = serde_json::from_str(&json).unwrap();
         }
+    }
+
+    // ── AgentMessagePayload ──
+
+    #[test]
+    fn test_agent_message_roundtrip() {
+        let mut metadata = HashMap::new();
+        metadata.insert("priority".to_string(), "high".to_string());
+
+        let payload = AgentMessagePayload {
+            from_agent: "claude-code".to_string(),
+            to_agent: "codex".to_string(),
+            content: "@codex please review this code".to_string(),
+            thread_id: Some("thread-123".to_string()),
+            timestamp: 1234567890,
+            metadata: metadata.clone(),
+        };
+
+        let json = serde_json::to_string(&payload).unwrap();
+        let restored: AgentMessagePayload = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(restored.from_agent, "claude-code");
+        assert_eq!(restored.to_agent, "codex");
+        assert_eq!(restored.content, "@codex please review this code");
+        assert_eq!(restored.thread_id, Some("thread-123".to_string()));
+        assert_eq!(restored.timestamp, 1234567890);
+        assert_eq!(restored.metadata.get("priority"), Some(&"high".to_string()));
+    }
+
+    #[test]
+    fn test_agent_message_optional_fields() {
+        let payload = AgentMessagePayload {
+            from_agent: "agent-a".to_string(),
+            to_agent: "agent-b".to_string(),
+            content: "hello".to_string(),
+            thread_id: None,
+            timestamp: 0,
+            metadata: HashMap::new(),
+        };
+
+        let json = serde_json::to_string(&payload).unwrap();
+        let restored: AgentMessagePayload = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(restored.thread_id, None);
+        assert!(restored.metadata.is_empty());
     }
 }
