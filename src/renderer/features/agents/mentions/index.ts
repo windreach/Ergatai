@@ -6,7 +6,10 @@ export {
   MENTION_PREFIXES,
 } from "./agents-mentions-editor"
 
-export { AgentsFileMention } from "./agents-file-mention"
+export {
+  getFileIconByExtension,
+  createFileIconElement,
+} from "./agents-file-mention"
 
 export {
   useRenderFileMentions,

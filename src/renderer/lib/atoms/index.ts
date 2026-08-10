@@ -187,7 +187,6 @@ export type SettingsTab =
   | "preferences"
   | "models"
   | "skills"
-  | "agents"
   | "mcp"
   | "plugins"
   | "worktrees"

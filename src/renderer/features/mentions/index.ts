@@ -86,14 +86,13 @@ export {
 export {
   filesProvider,
   skillsProvider,
-  agentsProvider,
   toolsProvider,
   builtInProviders,
   registerBuiltInProviders,
   registerProvider,
 } from "./providers"
 
-export type { FileData, SkillData, AgentData, ToolData, ToolsSearchContext } from "./providers"
+export type { FileData, SkillData, ToolData, ToolsSearchContext } from "./providers"
 
 // Search
 export {

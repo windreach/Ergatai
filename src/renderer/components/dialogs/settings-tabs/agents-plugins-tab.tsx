@@ -6,7 +6,7 @@ import { agentsSettingsDialogActiveTabAtom, type SettingsTab } from "../../../li
 import { trpc } from "../../../lib/trpc"
 import { cn } from "../../../lib/utils"
 import { Terminal, ChevronRight, Loader2 } from "lucide-react"
-import { PluginFilledIcon, SkillIconFilled, CustomAgentIconFilled, OriginalMCPIcon } from "../../ui/icons"
+import { PluginFilledIcon, SkillIconFilled, OriginalMCPIcon } from "../../ui/icons"
 import { Button } from "../../ui/button"
 import { Label } from "../../ui/label"
 import { Switch } from "../../ui/switch"
@@ -173,30 +173,6 @@ function PluginDetail({
                     <p className="text-xs font-mono font-medium text-foreground">{skill.name}</p>
                     {skill.description && (
                       <p className="text-[11px] text-muted-foreground/60 mt-0.5">{skill.description}</p>
-                    )}
-                  </div>
-                  <ChevronRight className="h-3 w-3 text-muted-foreground/40 shrink-0 mt-0.5 opacity-0 group-hover:opacity-100 transition-opacity" />
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {plugin.components.agents.length > 0 && (
-          <div className="space-y-1.5">
-            <Label>Agents ({plugin.components.agents.length})</Label>
-            <div className="space-y-1">
-              {plugin.components.agents.map((agent) => (
-                <button
-                  key={agent.name}
-                  onClick={() => onNavigateToTab("agents")}
-                  className="w-full flex items-start gap-2 rounded-md border border-border bg-background px-2.5 py-1.5 hover:bg-foreground/5 transition-colors cursor-pointer text-left group"
-                >
-                  <CustomAgentIconFilled className="h-3.5 w-3.5 text-muted-foreground shrink-0 mt-0.5" />
-                  <div className="min-w-0 flex-1">
-                    <p className="text-xs font-mono font-medium text-foreground">{agent.name}</p>
-                    {agent.description && (
-                      <p className="text-[11px] text-muted-foreground/60 mt-0.5">{agent.description}</p>
                     )}
                   </div>
                   <ChevronRight className="h-3 w-3 text-muted-foreground/40 shrink-0 mt-0.5 opacity-0 group-hover:opacity-100 transition-opacity" />

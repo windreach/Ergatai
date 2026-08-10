@@ -84,7 +84,6 @@ import {
 } from "../lib/models"
 import type { DiffTextContext, SelectedTextContext } from "../lib/queue-utils"
 import {
-  AgentsFileMention,
   AgentsMentionsEditor,
   type AgentsMentionsEditorHandle,
   type FileMentionOption,
@@ -1629,36 +1628,6 @@ export const ChatInputArea = memo(function ChatInputArea({
           </div>
         </div>
       </div>
-
-      {/* File mention dropdown */}
-      {/* Desktop: use projectPath for local file search */}
-      <AgentsFileMention
-        isOpen={
-          showMentionDropdown &&
-          (!!projectPath || !!repository || !!sandboxId)
-        }
-        onClose={() => {
-          setShowMentionDropdown(false)
-          // Reset subpage state when closing
-          setShowingFilesList(false)
-          setShowingSkillsList(false)
-          setShowingAgentsList(false)
-          setShowingToolsList(false)
-        }}
-        onSelect={handleMentionSelect}
-        searchText={mentionSearchText}
-        position={mentionPosition}
-        teamId={teamId}
-        repository={repository}
-        sandboxId={sandboxId}
-        projectPath={projectPath}
-        changedFiles={changedFiles}
-        // Subpage navigation state
-        showingFilesList={showingFilesList}
-        showingSkillsList={showingSkillsList}
-        showingAgentsList={showingAgentsList}
-        showingToolsList={showingToolsList}
-      />
 
       {/* Slash command dropdown */}
       <AgentsSlashCommand

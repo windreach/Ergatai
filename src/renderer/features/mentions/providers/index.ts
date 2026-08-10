@@ -7,7 +7,6 @@
 
 export { filesProvider, type FileData } from "./files-provider"
 export { skillsProvider, type SkillData } from "./skills-provider"
-export { agentsProvider, type AgentData, type AgentModel } from "./agents-provider"
 export { toolsProvider, type ToolData, type ToolsSearchContext } from "./tools-provider"
 
 // Re-export types
@@ -15,7 +14,6 @@ export type { MentionProvider } from "../types"
 
 import { filesProvider } from "./files-provider"
 import { skillsProvider } from "./skills-provider"
-import { agentsProvider } from "./agents-provider"
 import { toolsProvider } from "./tools-provider"
 import { mentionRegistry } from "../registry"
 import type { MentionProvider } from "../types"
@@ -26,7 +24,6 @@ import type { MentionProvider } from "../types"
 export const builtInProviders: MentionProvider[] = [
   filesProvider,
   skillsProvider,
-  agentsProvider,
   toolsProvider,
 ]
 

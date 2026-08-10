@@ -89,7 +89,6 @@ import {
 } from "../../../lib/hooks/use-voice-recording"
 import { getResolvedHotkey } from "../../../lib/hotkeys"
 import {
-  AgentsFileMention,
   AgentsMentionsEditor,
   MENTION_PREFIXES,
   type AgentsMentionsEditorHandle,
@@ -2042,28 +2041,6 @@ export function NewChatForm({
                 </div>
 
                 {/* Worktree config banner - moved to corner banner below */}
-
-                {/* File mention dropdown */}
-                {/* Desktop: use projectPath for local file search */}
-                <AgentsFileMention
-                  isOpen={showMentionDropdown && !!validatedProject}
-                  onClose={() => {
-                    setShowMentionDropdown(false)
-                    // Reset subpage state when dropdown closes
-                    setShowingFilesList(false)
-                    setShowingSkillsList(false)
-                    setShowingAgentsList(false)
-                    setShowingToolsList(false)
-                  }}
-                  onSelect={handleMentionSelect}
-                  searchText={mentionSearchText}
-                  position={mentionPosition}
-                  projectPath={validatedProject?.path}
-                  showingFilesList={showingFilesList}
-                  showingSkillsList={showingSkillsList}
-                  showingAgentsList={showingAgentsList}
-                  showingToolsList={showingToolsList}
-                />
 
                 {/* Slash command dropdown */}
                 <AgentsSlashCommand
