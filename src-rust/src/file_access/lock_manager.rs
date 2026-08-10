@@ -1832,14 +1832,17 @@ impl FileLockManager {
         let subject = msg.subject.as_str();
         debug!("Received NATS message on subject: {}", subject);
 
-        // Parse the payload based on message type
-        let response = if is_approval {
+        // Parse the payload and extract both response and request_id in one pass
+        let (response, request_id) = if is_approval {
             match serde_json::from_slice::<FileAccessApprovePayload>(&msg.payload) {
-                Ok(payload) => ApprovalResponse {
-                    approved: true,
-                    approved_by: payload.approver_id,
-                    reason: payload.custom_scope.map(|s| format!("Custom scope: {}", s)),
-                },
+                Ok(payload) => {
+                    let response = ApprovalResponse {
+                        approved: true,
+                        approved_by: payload.approver_id,
+                        reason: payload.custom_scope.map(|s| format!("Custom scope: {}", s)),
+                    };
+                    (response, Some(payload.request_id))
+                }
                 Err(e) => {
                     error!("Failed to parse FileAccessApprovePayload: {}", e);
                     return;
@@ -1847,27 +1850,19 @@ impl FileLockManager {
             }
         } else {
             match serde_json::from_slice::<FileAccessRejectPayload>(&msg.payload) {
-                Ok(payload) => ApprovalResponse {
-                    approved: false,
-                    approved_by: payload.rejecter_id,
-                    reason: Some(payload.reason),
-                },
+                Ok(payload) => {
+                    let response = ApprovalResponse {
+                        approved: false,
+                        approved_by: payload.rejecter_id,
+                        reason: Some(payload.reason),
+                    };
+                    (response, Some(payload.request_id))
+                }
                 Err(e) => {
                     error!("Failed to parse FileAccessRejectPayload: {}", e);
                     return;
                 }
             }
-        };
-
-        // Extract request_id from payload (both have request_id field)
-        let request_id = if is_approval {
-            serde_json::from_slice::<FileAccessApprovePayload>(&msg.payload)
-                .ok()
-                .map(|p| p.request_id)
-        } else {
-            serde_json::from_slice::<FileAccessRejectPayload>(&msg.payload)
-                .ok()
-                .map(|p| p.request_id)
         };
 
         if let Some(req_id) = request_id {
