@@ -71,6 +71,13 @@
       "when": 1786181029829,
       "tag": "0009_typical_bishop",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1723161600000,
+      "tag": "0010_mode_auto",
+      "breakpoints": true
     }
   ]
 }

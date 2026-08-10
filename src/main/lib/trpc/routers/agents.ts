@@ -190,9 +190,15 @@ export const agentsRouter = router({
         command: z.string(),
         args: z.array(z.string()).optional(),
         env: z.record(z.string()).optional(),
+        display_name: z.string().nullable().optional(),
         model: z.string().nullable().optional(),
         provider: z.string().nullable().optional(),
         agent_type: z.string().nullable().optional(),
+        base_url: z.string().nullable().optional(),
+        api_key: z.string().nullable().optional(),
+        proxy: z.string().nullable().optional(),
+        persona: z.string().nullable().optional(),
+        avatar: z.string().nullable().optional(),
       }),
     )
     .mutation(async ({ input }) => {
@@ -201,9 +207,15 @@ export const agentsRouter = router({
         command: input.command,
         args: input.args ?? [],
         env: input.env ?? {},
+        display_name: input.display_name ?? null,
         model: input.model ?? null,
         provider: input.provider ?? null,
         agent_type: input.agent_type ?? null,
+        base_url: input.base_url ?? null,
+        api_key: input.api_key ?? null,
+        proxy: input.proxy ?? null,
+        persona: input.persona ?? null,
+        avatar: input.avatar ?? null,
       }
       await nativeBinding.saveAgentConfig(config)
       return { success: true }

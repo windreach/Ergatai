@@ -8,6 +8,7 @@
 pub mod acp;
 pub mod agents;
 pub mod dag;
+pub mod file_access;
 pub mod mcp;
 pub mod nats;
 pub mod skills;

@@ -2,17 +2,8 @@
  * Remote API - wrapper around tRPC client for web backend
  * Provides clean interface for fetching remote sandbox data
  */
+import { getApiBaseUrl } from "./api-base"
 import { remoteTrpc } from "./remote-trpc"
-
-// API base URL - dynamically fetched from main process
-let API_BASE: string | null = null
-
-async function getApiBase(): Promise<string> {
-  if (!API_BASE) {
-    API_BASE = await window.desktopApi?.getApiBaseUrl() || "https://21st.dev"
-  }
-  return API_BASE
-}
 
 // Re-export types for convenience
 export type Team = {
@@ -127,7 +118,7 @@ export const remoteApi = {
     if (!window.desktopApi?.signedFetch) {
       throw new Error("Desktop API not available")
     }
-    const apiBase = await getApiBase()
+    const apiBase = await getApiBaseUrl()
     const result = await window.desktopApi.signedFetch(
       `${apiBase}/api/agents/sandbox/${sandboxId}/diff`
     )
@@ -144,7 +135,7 @@ export const remoteApi = {
     if (!window.desktopApi?.signedFetch) {
       throw new Error("Desktop API not available")
     }
-    const apiBase = await getApiBase()
+    const apiBase = await getApiBaseUrl()
     const result = await window.desktopApi.signedFetch(
       `${apiBase}/api/agents/sandbox/${sandboxId}/files?path=${encodeURIComponent(path)}`
     )

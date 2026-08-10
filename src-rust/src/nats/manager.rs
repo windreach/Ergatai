@@ -4,10 +4,11 @@
 
 use std::sync::OnceLock;
 use tokio::sync::RwLock;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::error::ErgataiResult;
 use crate::nats::{NatsServer, NatsConnection};
+use crate::nats::file_access_streams::all_file_access_stream_configs;
 
 /// Global NATS state
 struct NatsState {
@@ -24,7 +25,7 @@ fn nats_state() -> &'static RwLock<NatsState> {
     }))
 }
 
-/// Initialize NATS (start server + connect)
+/// Initialize NATS (start server + connect + create JetStream streams)
 ///
 /// This is idempotent - calling multiple times is safe.
 /// Returns the connection if successful.
@@ -51,10 +52,51 @@ pub async fn init_nats() -> ErgataiResult<NatsConnection> {
     let connection = NatsConnection::connect_to_server(&server).await?;
     info!("Connected to NATS server");
 
+    // Initialize JetStream streams (Phase 6: M8 fix)
+    info!("Initializing JetStream streams...");
+    if let Err(e) = init_jetstream_streams(&connection).await {
+        warn!("Failed to initialize JetStream streams: {}. Continuing without streams.", e);
+    }
+
     state.server = Some(server);
     state.connection = Some(connection.clone());
 
     Ok(connection)
+}
+
+/// Initialize all JetStream streams for file access control
+///
+/// Creates streams defined in `all_file_access_stream_configs()` if they don't exist.
+/// This ensures message persistence and reliability for critical file access events.
+async fn init_jetstream_streams(connection: &NatsConnection) -> ErgataiResult<()> {
+    let jetstream = async_nats::jetstream::new(connection.client().clone());
+
+    let configs = all_file_access_stream_configs();
+    info!("Creating {} JetStream streams", configs.len());
+
+    for config in configs {
+        let stream_name = config.name.clone();
+
+        // Try to get existing stream, create if not exists
+        match jetstream.get_stream(&stream_name).await {
+            Ok(_) => {
+                info!("JetStream stream '{}' already exists", stream_name);
+            }
+            Err(_) => {
+                // Stream doesn't exist, create it
+                match jetstream.create_stream(config).await {
+                    Ok(_) => {
+                        info!("Created JetStream stream '{}'", stream_name);
+                    }
+                    Err(e) => {
+                        warn!("Failed to create JetStream stream '{}': {}", stream_name, e);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Get the current NATS connection (if initialized)

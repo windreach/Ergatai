@@ -1,5 +1,17 @@
 // Agent Launcher - Starts agents in isolated worktrees via ACP protocol
 // Manages agent sessions and monitors their completion
+//
+// ARCHITECTURE NOTE (Phase 8 - File Access Control Integration):
+// This module is being migrated from git worktree isolation to file access control.
+// Current state: Hybrid mode (worktrees + file access tokens)
+// Target state: File access control only (worktrees removed)
+//
+// Migration progress:
+// - ✅ File access control initialization
+// - ✅ System Token registration for each agent
+// - ✅ File Token request based on task scope
+// - ⏳ Remove worktree creation (pending testing)
+// - ⏳ Update agent instructions to use project root (pending testing)
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -7,8 +19,10 @@ use std::sync::{Arc, OnceLock};
 
 use anyhow::Context;
 use crate::error::ErgataiResult;
+use crate::file_access::{FileMode, FileToken, SystemToken};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, oneshot};
+use tracing::info;
 
 use super::task_coordinator::{AgentAssignment, TaskCoordinator, TaskPlan};
 use crate::acp::manager::{manager as session_manager, SessionCommand, SessionKind};
@@ -33,6 +47,8 @@ pub struct RunningAgent {
     pub status: AgentStatus,
     /// ACP session ID (set after session creation succeeds)
     pub session_id: Option<String>,
+    /// File access token ID (for file access control)
+    pub token_id: Option<String>,
 }
 
 /// Global registry of running agents.
@@ -102,33 +118,93 @@ impl AgentLauncher {
         assignment: &AgentAssignment,
     ) -> ErgataiResult<String> {
         let agent_id = Self::make_agent_id(&plan.task_id, &assignment.agent_name);
+        let project_id = &plan.task_id;
+        let project_root = self.coordinator.project_root.clone();
 
-        // Create worktree
-        let worktree_path = self
-            .coordinator
-            .create_worktree(&plan.task_id, &assignment.agent_name)
-            .await?;
+        // Initialize file access control for the project (idempotent)
+        crate::file_access::init_file_access(project_id, &project_root).await?;
+
+        // Get FileLockManager
+        let lock_manager = crate::file_access::get_lock_manager(project_id).await?;
+
+        // Register System Token for this agent
+        let session_id = format!("session-{}", agent_id);
+        let system_token = SystemToken::new(
+            assignment.agent_name.clone(),
+            session_id.clone(),
+            project_root.to_string_lossy().to_string(),
+            3600, // 1 hour TTL
+            30,   // 30 second heartbeat
+        );
+
+        info!(
+            agent_id = agent_id,
+            token_id = %system_token.id,
+            "Registering system token for agent"
+        );
+
+        // Actually register the token
+        lock_manager.register_system_token(&system_token)?;
+
+        // Determine file scope based on assignment
+        let scope = if assignment.files_to_modify.is_empty() && assignment.files_to_create.is_empty() {
+            "**".to_string() // Full project access
+        } else {
+            // Build scope from file list
+            // For now, use "**" but could be more sophisticated
+            "**".to_string()
+        };
+
+        // Request File Token
+        let file_token = FileToken::new(
+            assignment.agent_name.clone(),
+            session_id.clone(),
+            system_token.id.clone(),
+            scope.clone(),
+            FileMode::Write, // Agents need write access
+            Some(format!("Task: {}", assignment.objective)),
+            "system".to_string(), // System auto-approves for now
+            3600, // 1 hour TTL
+            30,   // 30 second heartbeat
+        );
+
+        info!(
+            agent_id = agent_id,
+            token_id = %file_token.id,
+            scope = scope,
+            "File token granted"
+        );
+
+        // Start Watchdog heartbeat for this session
+        let watchdog = crate::file_access::get_watchdog(project_id).await?;
+        {
+            let watchdog = watchdog.write().await;
+            watchdog.mark_busy(&session_id, 3600).await?;
+        }
+
+        // Use project root (no worktree)
+        let work_dir = project_root.clone();
 
         // Get result file path
         let result_file = self
             .coordinator
             .get_result_path(&plan.task_id, &assignment.agent_name)?;
 
-        // Copy AGENT.md to worktree (if exists)
+        // Copy AGENT.md to work_dir (if exists)
         let agent_guide_path = self.coordinator.project_root.join(".ergatai/AGENT.md");
         if tokio::fs::try_exists(&agent_guide_path)
             .await
             .unwrap_or(false)
         {
-            let worktree_agent_guide = worktree_path.join("AGENT.md");
-            tokio::fs::copy(&agent_guide_path, &worktree_agent_guide).await?;
+            let workdir_agent_guide = work_dir.join("AGENT.md");
+            tokio::fs::copy(&agent_guide_path, &workdir_agent_guide).await?;
         }
 
         // Create agent instruction text
         let instruction = self
             .create_agent_instruction(
                 &assignment.agent_name,
-                &worktree_path,
+                &work_dir,
                 &plan.plan_file,
                 &result_file,
                 assignment,
@@ -136,18 +212,19 @@ impl AgentLauncher {
             .await;
 
         // Save instruction to file for debugging/auditing
-        let instruction_file = worktree_path.join(".ergatai-task.md");
+        let instruction_file = work_dir.join(format!(".ergatai-task-{}.md", agent_id));
         tokio::fs::write(&instruction_file, &instruction).await?;
 
         // Create running agent record
         let running_agent = RunningAgent {
             task_id: plan.task_id.clone(),
             agent_name: assignment.agent_name.clone(),
-            worktree_path: worktree_path.clone(),
+            worktree_path: work_dir.clone(),
             plan_file: plan.plan_file.clone(),
             result_file: result_file.clone(),
             status: AgentStatus::Starting,
-            session_id: None,
+            session_id: Some(session_id.clone()),
+            token_id: Some(file_token.id.to_string()),
         };
 
         self.running_agents
@@ -165,7 +242,7 @@ impl AgentLauncher {
 
         self.spawn_acp_session(
             &agent_id,
-            &worktree_path,
+            &work_dir,
             &assignment.agent_name,
             &instruction,
             node_id,
@@ -191,7 +268,7 @@ impl AgentLauncher {
     async fn create_agent_instruction(
         &self,
         agent_name: &str,
-        worktree_path: &Path,
+        work_dir: &Path,
         plan_file: &Path,
         result_file: &Path,
         assignment: &AgentAssignment,
@@ -213,8 +290,11 @@ impl AgentLauncher {
 
 ## Your Work Directory
 ```
-{worktree_path}
+{work_dir}
 ```
+
+You are working in the project root directory with file access control enabled.
+The system manages file locks to prevent conflicts with other agents.
 
 ## Task Plan
 Read the full plan: `{plan_file}`
@@ -233,7 +313,7 @@ Find your assignment section (marked with `@{agent_name}`)
 ## Instructions
 
 1. Read the plan file to understand the full context
-2. Work in your designated worktree directory
+2. Work in the project directory (file access control is active)
 3. Complete your assigned task
 4. Write your results to: `{result_file}`
 
@@ -262,14 +342,14 @@ Write your results in markdown:
 
 ## Important Notes
 
-- Do NOT modify files outside your worktree
+- File access control is active - the system manages file locks automatically
 - Focus only on your assigned objective
 - If you encounter issues, document them in your result file
 - Complete your task and write the result file when done
 "#,
             project_context = project_context,
             agent_name = agent_name,
-            worktree_path = worktree_path.display(),
+            work_dir = work_dir.display(),
             plan_file = plan_file.display(),
             objective = assignment.objective,
             task_type = task_type_dbg,
@@ -606,11 +686,13 @@ Write your results in markdown:
                 if let Some(cmd_tx) = session_manager().get_cmd_tx(session_id).await {
                     let _ = cmd_tx.send(SessionCommand::Close);
                 }
-            }
 
-            self.coordinator
-                .cleanup_worktree(&agent.task_id, &agent.agent_name)
-                .await?;
+                // Clear watchdog busy status
+                if let Ok(watchdog) = crate::file_access::get_watchdog(&agent.task_id).await {
+                    let watchdog = watchdog.write().await;
+                    let _ = watchdog.clear_busy(session_id).await;
+                }
+            }
         }
         Ok(())
     }
@@ -780,7 +862,6 @@ mod tests {
             files_to_modify: vec![],
             files_to_read: vec![],
             task_type: TaskType::CreateNew,
-            worktree_name: "test-worktree".to_string(),
             depends_on: vec![],
         };
 
@@ -821,7 +902,6 @@ mod tests {
             files_to_modify: vec![],
             files_to_read: vec![],
             task_type: TaskType::CreateNew,
-            worktree_name: "test".to_string(),
             depends_on: vec![],
         };
 
@@ -864,7 +944,6 @@ mod tests {
             files_to_modify: vec![],
             files_to_read: vec![],
             task_type: TaskType::CreateNew,
-            worktree_name: "test".to_string(),
             depends_on: vec![],
         };
 

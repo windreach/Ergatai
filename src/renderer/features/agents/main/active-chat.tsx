@@ -96,6 +96,7 @@ import { FileViewerSidebar } from "../../file-viewer"
 import { FileSearchDialog } from "../../file-viewer/components/file-search-dialog"
 import { terminalBottomHeightAtom, terminalDisplayModeAtom, terminalSidebarOpenAtomFamily } from "../../terminal/atoms"
 import { TerminalBottomPanelContent, TerminalSidebar } from "../../terminal/terminal-sidebar"
+import { ApprovalBottomPanel } from "@/components/file-access/ApprovalBottomPanel"
 import { getTerminalScopeKey } from "../../terminal/utils"
 import {
   agentsChangesPanelCollapsedAtom,
@@ -4979,6 +4980,25 @@ export function ChatView({
   const [isTerminalSidebarOpen, setIsTerminalSidebarOpen] = useAtom(terminalSidebarAtom)
   const terminalDisplayMode = useAtomValue(terminalDisplayModeAtom)
 
+  // File access approval panel state
+  const [isApprovalPanelOpen, setIsApprovalPanelOpen] = useState(false)
+
+  // Query for pending approval requests
+  const { data: pendingApprovals } = trpc.fileAccess.getApprovalRequests.useQuery(
+    { chatId },
+    {
+      refetchInterval: 2000, // Poll every 2 seconds
+      enabled: !!chatId,
+    }
+  )
+
+  // Auto-open approval panel when there are pending requests
+  useEffect(() => {
+    if (pendingApprovals && pendingApprovals.length > 0 && !isApprovalPanelOpen) {
+      setIsApprovalPanelOpen(true)
+    }
+  }, [pendingApprovals, isApprovalPanelOpen])
+
   // Keyboard shortcut: Cmd+J to toggle terminal
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -8206,6 +8226,15 @@ Make sure to preserve all functionality from both branches when resolving confli
             onClose={() => setIsTerminalSidebarOpen(false)}
           />
         </ResizableBottomPanel>
+      )}
+
+      {/* File Access Approval Bottom Panel */}
+      {worktreePath && !isMobileFullscreen && (
+        <ApprovalBottomPanel
+          isOpen={isApprovalPanelOpen}
+          onClose={() => setIsApprovalPanelOpen(false)}
+          chatId={chatId}
+        />
       )}
     </div>
     </TextSelectionProvider>

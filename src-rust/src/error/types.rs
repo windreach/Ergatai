@@ -43,6 +43,9 @@ pub enum ErrorCode {
     // Business errors
     SessionExists,
     InvalidSessionState,
+    LockConflict,
+    InvalidPath,
+    NotFound,
 
     // Internal errors
     Internal,
@@ -79,6 +82,9 @@ impl ErrorCode {
 
             Self::SessionExists => "ERR_SESSION_EXISTS",
             Self::InvalidSessionState => "ERR_INVALID_SESSION_STATE",
+            Self::LockConflict => "ERR_LOCK_CONFLICT",
+            Self::InvalidPath => "ERR_INVALID_PATH",
+            Self::NotFound => "ERR_NOT_FOUND",
 
             Self::Internal => "ERR_INTERNAL",
             Self::Channel => "ERR_CHANNEL",
@@ -169,6 +175,18 @@ pub enum ErgataiError {
     #[error("Invalid session state: {0}")]
     InvalidSessionState(String),
 
+    /// File lock conflict (another agent holds the lock)
+    #[error("Lock conflict: {0}")]
+    LockConflict(String),
+
+    /// Invalid file path (traversal, escaping project root, etc.)
+    #[error("Invalid path: {0}")]
+    InvalidPath(String),
+
+    /// Resource not found
+    #[error("Not found: {0}")]
+    NotFound(String),
+
     // ===== Internal Errors =====
     /// Unexpected internal error — preserves source error chain
     #[error("Internal error: {message}")]
@@ -200,6 +218,13 @@ impl From<agent_client_protocol::Error> for ErgataiError {
             message: err.to_string(),
             source: Some(Box::new(err)),
         }
+    }
+}
+
+// M6 fix: Add From<rusqlite::Error> for cleaner error handling in lock_manager
+impl From<rusqlite::Error> for ErgataiError {
+    fn from(err: rusqlite::Error) -> Self {
+        ErgataiError::DatabaseError(err.to_string())
     }
 }
 
@@ -295,6 +320,9 @@ impl ErgataiError {
             // Business errors
             ErgataiError::SessionAlreadyExists(_) => ErrorCode::SessionExists,
             ErgataiError::InvalidSessionState(_) => ErrorCode::InvalidSessionState,
+            ErgataiError::LockConflict(_) => ErrorCode::LockConflict,
+            ErgataiError::InvalidPath(_) => ErrorCode::InvalidPath,
+            ErgataiError::NotFound(_) => ErrorCode::NotFound,
 
             // Internal errors
             ErgataiError::InternalError { .. } => ErrorCode::Internal,

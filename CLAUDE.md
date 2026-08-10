@@ -71,6 +71,165 @@ Ergatai 解析 DAG → NATS 分发任务 → 子 Agent A/B/C (ACP 执行)
 - **NATS 不跟 Agent 说话**，Agent 之间也不能直接对话
 - Agent 间如需对话，必须经 Ergatai 中转（Phase 5）
 
+### 多 Agent 协作基础设施
+
+项目为多 Agent 并行协作提供完整的安全隔离和协调机制，确保多个 AI Agent 可以同时安全地操作同一项目目录。
+
+#### 文件访问控制（Phase 6）
+
+多 Agent 并行修改代码的核心挑战是**文件冲突**。系统通过 Token 机制实现文件级锁管理：
+
+```
+Agent A (WRITE lock on src/foo.rs)
+    ↓ 持有 token
+    ↓ 修改文件
+    ↓ 创建 git snapshot
+    ↓ 释放锁
+Agent B (等待 WRITE lock → 获取 → 继续)
+```
+
+**Token 权限模型：**
+
+| Mode | 权限 | 用途 |
+|------|------|------|
+| `READ` | 只读，多个 READ 可并存 | 代码分析、审查 |
+| `WRITE` | 独占写，同一文件只能一个 WRITE | 代码修改 |
+| `ADMIN` | 完全访问（含敏感路径） | 配置文件、密钥操作 |
+
+**核心模块（`src-rust/src/file_access/`）：**
+
+| 模块 | 职责 |
+|------|------|
+| `token.rs` | FileToken / SystemToken 数据结构 + 路径范围匹配 |
+| `lock_manager.rs` | SQLite 持久化锁管理（BEGIN IMMEDIATE 事务） |
+| `lock_mode.rs` | 锁升级（READ→WRITE）/ 降级（WRITE→READ） |
+| `renewal.rs` | Token / Lock 续期（心跳延续有效期） |
+| `audit.rs` | 安全审计日志（所有锁操作记录） |
+| `snapshot.rs` | Git blob 快照（WRITE 前自动创建，用于回滚） |
+| `watchdog.rs` | 后台监控：心跳超时 → 渐进式超时 → 自动回收锁 |
+| `watcher.rs` | 文件系统监听（notify crate），检测锁外修改 |
+| `conflict_arbitration.rs` | WRITE 冲突仲裁（优先级决策） |
+| `sensitive_paths.rs` | 敏感路径检测（.env, .key, credentials 等需 ADMIN） |
+| `performance.rs` | 锁缓存 + 批量操作 + 异步队列优化 |
+| `file_events_consumer.rs` | JetStream 消费者（file.ready / file.error 事件） |
+| `manager.rs` | 全局 FileLockManager 初始化（类似 NatsManager） |
+
+**锁数据库（SQLite）：**
+
+```
+{project_root}/.ergatai/locks.db
+
+Tables:
+- system_tokens   → Agent session 级别的 token（id, agent_id, session_id, expires_at, heartbeat_at）
+- file_locks      → 文件级锁（token_id, file_path, mode, status, expires_at）
+- audit_log       → 审计日志（timestamp, agent_id, action, file_path, mode）
+- snapshots       → Git 快照记录（file_path, git_hash, agent_id, created_at）
+```
+
+**Watchdog 渐进式超时：**
+
+```
+心跳超时检测（每 10s）
+├── 第 1 次超时：warn + 30s 宽限期
+├── 第 2 次超时：error + 60s 宽限期
+└── 第 3 次超时：回收所有锁 + 广播 file.error 事件
+```
+
+Agent 执行长任务时可调用 `mark_busy(session_id, duration_secs)` 延长超时。
+
+#### NATS 文件事件流（Phase 7）
+
+JetStream 提供持久化的文件事件通知，确保 Agent 间的文件就绪通知不丢失：
+
+```
+FILE_EVENTS Stream (WorkQueue retention)
+├── ergatai.file.ready.{md5_hash}    → WRITE 完成，通知 READ_LATEST 等待者
+└── ergatai.file.error.{md5_hash}    → WRITE 失败/崩溃，通知等待者
+```
+
+**事件流保证：**
+- `AckPolicy::Explicit` — 消费者必须确认，否则重投（最多 3 次）
+- `WorkQueue` 保留策略 — 消息处理后自动删除
+- `FileEventsConsumer` 后台消费事件并调用 `lock_manager.notify_file_ready/error`
+
+#### Agent 间消息路由（Phase 5）
+
+Agent 之间不能直接通信，所有消息经 Ergatai 中转：
+
+```
+Agent A: "@agent-b 请review这段代码"
+    ↓
+Ergatai message_router.rs 检测 @mention
+    ↓
+NATS publish → ergatai.agent.message.{agent-b}
+    ↓
+Agent B 通过 ACP 收到消息
+```
+
+#### 完整的多 Agent 协作流程
+
+```
+1. 用户请求: "用 3 个 Agent 并行重构这个模块"
+    ↓
+2. 主 Agent (claude-code) 输出 DAG markdown:
+   ## Task A (分析代码) - agent-a
+   ## Task B (写实现) - agent-b, depends_on: [A]
+   ## Task C (写测试) - agent-c, depends_on: [A]
+    ↓
+3. Ergatai 解析 DAG → DagScheduler
+    ↓
+4. Task A 无依赖 → 立即提交到 NATS: ergatai.task.submit.agent-a
+    ↓
+5. TaskScheduler 消费任务 → AgentLauncher 启动 agent-a
+   ├── 创建 SystemToken (session 级)
+   ├── 创建 FileToken (mode=WRITE, scope=src/module/)
+   └── acquire_lock(src/module/*.rs)
+    ↓
+6. Agent A 通过 ACP 执行任务
+   ├── 每次文件操作 → NAPI → FileLockManager 检查权限
+   ├── WRITE 前自动创建 git snapshot
+   └── 定期 heartbeat 维持 token 有效
+    ↓
+7. Task A 完成 → NATS: ergatai.dag.node_complete.A
+    ↓
+8. DagScheduler 检查依赖 → Task B/C 解锁 → 并行提交
+    ↓
+9. Agent B/C 并行执行（各自持有不同文件的 WRITE 锁）
+    ↓
+10. 所有任务完成 → NATS: ergatai.dag.complete.{dag_id}
+    ↓
+11. 主 Agent 汇总结果 → 回复用户
+```
+
+#### 文件访问 NAPI 接口
+
+```typescript
+// 初始化（应用启动时）
+file_access_init(project_root: string): void
+
+// Token 管理
+file_access_create_token(agent_id, session_id, project_root, mode, scope): FileToken
+file_access_acquire_lock(token, file_path): void
+file_access_release_lock(token_id, file_path): void
+file_access_heartbeat(token_id): void
+
+// 锁模式切换
+file_access_upgrade_to_write(token_id, file_path): void
+file_access_downgrade_to_read(token_id, file_path): void
+
+// 快照
+file_access_create_snapshot(file_path, agent_id): string  // 返回 git hash
+file_access_get_latest_snapshot(file_path): string | null
+
+// 审计
+file_access_generate_security_report(): FileAccessStats
+file_access_get_audit_log(agent_id?, action?, limit?): AuditEntry[]
+
+// 监控
+file_access_mark_busy(session_id, duration_secs): void
+file_access_get_active_locks(file_path?): ActiveLock[]
+```
+
 ### Rust 后端 (`src-rust/`)
 
 ```
@@ -78,14 +237,32 @@ src-rust/src/
 ├── acp/                     # ACP 协议层
 │   ├── manager.rs           # Session 管理、事件总线 (poll_events)
 │   ├── sdk_session.rs       # 单个 ACP session 生命周期
-│   └── sdk_pool_manager.rs  # Agent pool: NATS 任务队列 + 调度
+│   ├── sdk_pool_manager.rs  # Agent pool: NATS 任务队列 + 调度
+│   └── session_ops.rs       # Session 操作（加载/恢复/权限处理）
+│
+├── file_access/             # 文件访问控制（多 Agent 安全隔离）
+│   ├── token.rs             # FileToken / SystemToken 数据结构
+│   ├── lock_manager.rs      # SQLite 持久化锁管理
+│   ├── lock_mode.rs         # 锁升级/降级
+│   ├── renewal.rs           # Token/Lock 续期
+│   ├── audit.rs             # 安全审计日志
+│   ├── snapshot.rs          # Git blob 快照（防崩溃回滚）
+│   ├── watchdog.rs          # 心跳超时监控 + 自动回收
+│   ├── watcher.rs           # 文件系统监听（notify）
+│   ├── conflict_arbitration.rs # WRITE 冲突仲裁
+│   ├── sensitive_paths.rs   # 敏感路径检测
+│   ├── performance.rs       # 锁缓存 + 批量操作优化
+│   ├── file_events_consumer.rs # JetStream 事件消费者
+│   ├── manager.rs           # 全局 FileLockManager 初始化
+│   └── mod.rs               # 模块导出
 │
 ├── nats/                    # NATS 集成（事件总线）
 │   ├── server.rs            # nats-server 子进程管理
 │   ├── connection.rs        # async-nats client 封装
 │   ├── task_queue.rs        # JetStream WorkQueue
-│   ├── events.rs            # DAG 事件 payload 定义
+│   ├── events.rs            # 事件 payload 定义（DAG + 文件访问）
 │   ├── event_bus.rs         # 类型化 pub/sub 封装
+│   ├── file_access_streams.rs # FILE_EVENTS JetStream 流定义
 │   └── manager.rs           # 全局 NATS 状态 (init/shutdown)
 │
 ├── orchestration/           # DAG 编排
@@ -98,15 +275,19 @@ src-rust/src/
 │   ├── dag_scheduler.rs     # DAG 事件驱动调度器
 │   ├── task_scheduler.rs    # 任务调度 (NATS consumer / 轮询 fallback)
 │   ├── agent_launcher.rs    # Agent 启动 + 完成检测
-│   └── task_coordinator.rs  # Plan 文件解析
+│   └── task_coordinator.rs  # Plan 文件解析 + AgentAssignment
 │
 ├── agent/                   # Agent 发现与配置
-│   ├── config.rs            # Agent JSON 配置加载
+│   ├── config.rs            # Agent JSON 配置加载（含路径遍历防护）
 │   ├── discovery.rs         # 自动发现已安装 agent
 │   └── runtime_metadata.rs  # 13 个内置 agent 元数据
 │
+├── error/                   # 错误类型
+│   └── types.rs             # ErgataiError 枚举（含文件访问相关变体）
+│
 └── napi/                    # NAPI 绑定 (Rust → TypeScript)
     ├── nats.rs              # nats_init / nats_is_initialized / nats_shutdown
+    ├── file_access.rs       # 文件访问控制 NAPI（FFI 边界）
     └── ...
 ```
 
@@ -114,15 +295,31 @@ src-rust/src/
 
 ```
 ergatai.
-├── task.submit.{agent}        # DagScheduler → TaskScheduler (任务提交)
-├── task.complete.{task_id}    # Agent 完成通知
-├── task.fail.{task_id}        # Agent 失败通知
-├── dag.node_complete.{node}   # AgentLauncher → DagScheduler
-├── dag.node_failed.{node}     # AgentLauncher → DagScheduler
-├── dag.complete.{dag_id}      # DAG 全部完成
-├── agent.spawned.{agent_id}   # Agent 启动
-└── agent.stopped.{agent_id}   # Agent 停止
+├── task.submit.{agent}              # DagScheduler → TaskScheduler (任务提交)
+├── task.complete.{task_id}          # Agent 完成通知
+├── task.fail.{task_id}              # Agent 失败通知
+├── dag.node_complete.{node}         # AgentLauncher → DagScheduler
+├── dag.node_failed.{node}           # AgentLauncher → DagScheduler
+├── dag.complete.{dag_id}            # DAG 全部完成
+├── agent.spawned.{agent_id}         # Agent 启动
+├── agent.stopped.{agent_id}         # Agent 停止
+├── agent.message.{agent_id}         # Agent 间消息路由（@mention）
+│
+├── file.access.request              # 文件访问请求
+├── file.access.grant                # 文件访问授权
+├── file.access.deny                 # 文件访问拒绝
+├── file.access.approve              # 管理员审批通过
+├── file.access.revoke               # 文件访问撤销
+├── file.ready.{md5_hash}            # 文件 WRITE 完成通知 (JetStream)
+└── file.error.{md5_hash}            # 文件 WRITE 失败通知 (JetStream)
 ```
+
+**JetStream Streams：**
+
+| Stream | Subjects | Retention | 用途 |
+|--------|----------|-----------|------|
+| `FILE_EVENTS` | `ergatai.file.ready.*`, `ergatai.file.error.*` | WorkQueue | 文件事件持久化，保证不丢失 |
+| `TASK_QUEUE` | `ergatai.task.submit.*` | WorkQueue | 任务分发，Agent 消费 |
 
 ### DAG 编排流程
 
@@ -252,6 +449,8 @@ cargo test --lib orchestration          # 模板引擎 + DAG 解析 (37 测试)
 cargo test --lib cross_agent::dag       # DAG 调度器 (6 测试)
 cargo test --lib nats::events           # 事件类型序列化 (8 测试)
 cargo test --lib nats::event_bus        # 事件总线 (需要 nats-server)
+cargo test --lib file_access            # 文件访问控制 (20+ 测试)
+cargo test --lib agent::config          # Agent 配置加载 (28 测试)
 
 # NATS 集成测试需要 nats-server 二进制
 # 设置: export ERGATAI_NATS_BINARY=/path/to/nats-server
@@ -265,15 +464,30 @@ cargo test --lib nats::event_bus        # 事件总线 (需要 nats-server)
 - ✅ Phase 3: DAG 事件驱动（NATS pub/sub 替代直接调用，fallback 保留）
 - ✅ Phase 4: Markdown 编排增强（input/output/retry/timeout/priority）
 
-**进行中：**
-- 前端 mock-api.ts → 真实 tRPC 调用替换
-
-**已完成 (Phase 5)：**
-- ✅ Agent 间双向对话（Ergatai 中转移消息，`@agent` 提及检测）
+**已完成 (Phase 5)：Agent 间双向对话**
 - ✅ 消息路由器（`message_router.rs`）：检测 @mentions，通过 NATS 路由
 - ✅ AgentMessagePayload：agent-to-agent 消息类型
 - ✅ NAPI 绑定：`nats_route_agent_message` / `nats_scan_and_route_mentions`
 - ✅ Subject: `ergatai.agent.message.{agent_id}`
+
+**已完成 (Phase 6)：文件访问控制**
+- ✅ Token 权限模型（READ / WRITE / ADMIN）+ 路径范围匹配
+- ✅ SQLite 持久化锁管理（事务保证原子性）
+- ✅ 锁升级/降级 + 续期 + 心跳
+- ✅ Watchdog 渐进式超时 + 自动回收
+- ✅ Git snapshot 快照（WRITE 前自动创建，用于回滚）
+- ✅ 安全审计日志 + 敏感路径检测
+- ✅ 冲突仲裁（WRITE 冲突优先级决策）
+- ✅ 性能优化（锁缓存 + BinaryHeap 优先队列 + 批量操作）
+
+**已完成 (Phase 7)：NATS 文件事件流**
+- ✅ FILE_EVENTS JetStream 流（WorkQueue retention）
+- ✅ FileEventsConsumer 后台消费（file.ready / file.error）
+- ✅ 事件通知 API（notify_file_ready / notify_file_error）
+- ✅ EventBus 类型化发布（publish_file_ready / publish_file_error）
+
+**进行中：**
+- 前端 mock-api.ts → 真实 tRPC 调用替换
 
 ## File Naming
 

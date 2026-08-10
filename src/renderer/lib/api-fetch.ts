@@ -6,17 +6,9 @@
  * This helper provides the correct base URL for API requests.
  */
 
-let cachedBaseUrl: string | null = null
+import { getApiBaseUrl } from "./api-base"
 
-/**
- * Get the API base URL (cached after first call)
- * Always returns https://21st.dev (both in dev and production)
- */
-export async function getApiBaseUrl(): Promise<string> {
-  if (cachedBaseUrl) return cachedBaseUrl
-  cachedBaseUrl = await window.desktopApi.getApiBaseUrl()
-  return cachedBaseUrl
-}
+export { getApiBaseUrl }
 
 /**
  * Fetch wrapper that uses the correct API base URL

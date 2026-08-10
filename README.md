@@ -1,233 +1,272 @@
 # Ergatai
 
-> ⚠️ **This project is under active development.** Building a multi-agent collaboration platform with Rust backend and ACP protocol standardization.
+> ⚠️ **This project is under active development.**
 
-A **multi-agent collaboration platform** that turns AI coding assistants into a coordinated team. Built with a **Rust backend**, **ACP (Agent Client Protocol)** for agent communication, **NATS event bus** for reliable internal messaging, and **DAG-based orchestration** with template-driven data flow — enabling multiple agents to collaborate, communicate, and coordinate tasks.
+Ergatai is a **multi-agent collaboration platform** for AI-assisted software engineering. It transforms individual AI coding assistants into a coordinated engineering team — enabling parallel task execution, safe concurrent file access, and structured workflow orchestration.
 
-## What is Ergatai?
+Built with a **Rust** core for performance and safety, **ACP (Agent Client Protocol)** for standardized agent communication, an embedded **NATS** event bus for reliable message delivery, and a **DAG-based orchestration engine** with template-driven data flow.
 
-Ergatai is not just another coding assistant — it's a **platform for agent collaboration**. While traditional tools focus on single-agent interactions, Ergatai enables:
+## Overview
 
-- **Multi-Agent Teams** — PM → Dev → QA pipelines that work together via DAG orchestration
-- **ACP Standardization** — Plug in any ACP-compliant agent (Claude, Codex, Goose, 13+ supported)
-- **Rust Performance** — Native backend with NAPI bindings for speed and safety
-- **NATS Event Bus** — Embedded NATS server for reliable task routing, crash recovery, and event-driven scheduling
-- **Template Data Flow** — `{{var}}` templates pass data between DAG nodes automatically
-- **Local-First** — Your code, your agents, your machine (no cloud lock-in)
+Traditional AI coding tools operate in isolation: one agent, one conversation, one task at a time. Ergatai introduces the infrastructure required for **multi-agent collaboration at scale**:
+
+| Capability | Description |
+|---|---|
+| **Parallel Execution** | Multiple agents work concurrently on different parts of a task graph |
+| **Safe Concurrency** | Token-based file locking prevents conflicting edits across agents |
+| **Workflow Orchestration** | Declarative DAG definitions with dependency tracking and automatic scheduling |
+| **Data Flow** | Template engine passes outputs between tasks (`{{node.output}}`) |
+| **Crash Recovery** | Heartbeat monitoring with automatic lock reclamation; git snapshots for rollback |
+| **Agent Agnostic** | 13+ supported agents via ACP — Claude Code, Codex, Goose, and more |
+| **Local-First** | All execution happens on your machine. No cloud dependency. |
 
 ## Architecture
 
 ```
-┌────────────────────────────────────────────────────────────────┐
-│  Frontend (React + Electron)                                   │
-│  - Chat UI, diff preview, tool display                         │
-│  - Plan mode, file viewer, terminal                            │
-└──────────────────────────┬─────────────────────────────────────┘
-                           │ tRPC
-┌──────────────────────────▼─────────────────────────────────────┐
-│  Main Process (TypeScript)                                     │
-│  - tRPC routers, NAPI bindings → Rust                          │
-└──────────────────────────┬─────────────────────────────────────┘
-                           │ NAPI
-┌──────────────────────────▼─────────────────────────────────────┐
-│  Rust Backend (src-rust/)                                      │
-│                                                                │
-│  ┌──────────────────┐   ┌──────────────────────────────────┐  │
-│  │  ACP Protocol     │   │  NATS Event Bus                  │  │
-│  │  (Client↔Agent)   │   │  (Internal component signaling)  │  │
-│  │                   │   │                                  │  │
-│  │  Bidirectional    │   │  ┌─────────┐  ┌─────────────┐  │  │
-│  │  JSON-RPC over    │   │  │ Dag     │  │ Task        │  │  │
-│  │  stdin/stdout     │   │  │Scheduler│←→│ Scheduler   │  │  │
-│  │                   │   │  └────┬────┘  └──────┬──────┘  │  │
-│  └────────┬─────────┘   │       │   events.rs   │         │  │
-│           │              │       │   event_bus.rs│         │  │
-│           │              │  ┌────▼────────────▼──────┐   │  │
-│  ┌────────▼─────────┐   │  │ Agent Launcher          │   │  │
-│  │  Session Mgmt    │   │  │ (spawn + ACP connect)   │   │  │
-│  │  Pool Manager    │   │  └─────────────────────────┘   │  │
-│  └──────────────────┘   └──────────────────────────────────┘  │
-│                                                                │
-│  ┌──────────────────────────────────────────────────────────┐  │
-│  │  DAG Orchestration                                       │  │
-│  │  - Markdown → TaskGraph parser                           │  │
-│  │  - {{var}} template engine (DagContext)                  │  │
-│  │  - Event-driven scheduling (NATS)                        │  │
-│  └──────────────────────────────────────────────────────────┘  │
-└────────────────────────────────────────────────────────────────┘
-                           │ ACP (stdin/stdout)
-              ┌────────────┼────────────┐
-              ▼            ▼            ▼
-         ┌─────────┐ ┌─────────┐ ┌─────────┐
-         │ Claude  │ │ Codex   │ │ Goose   │  ...
-         │ Code    │ │         │ │         │
-         └─────────┘ └─────────┘ └─────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│  Frontend (React 19 + Electron)                                     │
+│  Chat UI · Diff Preview · Tool Execution · Agent Status             │
+└──────────────────────────────┬──────────────────────────────────────┘
+                               │ tRPC (trpc-electron)
+┌──────────────────────────────▼──────────────────────────────────────┐
+│  Main Process (TypeScript)                                          │
+│  tRPC Routers · Auth Manager · Drizzle ORM · NAPI Bindings          │
+└──────────────────────────────┬──────────────────────────────────────┘
+                               │ NAPI-RS
+┌──────────────────────────────▼──────────────────────────────────────┐
+│  Rust Backend                                                       │
+│                                                                     │
+│  ┌─────────────────┐  ┌──────────────────┐  ┌───────────────────┐  │
+│  │  ACP Protocol    │  │  NATS Event Bus  │  │  File Access      │  │
+│  │                  │  │                  │  │  Control          │  │
+│  │  Bidirectional   │  │  ┌────────────┐  │  │                   │  │
+│  │  JSON-RPC over   │  │  │ DAG        │  │  │  Token (R/W/Admin)│  │
+│  │  stdin/stdout    │  │  │ Scheduler  │  │  │  Lock Manager     │  │
+│  │                  │  │  └─────┬──────┘  │  │  Watchdog         │  │
+│  │  Session Mgmt   │  │  ┌─────▼──────┐  │  │  Snapshot (git)   │  │
+│  │  Pool Manager   │  │  │ Task       │  │  │  Audit Log        │  │
+│  │  Approval Flow  │  │  │ Scheduler  │  │  │  Conflict Arb.    │  │
+│  └────────┬────────┘  │  └────────────┘  │  └───────────────────┘  │
+│           │            │                  │                         │
+│  ┌────────▼──────────────────────────────────────────────────────┐  │
+│  │  DAG Orchestration                                            │  │
+│  │  Markdown → TaskGraph · {{var}} Templates · DagContext        │  │
+│  └───────────────────────────────────────────────────────────────┘  │
+└──────────────────────────────┬──────────────────────────────────────┘
+                               │ ACP (stdin/stdout)
+                  ┌─────────────┼─────────────┐
+                  ▼             ▼             ▼
+             ┌─────────┐  ┌─────────┐  ┌─────────┐
+             │ Claude  │  │  Codex  │  │  Goose  │  ...
+             │  Code   │  │         │  │         │
+             └─────────┘  └─────────┘  └─────────┘
 ```
 
-### Communication Layers
+### Communication Model
 
-| Layer | Technology | Direction | Purpose |
-|-------|-----------|-----------|---------|
-| **Agent ↔ Ergatai** | ACP (JSON-RPC) | Bidirectional | Prompts, responses, tool calls |
-| **Ergatai internal** | NATS (JetStream) | Event stream | Task routing, completion events |
+The system operates on two independent communication layers:
 
-- **ACP** = Client(Ergatai) ↔ Agent protocol. Bidirectional, per-session.
-- **NATS** = Ergatai's internal event bus. Reliable delivery, crash recovery.
-- NATS does NOT talk to agents directly. Agents only communicate via ACP.
-- Agent-to-agent conversation requires Ergatai as relay (planned Phase 5).
+| Layer | Protocol | Direction | Purpose |
+|---|---|---|---|
+| **Agent ↔ Ergatai** | ACP (JSON-RPC over stdio) | Bidirectional | Prompts, responses, tool calls, approval requests |
+| **Ergatani Internal** | NATS (JetStream) | Event stream | Task routing, completion events, file notifications |
+
+Agents never communicate directly with each other. All inter-agent messaging is relayed through Ergatai via NATS, ensuring centralized control and observability.
+
+## Multi-Agent Infrastructure
+
+### DAG Orchestration
+
+Tasks are defined in Markdown and parsed into a directed acyclic graph:
+
+```markdown
+## Task A — Analyze Codebase
+- **agent**: agent-a
+- **task**: tasks/analyze.md
+
+## Task B — Write Tests
+- **agent**: agent-b
+- **task**: tasks/test.md
+- **depends_on**: [Task A]
+- **input**: "Analysis: {{TaskA.review_result}}"
+- **output**: test_result, coverage
+- **retry**: 3
+- **timeout**: 300
+```
+
+The orchestration engine handles:
+- **Dependency resolution** — Topological scheduling with parallel execution where possible
+- **Template rendering** — `{{global.*}}` for global variables, `{{node_id.*}}` for upstream outputs
+- **Event-driven scheduling** — NATS pub/sub triggers downstream tasks on completion
+- **Retry and timeout** — Per-node configurable resilience
+
+### File Access Control
+
+When multiple agents operate on the same project, file conflicts are the primary risk. Ergatai provides a comprehensive file access control system:
+
+**Token-Based Permissions**
+
+| Mode | Scope | Use Case |
+|---|---|---|
+| `READ` | Shared — multiple readers allowed | Code analysis, review |
+| `WRITE` | Exclusive — one writer per file | Code modification |
+| `ADMIN` | Full access including sensitive paths | Configuration, credentials |
+
+**Safety Mechanisms**
+
+- **SQLite-persisted locks** — Atomic transactions prevent race conditions
+- **Heartbeat monitoring** — Watchdog detects unresponsive agents with progressive timeout (30s → 60s → reclaim)
+- **Git snapshots** — Every WRITE creates a git blob snapshot before modification, enabling rollback
+- **Path traversal protection** — Canonicalization checks prevent directory escape
+- **Sensitive path detection** — `.env`, `.key`, `credentials` files require ADMIN permission
+- **Conflict arbitration** — Priority-based resolution when WRITE locks collide
+- **Audit logging** — All lock operations are recorded for security review
+
+### Agent Communication
+
+Agents can message each other through Ergatai's relay system:
+
+```
+Agent A: "@agent-b please review this implementation"
+    ↓ (message_router detects @mention)
+NATS → ergatai.agent.message.{agent-b}
+    ↓
+Agent B receives message via ACP
+```
+
+### NATS Event Bus
+
+An embedded `nats-server` subprocess provides reliable internal messaging:
+
+**JetStream Streams**
+
+| Stream | Subjects | Retention | Purpose |
+|---|---|---|---|
+| `TASK_QUEUE` | `ergatai.task.submit.*` | WorkQueue | Task distribution to agents |
+| `FILE_EVENTS` | `ergatai.file.ready.*`, `ergatai.file.error.*` | WorkQueue | File completion notifications |
+| DAG Events | `ergatai.dag.*` | Limits | Orchestration state transitions |
+
+**Subject Naming Convention**
+
+```
+ergatai.
+├── task.submit.{agent}         # Task submission
+├── task.complete.{task_id}     # Task completion
+├── dag.node_complete.{node}    # DAG node finished
+├── dag.complete.{dag_id}       # Entire DAG finished
+├── agent.message.{agent_id}    # Inter-agent messaging
+├── file.ready.{hash}           # File WRITE completed
+└── file.error.{hash}           # File WRITE failed
+```
+
+Every component implements dual-mode operation: NATS when available, direct function calls as fallback.
 
 ## Supported Agents
 
-Ergatai supports **13 builtin agents** with automatic discovery, plus unlimited custom agents:
+Ergatai supports **13 built-in agents** with automatic discovery, plus unlimited custom agents via ACP:
 
-### Tier 1 Agents (Full Metadata)
-| Agent | Protocol | Status |
-|-------|----------|--------|
-| **Goose** | ACP native | ✅ Supported |
-| **Claude Code** | ACP via `claude-agent-sdk` | ✅ Supported |
-| **Codex** | ACP via `@zed-industries/codex-acp` | ✅ Supported |
-| **Hermes** | ACP | ✅ Supported |
+### Tier 1 — Full Integration
+| Agent | Protocol | Notes |
+|---|---|---|
+| **Goose** | ACP native | Full metadata |
+| **Claude Code** | ACP via SDK | Full metadata |
+| **Codex** | ACP via Zed | Full metadata |
+| **Hermes** | ACP | Full metadata |
 
-### Tier 2 Agents (Preset)
-| Agent | Protocol | Status |
-|-------|----------|--------|
-| **Devin** | ACP | ✅ Supported |
-| **Cursor** | ACP | ✅ Supported |
-| **Oh My Pi** | ACP | ✅ Supported |
-| **Grok Build** | ACP | ✅ Supported |
-| **OpenCode** | ACP | ✅ Supported |
-| **Kimi Code** | ACP | ✅ Supported |
-| **Amp** | ACP | ✅ Supported |
-| **OpenClaw** | ACP | ✅ Supported |
+### Tier 2 — Preset Configuration
+| Agent | Protocol |
+|---|---|
+| Devin | ACP |
+| Cursor | ACP |
+| Oh My Pi | ACP |
+| Grok Build | ACP |
+| OpenCode | ACP |
+| Kimi Code | ACP |
+| Amp | ACP |
+| OpenClaw | ACP |
 
-### Custom Agents
-Register any ACP-compliant agent via custom harness definitions in `~/.config/ergatai/custom_harnesses/`.
-
-## Key Features
-
-### DAG Orchestration
-- **Markdown-based DAGs** — Define task graphs in markdown with `depends_on`, `input`, `output`, `priority`, `timeout`, `retry`
-- **Template Engine** — `{{global.var}}` and `{{node_id.key}}` for data flow between nodes
-- **Event-Driven Scheduling** — NATS pub/sub replaces file polling (with direct-call fallback)
-- **DagContext** — Tracks global variables + per-node outputs, renders templates automatically
-
-### NATS Event Bus
-- **Embedded nats-server** — Bundled as child process (~15MB), auto-started on app launch
-- **JetStream Persistence** — WorkQueue for tasks, Limits stream for DAG events, crash recovery
-- **Dual-Mode** — Every component checks `is_nats_initialized()`, falls back to direct calls if unavailable
-- **Subject Naming** — `ergatai.task.submit.{pool}`, `ergatai.dag.node_complete.{node}`, etc.
-
-### Multi-Agent Collaboration
-- **ACP Protocol** — Bidirectional JSON-RPC over stdin/stdout between Ergatai (client) and Agents (server)
-- **Agent Network** — Register, discover, and communicate with 13+ supported agents
-- **Task Distribution** — Send tasks between agents, track progress, collect results
-- **Agent Relay** — Agent-to-agent communication routed through Ergatai (planned Phase 5)
-
-### ACP Agent Management
-- **Automatic Discovery** — Detects installed agents, probes authentication status
-- **Global Configuration** — Unified provider/model/env_vars configuration
-- **Custom Harness** — Define custom agents via JSON files
-- **Environment Injection** — Automatic env var injection based on runtime metadata
-
-### Visual Collaboration UI
-- **Chat Interface** — Familiar chat UX for each agent
-- **Tool Execution** — Watch agents run bash, edit files, search web
-- **Diff Preview** — See code changes before they land
-- **Agent Status** — Monitor which agents are active, idle, or busy
-
-### Additional Features
-- **Git Worktree Isolation** — Each chat runs in its own isolated worktree
-- **Background Agents** — Cloud sandboxes that run when your laptop sleeps
-- **Live Browser Previews** — Preview dev branches in a real browser
-- **Kanban Board** — Visualize agent sessions
-- **Built-in Git Client** — Visual staging, diffs, PR creation
-- **MCP & Plugins** — Server management, plugin marketplace
-- **Voice Input** — Hold-to-talk dictation
-- **Plan Mode** — Structured plans with markdown preview
-- **Extended Thinking** — Enabled by default with visual UX
+Custom agents can be registered via JSON configuration in `~/.config/ergatai/custom_harnesses/`.
 
 ## Development
 
+### Prerequisites
+
+- **Bun** (package manager)
+- **Rust toolchain** (cargo, rustc)
+- **Node.js 18+** (for Electron)
+
+### Quick Start
+
 ```bash
-# Prerequisites: Bun, Python 3.11, Rust toolchain
-bun install
-bun run dev
+bun install          # Install dependencies
+bun run dev          # Start Electron with hot reload
 ```
 
-### Build from Source
+### Build
 
 ```bash
-bun install
-bun run build:rust        # Build Rust backend
-bun run build:napi        # Generate NAPI bindings
-bun run build             # Build Electron app
-bun run package:linux     # or package:mac, package:win
+bun run build:rust   # Compile Rust backend
+bun run build:napi   # Generate NAPI bindings
+bun run build        # Build Electron app
+bun run package:mac  # Package for macOS (DMG + ZIP)
+bun run package:win  # Package for Windows (NSIS)
+bun run package:linux # Package for Linux (AppImage + DEB)
 ```
 
-## Installation
+### Testing
 
-### macOS
 ```bash
-# Download from releases (coming soon)
-brew install ergatai
+# Rust backend
+cargo test --lib -- --skip agent::discovery
+cargo test --lib file_access    # File access control (20+ tests)
+cargo test --lib orchestration  # DAG parser + templates (37 tests)
+
+# Database
+bun run db:generate  # Generate Drizzle migrations
+bun run db:push      # Push schema (dev only)
 ```
 
-### Linux
-```bash
-# AppImage or DEB package (coming soon)
-```
+## Technology Stack
 
-### Windows
-```bash
-# NSIS installer (coming soon)
-```
+| Layer | Technology |
+|---|---|
+| Desktop | Electron 33, electron-vite, electron-builder |
+| UI | React 19, TypeScript 5.4, Tailwind CSS |
+| Components | Radix UI, Lucide Icons, Motion, Sonner |
+| State | Jotai (UI), Zustand (tabs), React Query (server state) |
+| Backend | tRPC, Drizzle ORM, SQLite |
+| Core | Rust, NAPI-RS, async-nats 0.38, rusqlite |
+| AI | ACP Protocol (agent-client-protocol SDK) |
+| Messaging | Embedded nats-server (JetStream) |
+| Orchestration | Custom TaskGraph + template engine |
 
-## Development Status
+## Project Status
 
-**Phase 1 — NATS Infrastructure** ✅ Complete
-- nats-server child process management, async-nats connection, JetStream task queue
-- sdk_pool_manager migrated from VecDeque to NATS dual-mode
-
-**Phase 2 — Template Engine + Data Flow** ✅ Complete
-- `{{global.var}}` and `{{node_id.key}}` template rendering
-- DagContext for tracking global vars + per-node outputs
-- DAG parser extended with `output`, `priority`, `timeout`, `retry` fields
-
-**Phase 3 — DAG Event-Driven Architecture** ✅ Complete
-- NATS event bus replacing direct function calls and file polling
-- EventBus with typed payloads (TaskSubmit, NodeComplete, NodeFailed, DagComplete)
-- Fallback paths: every component checks `is_nats_initialized()` before using NATS
-
-**Phase 4 — Markdown Orchestration Enhancement** ✅ Complete (merged into Phase 2)
-
-**Phase 5 — Agent Message Routing** ✅ Complete
-- Agent-to-agent messaging via NATS relay (Ergatai as middleman)
-- Message router detects `@agent_name` mentions and routes automatically
-- NAPI bindings: `nats_route_agent_message` / `nats_scan_and_route_mentions`
-- Subject: `ergatai.agent.message.{agent_id}`
+| Phase | Description | Status |
+|---|---|---|
+| **Phase 1** | NATS infrastructure + Pool task queue | ✅ Complete |
+| **Phase 2** | Template engine + data flow pipeline | ✅ Complete |
+| **Phase 3** | DAG event-driven scheduling | ✅ Complete |
+| **Phase 4** | Markdown orchestration enhancement | ✅ Complete |
+| **Phase 5** | Agent message routing (@mention relay) | ✅ Complete |
+| **Phase 6** | File access control + lock management | ✅ Complete |
+| **Phase 7** | NATS file event streams (JetStream) | ✅ Complete |
 
 ## Community
 
-- **Discord**: Join our [Discord server](https://discord.gg/8ektTZGnj4) for support and discussions
-- **Issues**: Report bugs or request features via [GitHub Issues](https://github.com/windreach/ergatai/issues)
-- **Contributions**: PRs welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines
+- **Discord**: [Join our server](https://discord.gg/8ektTZGnj4) for support and discussion
+- **Issues**: [GitHub Issues](https://github.com/windreach/ergatai/issues) for bug reports and feature requests
+- **Contributions**: See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines
 
 ## Acknowledgments
 
-Ergatai is built with inspiration and code from two excellent projects:
+Ergatai builds upon the work of two excellent open-source projects:
 
-### Frontend Architecture
-The frontend is based on [1Code](https://1code.dev) by 21st.dev team (React + Electron + TypeScript). We thank the original contributors for their work on the UI components, Electron integration, and initial agent support.
+- **Frontend**: Based on [1Code](https://1code.dev) by 21st.dev (React + Electron + TypeScript). The Rust backend is original work.
+- **Agent Management**: Inspired by [Buzz](https://github.com/nicepkg/buzz), a pioneering multi-agent desktop application.
 
-**Note**: 1Code only has a TypeScript backend. The **Rust backend in Ergatai is original work**, built from scratch for native performance and ACP protocol support.
-
-### Backend Design
-The ACP agent management system (runtime metadata, discovery mechanism, global configuration) is inspired by [Buzz](https://github.com/nicepkg/buzz), a pioneering multi-agent desktop application.
-
-Both projects are licensed under Apache 2.0. See [NOTICE](NOTICE) for detailed attribution information.
+Both projects are licensed under Apache 2.0. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for detailed attribution.
 
 ## License
 
 Apache License 2.0 — see [LICENSE](LICENSE) for details.
-
-This project includes code derived from 1Code and Buzz, both licensed under Apache 2.0. Original copyright notices are preserved as required.

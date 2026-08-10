@@ -15,6 +15,8 @@ pub struct KnownAcpRuntime {
     pub underlying_cli: Option<&'static str>,
     pub model_env_var: Option<&'static str>,
     pub provider_env_var: Option<&'static str>,
+    pub api_key_env_var: Option<&'static str>,
+    pub base_url_env_var: Option<&'static str>,
     pub provider_locked: bool,
     pub default_env: &'static [(&'static str, &'static str)],
     pub config_file_path: Option<&'static str>,
@@ -42,6 +44,8 @@ pub static KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         underlying_cli: Some("goose"),
         model_env_var: Some("GOOSE_MODEL"),
         provider_env_var: Some("GOOSE_PROVIDER"),
+        api_key_env_var: Some("OPENAI_API_KEY"),
+        base_url_env_var: Some("GOOSE_API_BASE"),
         provider_locked: false,
         default_env: &[("GOOSE_MODE", "auto")],
         config_file_path: Some("~/.config/goose/config.yaml"),
@@ -60,6 +64,8 @@ pub static KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         underlying_cli: Some("claude"),
         model_env_var: None,
         provider_env_var: None,
+        api_key_env_var: Some("ANTHROPIC_API_KEY"),
+        base_url_env_var: Some("ANTHROPIC_BASE_URL"),
         provider_locked: true, // Claude only supports Anthropic
         default_env: &[],
         config_file_path: Some("~/.claude/settings.json"),
@@ -78,6 +84,8 @@ pub static KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         underlying_cli: Some("codex"),
         model_env_var: None,
         provider_env_var: None,
+        api_key_env_var: Some("OPENAI_API_KEY"),
+        base_url_env_var: Some("OPENAI_BASE_URL"),
         provider_locked: false,
         default_env: &[],
         config_file_path: Some("~/.codex/config.toml"),
@@ -91,11 +99,13 @@ pub static KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         id: "hermes",
         label: "Hermes",
         commands: &["hermes-acp", "hermes"],
-        aliases: &[],
+        aliases: &["hermes-agent"],
         avatar_file: HERMES_AVATAR,
         underlying_cli: Some("hermes"),
         model_env_var: None,
         provider_env_var: None,
+        api_key_env_var: None,
+        base_url_env_var: None,
         provider_locked: false,
         default_env: &[("HERMES_ACP_SKIP_CONFIGURED_MCP", "1")],
         config_file_path: None,
@@ -115,6 +125,8 @@ pub static KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         underlying_cli: None,
         model_env_var: None,
         provider_env_var: None,
+        api_key_env_var: None,
+        base_url_env_var: None,
         provider_locked: false,
         default_env: &[],
         config_file_path: None,
@@ -133,6 +145,8 @@ pub static KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         underlying_cli: None,
         model_env_var: None,
         provider_env_var: None,
+        api_key_env_var: None,
+        base_url_env_var: None,
         provider_locked: false,
         default_env: &[],
         config_file_path: None,
@@ -151,6 +165,8 @@ pub static KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         underlying_cli: None,
         model_env_var: None,
         provider_env_var: None,
+        api_key_env_var: None,
+        base_url_env_var: None,
         provider_locked: false,
         default_env: &[],
         config_file_path: None,
@@ -169,6 +185,8 @@ pub static KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         underlying_cli: None,
         model_env_var: None,
         provider_env_var: None,
+        api_key_env_var: None,
+        base_url_env_var: None,
         provider_locked: false,
         default_env: &[],
         config_file_path: None,
@@ -187,6 +205,8 @@ pub static KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         underlying_cli: None,
         model_env_var: None,
         provider_env_var: None,
+        api_key_env_var: None,
+        base_url_env_var: None,
         provider_locked: false,
         default_env: &[],
         config_file_path: None,
@@ -205,6 +225,8 @@ pub static KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         underlying_cli: None,
         model_env_var: None,
         provider_env_var: None,
+        api_key_env_var: None,
+        base_url_env_var: None,
         provider_locked: false,
         default_env: &[],
         config_file_path: None,
@@ -223,6 +245,8 @@ pub static KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         underlying_cli: Some("amp"),
         model_env_var: None,
         provider_env_var: None,
+        api_key_env_var: None,
+        base_url_env_var: None,
         provider_locked: false,
         default_env: &[],
         config_file_path: None,
@@ -241,6 +265,8 @@ pub static KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         underlying_cli: None,
         model_env_var: None,
         provider_env_var: None,
+        api_key_env_var: None,
+        base_url_env_var: None,
         provider_locked: false,
         default_env: &[],
         config_file_path: None,
@@ -252,7 +278,10 @@ pub static KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
     },
 ];
 
-/// Find a known runtime by command name (normalized).
+/// Find a known runtime by command name.
+///
+/// **Note:** `command` is normalized internally. Passing a pre-normalized command
+/// (via `normalize_command_identity`) avoids one redundant normalization.
 pub fn known_acp_runtime(command: &str) -> Option<&'static KnownAcpRuntime> {
     let normalized = normalize_command_identity(command);
 
@@ -273,10 +302,11 @@ pub fn known_acp_runtime_exact(id: &str) -> Option<&'static KnownAcpRuntime> {
 /// - Strips path components (e.g., `/usr/local/bin/goose` → `goose`)
 /// - Lowercases
 /// - Replaces `_` and spaces with `-`
-/// - Strips `.exe`, `.cmd`, `.bat` suffixes on Windows
+/// - Strips `.exe`, `.cmd`, `.bat` suffixes (cross-platform — npm shims can exist anywhere)
 pub fn normalize_command_identity(command: &str) -> String {
     let normalized = command.trim().replace('\\', "/");
-    let basename = normalized.rsplit('/').next().unwrap_or(normalized.as_str());
+    let trimmed = normalized.trim_end_matches('/');
+    let basename = trimmed.rsplit('/').next().unwrap_or(trimmed);
     let lower = basename
         .chars()
         .map(|c| match c {
@@ -284,7 +314,12 @@ pub fn normalize_command_identity(command: &str) -> String {
             _ => c.to_ascii_lowercase(),
         })
         .collect::<String>();
-    let lower = lower.strip_suffix(".exe").unwrap_or(&lower).to_string();
+    // Strip common executable suffixes (cross-platform)
+    let lower = [".exe", ".cmd", ".bat"]
+        .iter()
+        .find_map(|ext| lower.strip_suffix(ext))
+        .unwrap_or(&lower)
+        .to_string();
 
     #[cfg(windows)]
     {
@@ -310,7 +345,9 @@ pub fn default_agent_args(command: &str) -> Option<Vec<String>> {
     let normalized = normalize_command_identity(command);
     match normalized.as_str() {
         "goose" => Some(vec!["acp".to_string()]),
-        "claude-agent-acp" | "claude-code-acp" | "claude-code" => Some(vec![]),
+        "claude" | "claude-agent-acp" | "claude-code-acp" | "claude-code" | "claudecode" => {
+            Some(vec![])
+        }
         "codex-acp" | "codex" => Some(vec![]),
         _ => None,
     }

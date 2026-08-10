@@ -25,7 +25,9 @@ use crate::orchestration::dag_topology::{TaskGraph, TaskNode, TaskStatus};
 
 /// Parse a Markdown DAG specification into a TaskGraph
 pub fn parse_dag_markdown(content: &str) -> ErgataiResult<TaskGraph> {
-    let mut temp_nodes = Vec::new();
+    // Estimate capacity based on task headers (## or ###)
+    let estimated_nodes = content.matches("## ").count() + content.matches("### ").count();
+    let mut temp_nodes = Vec::with_capacity(estimated_nodes.max(8));
     let mut current_node: Option<TaskNodeBuilder> = None;
 
     for line in content.lines() {
@@ -76,7 +78,7 @@ pub fn parse_dag_markdown(content: &str) -> ErgataiResult<TaskGraph> {
     }
 
     // Build name-to-UUID mapping
-    let mut name_to_uuid: HashMap<String, String> = HashMap::new();
+    let mut name_to_uuid: HashMap<String, String> = HashMap::with_capacity(temp_nodes.len());
     for node in &temp_nodes {
         let uuid = Uuid::new_v4().to_string();
         name_to_uuid.insert(node.id.clone(), uuid);
@@ -119,6 +121,7 @@ struct TaskNodeBuilder {
     priority: Option<String>,
     timeout: Option<u64>,
     max_retries: Option<u32>,
+    scope: Option<String>,      // Phase 3: File access scope (glob pattern)
     metadata: HashMap<String, String>,
 }
 
@@ -135,6 +138,7 @@ impl TaskNodeBuilder {
             priority: None,
             timeout: None,
             max_retries: None,
+            scope: None,
             metadata: HashMap::new(),
         }
     }
@@ -172,6 +176,7 @@ impl TaskNodeBuilder {
             retry_count: 0,
             priority: self.priority,
             timeout: self.timeout,
+            scope: self.scope,  // Phase 3: File access scope
             metadata,
         })
     }
@@ -262,6 +267,16 @@ fn parse_property(builder: &mut TaskNodeBuilder, line: &str) -> ErgataiResult<()
                 }
             }
         }
+        "scope" => {
+            // Phase 3: File access scope (glob pattern)
+            // Validate the scope pattern
+            match validate_scope_pattern(&value) {
+                Ok(_) => builder.scope = Some(value),
+                Err(e) => {
+                    tracing::warn!(scope = %value, error = %e, "Invalid scope pattern in DAG markdown, ignoring");
+                }
+            }
+        }
         _ => {
             // Store in metadata
             builder.metadata.insert(key, value);
@@ -288,6 +303,40 @@ fn parse_array(value: &str) -> ErgataiResult<Vec<String>> {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect())
+}
+
+/// Validate a scope pattern (glob pattern for file access control)
+///
+/// Phase 3: Ensures the scope pattern is valid and doesn't contain path traversal.
+/// Returns Ok(()) if valid, Err if invalid.
+///
+/// # Examples
+/// - `"**"` - all files
+/// - `"src/**/*.rs"` - all Rust files in src/
+/// - `"docs/*.md"` - all Markdown files in docs/
+/// - `"!secret/**"` - exclude secret/ (if supported by glob crate)
+fn validate_scope_pattern(pattern: &str) -> ErgataiResult<()> {
+    // Check for path traversal attempts
+    if pattern.contains("..") {
+        return Err(ErgataiError::InvalidPath(
+            "Scope pattern cannot contain '..' (path traversal)".to_string()
+        ));
+    }
+
+    // Check for absolute paths
+    if pattern.starts_with('/') || pattern.starts_with('\\') {
+        return Err(ErgataiError::InvalidPath(
+            "Scope pattern must be relative, not absolute".to_string()
+        ));
+    }
+
+    // Validate glob pattern syntax (using glob crate)
+    match glob::Pattern::new(pattern) {
+        Ok(_) => Ok(()),
+        Err(e) => Err(ErgataiError::InvalidArgument(
+            format!("Invalid glob pattern '{}': {}", pattern, e)
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -404,5 +453,89 @@ mod tests {
         let graph = parse_dag_markdown(markdown).unwrap();
         let ready = graph.ready_tasks();
         assert_eq!(ready.len(), 2); // Task A and Task B
+    }
+
+    #[test]
+    fn test_scope_field() {
+        let markdown = r#"
+## Task A
+- **agent**: agent-a
+- **task**: tasks/a.md
+- **scope**: src/**/*.rs
+
+## Task B
+- **agent**: agent-b
+- **task**: tasks/b.md
+- **scope**: **
+"#;
+
+        let graph = parse_dag_markdown(markdown).unwrap();
+        assert_eq!(graph.nodes.len(), 2);
+
+        // Task A should have scope "src/**/*.rs"
+        assert_eq!(graph.nodes[0].scope, Some("src/**/*.rs".to_string()));
+
+        // Task B should have scope "**"
+        assert_eq!(graph.nodes[1].scope, Some("**".to_string()));
+    }
+
+    #[test]
+    fn test_scope_validation_path_traversal() {
+        let markdown = r#"
+## Task A
+- **agent**: agent-a
+- **task**: tasks/a.md
+- **scope**: ../secret/**
+"#;
+
+        let result = parse_dag_markdown(markdown);
+        // Should succeed but scope should be ignored (not set)
+        assert!(result.is_ok());
+        let graph = result.unwrap();
+        assert_eq!(graph.nodes[0].scope, None); // Invalid scope ignored
+    }
+
+    #[test]
+    fn test_scope_validation_absolute_path() {
+        let markdown = r#"
+## Task A
+- **agent**: agent-a
+- **task**: tasks/a.md
+- **scope**: /etc/passwd
+"#;
+
+        let result = parse_dag_markdown(markdown);
+        assert!(result.is_ok());
+        let graph = result.unwrap();
+        assert_eq!(graph.nodes[0].scope, None); // Invalid scope ignored
+    }
+
+    #[test]
+    fn test_scope_validation_invalid_glob() {
+        let markdown = r#"
+## Task A
+- **agent**: agent-a
+- **task**: tasks/a.md
+- **scope**: [invalid
+"#;
+
+        let result = parse_dag_markdown(markdown);
+        assert!(result.is_ok());
+        let graph = result.unwrap();
+        assert_eq!(graph.nodes[0].scope, None); // Invalid glob pattern ignored
+    }
+
+    #[test]
+    fn test_validate_scope_pattern() {
+        // Valid patterns
+        assert!(validate_scope_pattern("**").is_ok());
+        assert!(validate_scope_pattern("src/**/*.rs").is_ok());
+        assert!(validate_scope_pattern("docs/*.md").is_ok());
+        assert!(validate_scope_pattern("tests/**/unit/**").is_ok());
+
+        // Invalid patterns
+        assert!(validate_scope_pattern("../secret").is_err());
+        assert!(validate_scope_pattern("/absolute/path").is_err());
+        assert!(validate_scope_pattern("[invalid").is_err());
     }
 }

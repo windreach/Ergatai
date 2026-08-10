@@ -409,6 +409,30 @@ export const acpRouter = router({
               for (const event of events) {
                 if (event.sessionId !== acpSessionId) continue
 
+                // Handle file access approval requests separately
+                if (event.eventType === "file_access_approval_request") {
+                  try {
+                    const data = typeof event.data === "string" ? JSON.parse(event.data) : event.data
+                    const { addPendingApproval } = await import("./fileAccess")
+
+                    addPendingApproval({
+                      id: data.request_id,
+                      agentId: data.agent_id,
+                      sessionId: data.session_id,
+                      scope: data.scope,
+                      filePaths: data.file_paths || [],
+                      mode: "ADMIN",
+                      reason: data.reason || "Agent requests ADMIN access",
+                      createdAt: Date.now(),
+                    })
+
+                    console.log(`[ACP] File access approval request added: ${data.request_id}`)
+                  } catch (err) {
+                    console.error("[ACP] Failed to handle file access approval request:", err)
+                  }
+                  continue
+                }
+
                 const chunks = translateEvent(event)
                 for (const chunk of chunks) {
                   // AI SDK requires *-start before *-delta chunks.

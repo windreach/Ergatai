@@ -54,32 +54,6 @@ pub async fn task_parse_plan(plan_file: String) -> Result<String> {
     serde_json::to_string(&plan).map_err(|e| Error::from_reason(e.to_string()))
 }
 
-/// Create git worktree for agent
-#[napi]
-pub async fn task_create_worktree(task_id: String, agent: String) -> Result<String> {
-    guard();
-    let root = project_root()?;
-    let coordinator = crate::cross_agent::TaskCoordinator::new(root);
-    let worktree_path = coordinator
-        .create_worktree(&task_id, &agent)
-        .await
-        .map_err(|e| Error::from_reason(e.to_string()))?;
-    Ok(worktree_path.to_string_lossy().into_owned())
-}
-
-/// Merge agent worktree to main
-#[napi]
-pub async fn task_merge_worktree(task_id: String, agent: String) -> Result<String> {
-    guard();
-    let root = project_root()?;
-    let coordinator = crate::cross_agent::TaskCoordinator::new(root);
-    let result = coordinator
-        .merge_worktree(&task_id, &agent)
-        .await
-        .map_err(|e| Error::from_reason(e.to_string()))?;
-    serde_json::to_string(&result).map_err(|e| Error::from_reason(e.to_string()))
-}
-
 /// Check if all tasks in plan are completed
 #[napi]
 pub async fn task_check_completion(plan_file: String) -> Result<bool> {
@@ -164,11 +138,11 @@ pub async fn task_all_agents_completed(task_id: String) -> Result<bool> {
 }
 
 /// Merge all completed agents for a task
+/// With file access control, no merge is needed - agents work in the same directory
 #[napi]
 pub async fn task_merge_all(task_id: String) -> Result<String> {
     guard();
     let root = project_root()?;
-    let coordinator = crate::cross_agent::TaskCoordinator::new(root.clone());
     let launcher = crate::cross_agent::AgentLauncher::new(root);
 
     let agents = launcher.get_all_status().await;
@@ -180,11 +154,12 @@ pub async fn task_merge_all(task_id: String) -> Result<String> {
     let mut results = Vec::new();
     for agent in task_agents {
         if agent.status == crate::cross_agent::AgentStatus::Completed {
-            let result = coordinator
-                .merge_worktree(&task_id, &agent.agent_name)
-                .await
-                .map_err(|e| Error::from_reason(e.to_string()))?;
-            results.push(result);
+            // With file access control, no merge is needed
+            results.push(serde_json::json!({
+                "success": true,
+                "agent": agent.agent_name,
+                "message": "No merge needed with file access control"
+            }));
         }
     }
 

@@ -6,12 +6,24 @@
 //!
 //! ## Subject mapping
 //!
-//! | Payload               | Subject                                    | Publisher       | Subscriber    |
-//! |-----------------------|--------------------------------------------|-----------------|---------------|
-//! | `TaskSubmitPayload`   | `ergatai.task.submit.{target_agent}`       | DagScheduler    | TaskScheduler |
-//! | `NodeCompletePayload` | `ergatai.dag.node_complete.{node_id}`      | AgentLauncher   | DagScheduler  |
-//! | `NodeFailedPayload`   | `ergatai.dag.node_failed.{node_id}`       | AgentLauncher   | DagScheduler  |
-//! | `DagCompletePayload`  | `ergatai.dag.complete.{dag_id}`            | DagScheduler    | Observers     |
+//! | Payload                      | Subject                                    | Publisher       | Subscriber    |
+//! |------------------------------|--------------------------------------------|-----------------|---------------|
+//! | `TaskSubmitPayload`          | `ergatai.task.submit.{target_agent}`       | DagScheduler    | TaskScheduler |
+//! | `NodeCompletePayload`        | `ergatai.dag.node_complete.{node_id}`      | AgentLauncher   | DagScheduler  |
+//! | `NodeFailedPayload`          | `ergatai.dag.node_failed.{node_id}`       | AgentLauncher   | DagScheduler  |
+//! | `DagCompletePayload`         | `ergatai.dag.complete.{dag_id}`            | DagScheduler    | Observers     |
+//! | `FileAccessRequestPayload`   | `ergatai.file.access.request`              | Agent           | FileLockMgr   |
+//! | `FileAccessGrantPayload`     | `ergatai.file.access.grant.{agent_id}`     | FileLockMgr     | Agent         |
+//! | `FileAccessDenyPayload`      | `ergatai.file.access.deny.{agent_id}`      | FileLockMgr     | Agent         |
+//! | `FileAccessEscalatePayload`  | `ergatai.file.access.escalate.{main_id}`   | FileLockMgr     | MainAgent     |
+//! | `FileAccessApprovePayload`   | `ergatai.file.access.approve`              | MainAgent       | FileLockMgr   |
+//! | `FileAccessRejectPayload`    | `ergatai.file.access.reject`               | MainAgent       | FileLockMgr   |
+//! | `FileAccessReleasePayload`   | `ergatai.file.access.release`              | Agent           | FileLockMgr   |
+//! | `FileAccessRevokePayload`    | `ergatai.file.access.revoke.{agent_id}`    | MainAgent       | FileLockMgr   |
+//! | `FileConflictArbitratePayload`| `ergatai.file.conflict.arbitrate.{main}`  | FileLockMgr     | MainAgent     |
+//! | `FileReadyPayload`           | `ergatai.file.ready.{file_hash}`           | FileLockMgr     | Waiters       |
+//! | `FileErrorPayload`           | `ergatai.file.error.{file_hash}`           | FileLockMgr     | Waiters       |
+//! | `SystemTokenPayload`         | `ergatai.system.token.{agent_id}`          | System          | Agent         |
 
 use std::collections::HashMap;
 
@@ -110,6 +122,226 @@ pub struct AgentMessagePayload {
     pub metadata: HashMap<String, String>,
 }
 
+// ===== File Access Control Payloads =====
+
+/// File access request: Agent → FileLockManager
+///
+/// Agent requests permission to access a file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileAccessRequestPayload {
+    /// Unique request ID (for idempotency)
+    pub request_id: String,
+    /// Agent requesting access
+    pub agent_id: String,
+    /// ACP session ID
+    pub session_id: String,
+    /// File path (relative to project root)
+    pub file_path: String,
+    /// Access mode (READ or WRITE)
+    pub mode: String,
+    /// Reason for the request
+    pub reason: Option<String>,
+    /// DAG node ID (if part of a DAG task)
+    pub node_id: Option<String>,
+    /// Expected duration in seconds (for heartbeat timeout)
+    pub expected_duration_secs: Option<u64>,
+    /// Timestamp (Unix epoch seconds)
+    pub timestamp: u64,
+}
+
+/// File access grant: FileLockManager → Agent
+///
+/// System grants file access permission.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileAccessGrantPayload {
+    /// Request ID (correlates with request)
+    pub request_id: String,
+    /// Granted token ID
+    pub token_id: String,
+    /// Agent ID
+    pub agent_id: String,
+    /// File path
+    pub file_path: String,
+    /// Access mode
+    pub mode: String,
+    /// Who approved (system or agent_id)
+    pub approved_by: String,
+    /// Token expiration timestamp
+    pub expires_at: u64,
+    /// Timestamp (Unix epoch seconds)
+    pub timestamp: u64,
+}
+
+/// File access deny: FileLockManager → Agent
+///
+/// System denies file access permission.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileAccessDenyPayload {
+    /// Request ID (correlates with request)
+    pub request_id: String,
+    /// Agent ID
+    pub agent_id: String,
+    /// File path
+    pub file_path: String,
+    /// Denial reason
+    pub reason: String,
+    /// Timestamp (Unix epoch seconds)
+    pub timestamp: u64,
+}
+
+/// File access escalate: FileLockManager → Main Agent
+///
+/// System escalates approval decision to main agent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileAccessEscalatePayload {
+    /// Request ID
+    pub request_id: String,
+    /// Requesting agent ID
+    pub agent_id: String,
+    /// File path
+    pub file_path: String,
+    /// Access mode
+    pub mode: String,
+    /// Reason for request
+    pub reason: Option<String>,
+    /// Conflict info (if conflict with another agent)
+    pub conflict_with: Option<String>,
+    /// Timeout for decision (seconds)
+    pub timeout_secs: u64,
+    /// Timestamp (Unix epoch seconds)
+    pub timestamp: u64,
+}
+
+/// File access approve: Main Agent → FileLockManager
+///
+/// Main agent approves a file access request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileAccessApprovePayload {
+    /// Request ID
+    pub request_id: String,
+    /// Approving agent ID (main agent)
+    pub approver_id: String,
+    /// Optional: custom scope (if expanding)
+    pub custom_scope: Option<String>,
+    /// Timestamp (Unix epoch seconds)
+    pub timestamp: u64,
+}
+
+/// File access reject: Main Agent → FileLockManager
+///
+/// Main agent rejects a file access request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileAccessRejectPayload {
+    /// Request ID
+    pub request_id: String,
+    /// Rejecting agent ID (main agent)
+    pub rejecter_id: String,
+    /// Rejection reason
+    pub reason: String,
+    /// Timestamp (Unix epoch seconds)
+    pub timestamp: u64,
+}
+
+/// File access release: Agent → FileLockManager
+///
+/// Agent releases a file lock.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileAccessReleasePayload {
+    /// Token ID to release
+    pub token_id: String,
+    /// Agent ID
+    pub agent_id: String,
+    /// File path
+    pub file_path: String,
+    /// Timestamp (Unix epoch seconds)
+    pub timestamp: u64,
+}
+
+/// File access revoke: Main Agent → FileLockManager → Agent
+///
+/// Main agent force-revokes a file lock.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileAccessRevokePayload {
+    /// Token ID to revoke
+    pub token_id: String,
+    /// Revoking agent ID (main agent)
+    pub revoker_id: String,
+    /// Reason for revocation
+    pub reason: String,
+    /// Timestamp (Unix epoch seconds)
+    pub timestamp: u64,
+}
+
+/// File conflict arbitrate: FileLockManager → Main Agent
+///
+/// Multiple agents conflict on same file, escalate to main agent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileConflictArbitratePayload {
+    /// File path in conflict
+    pub file_path: String,
+    /// List of conflicting agent IDs
+    pub conflicting_agents: Vec<String>,
+    /// Access mode requested by each
+    pub modes: Vec<String>,
+    /// Reasons from each agent
+    pub reasons: Vec<Option<String>>,
+    /// Timeout for decision (seconds)
+    pub timeout_secs: u64,
+    /// Timestamp (Unix epoch seconds)
+    pub timestamp: u64,
+}
+
+/// File ready notification: FileLockManager → Waiters
+///
+/// Broadcast when a WRITE completes (for READ_LATEST waiters).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileReadyPayload {
+    /// File path that was written
+    pub file_path: String,
+    /// Agent that completed the write
+    pub agent_id: String,
+    /// Token ID that was released
+    pub token_id: String,
+    /// Timestamp (Unix epoch seconds)
+    pub timestamp: u64,
+}
+
+/// File error notification: FileLockManager → Waiters
+///
+/// Broadcast when a writer crashes (unblocks READ_LATEST waiters).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileErrorPayload {
+    /// File path with error
+    pub file_path: String,
+    /// Agent that crashed
+    pub agent_id: String,
+    /// Error reason
+    pub reason: String,
+    /// Timestamp (Unix epoch seconds)
+    pub timestamp: u64,
+}
+
+/// System token issuance: System → Agent
+///
+/// System issues a system token for agent admission.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemTokenPayload {
+    /// Token ID
+    pub token_id: String,
+    /// Agent ID
+    pub agent_id: String,
+    /// Session ID
+    pub session_id: String,
+    /// Project root
+    pub project_root: String,
+    /// Token expiration timestamp
+    pub expires_at: u64,
+    /// Heartbeat interval in seconds
+    pub heartbeat_interval_secs: u64,
+    /// Timestamp (Unix epoch seconds)
+    pub timestamp: u64,
+}
+
 /// Enum wrapping all event types — useful for a single subscriber
 /// that wants to handle multiple event kinds.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -120,6 +352,19 @@ pub enum DagEvent {
     NodeFailed(NodeFailedPayload),
     DagComplete(DagCompletePayload),
     AgentMessage(AgentMessagePayload),
+    // File access events
+    FileAccessRequest(FileAccessRequestPayload),
+    FileAccessGrant(FileAccessGrantPayload),
+    FileAccessDeny(FileAccessDenyPayload),
+    FileAccessEscalate(FileAccessEscalatePayload),
+    FileAccessApprove(FileAccessApprovePayload),
+    FileAccessReject(FileAccessRejectPayload),
+    FileAccessRelease(FileAccessReleasePayload),
+    FileAccessRevoke(FileAccessRevokePayload),
+    FileConflictArbitrate(FileConflictArbitratePayload),
+    FileReady(FileReadyPayload),
+    FileError(FileErrorPayload),
+    SystemToken(SystemTokenPayload),
 }
 
 #[cfg(test)]

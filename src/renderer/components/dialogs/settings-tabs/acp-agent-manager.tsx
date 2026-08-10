@@ -2,11 +2,11 @@ import { useState, useMemo } from "react"
 import { trpc } from "../../../lib/trpc"
 import { cn } from "../../../lib/utils"
 import { Button } from "../../ui/button"
+import { AcpAgentConfigDialog } from "./acp-agent-config-dialog"
 import {
-  Check,
   ChevronDown,
-  ExternalLink,
-  RefreshCw,
+  Plus,
+  Settings,
 } from "lucide-react"
 import { toast } from "sonner"
 
@@ -26,13 +26,6 @@ interface AcpRuntimeCatalogEntry {
   source: "builtin" | "custom"
 }
 
-interface GlobalAgentConfig {
-  env_vars: Record<string, string>
-  provider: string | null
-  model: string | null
-  preferred_runtime: string | null
-}
-
 // Normalize NAPI enum output (camelCase) to frontend format (snake_case)
 function normalizeAvailability(status: string): AcpRuntimeCatalogEntry["availability"] {
   if (status === "available" || status === "Available") return "available"
@@ -46,32 +39,6 @@ function normalizeAuthStatus(status: string): AcpRuntimeCatalogEntry["auth_statu
   if (status === "loggedOut" || status === "LoggedOut") return "logged_out"
   if (status === "notApplicable" || status === "NotApplicable") return "not_applicable"
   return "unknown"
-}
-
-// Default agent pill button
-function DefaultAgentPill({
-  active,
-  onClick,
-  children,
-}: {
-  active: boolean
-  onClick: () => void
-  children: React.ReactNode
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={cn(
-        "inline-flex items-center gap-2 rounded-md border px-3 py-1.5 text-sm outline-none transition-colors",
-        active
-          ? "border-muted-foreground/40 bg-accent font-medium text-accent-foreground"
-          : "border-border bg-background/50 text-muted-foreground hover:border-muted-foreground/35 hover:text-foreground"
-      )}
-    >
-      {children}
-    </button>
-  )
 }
 
 // Agent icon (avatar or fallback letter)
@@ -106,14 +73,12 @@ function AgentIcon({
 // Compact agent row for installed agents
 function InstalledAgentRow({
   runtime,
-  isDefault,
-  onSetDefault,
+  onConfig,
   onInstall,
   isInstalling,
 }: {
   runtime: AcpRuntimeCatalogEntry
-  isDefault: boolean
-  onSetDefault: () => void
+  onConfig: () => void
   onInstall?: () => void
   isInstalling?: boolean
 }) {
@@ -156,18 +121,18 @@ function InstalledAgentRow({
 
         {/* Actions */}
         <div className="ml-auto grid shrink-0 grid-cols-[max-content_6.5rem_1.75rem_1.75rem] items-center gap-1.5">
-          {/* Set default */}
+          {/* Set config button - opens config dialog */}
           <div className="flex justify-start">
             {isReady && (
               <Button
                 type="button"
-                variant={isDefault ? "secondary" : "ghost"}
+                variant="ghost"
                 size="xs"
-                onClick={onSetDefault}
+                onClick={onConfig}
                 className="h-7 w-full justify-center gap-1 text-xs"
               >
-                {isDefault && <Check className="size-3" />}
-                {isDefault ? "Default" : "Set default"}
+                <Settings className="size-3" />
+                Set config
               </Button>
             )}
           </div>
@@ -179,17 +144,6 @@ function InstalledAgentRow({
               target="_blank"
               rel="noopener noreferrer"
               title="Install"
-              className="flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
-            >
-              <ExternalLink className="size-3.5" />
-            </a>
-          )}
-          {isReady && runtime.install_instructions_url && (
-            <a
-              href={runtime.install_instructions_url}
-              target="_blank"
-              rel="noopener noreferrer"
-              title="Docs"
               className="flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
             >
               <ExternalLink className="size-3.5" />
@@ -246,15 +200,6 @@ export function AcpAgentManager() {
   const utils = trpc.useUtils()
 
   const { data: runtimes = [], isLoading, refetch } = trpc.agents.listRuntimes.useQuery()
-  const { data: globalConfig } = trpc.agents.getGlobalConfig.useQuery()
-
-  const setConfigMutation = trpc.agents.setGlobalConfig.useMutation({
-    onSuccess: () => {
-      utils.agents.getGlobalConfig.invalidate()
-      toast.success("Configuration saved")
-    },
-    onError: (error) => toast.error(`Failed to save: ${error.message}`),
-  })
 
   const installRuntimeMutation = trpc.agents.installRuntime.useMutation({
     onSuccess: () => {
@@ -263,6 +208,19 @@ export function AcpAgentManager() {
     },
     onError: (error) => toast.error(`Install failed: ${error.message}`),
   })
+
+  // Agent config dialog state
+  const [configDialogOpen, setConfigDialogOpen] = useState(false)
+  const [configDialogRuntime, setConfigDialogRuntime] = useState<AcpRuntimeCatalogEntry | null>(null)
+
+  const openConfigDialog = (runtime: AcpRuntimeCatalogEntry | null) => {
+    setConfigDialogRuntime(runtime)
+    setConfigDialogOpen(true)
+  }
+
+  const closeConfigDialog = () => {
+    setConfigDialogOpen(false)
+  }
 
   // Normalize and split runtimes
   const normalizedRuntimes = useMemo(
@@ -282,27 +240,6 @@ export function AcpAgentManager() {
     (r) => r.availability === "not_installed"
   )
 
-  const defaultRuntimeId = globalConfig?.preferred_runtime ?? null
-  const isAutoDefault = !defaultRuntimeId || !installedRuntimes.find((r) => r.id === defaultRuntimeId)
-
-  const handleSetDefault = (runtimeId: string) => {
-    setConfigMutation.mutate({
-      env_vars: globalConfig?.env_vars ?? {},
-      provider: globalConfig?.provider ?? null,
-      model: globalConfig?.model ?? null,
-      preferred_runtime: runtimeId,
-    })
-  }
-
-  const handleSetAuto = () => {
-    setConfigMutation.mutate({
-      env_vars: globalConfig?.env_vars ?? {},
-      provider: globalConfig?.provider ?? null,
-      model: globalConfig?.model ?? null,
-      preferred_runtime: null,
-    })
-  }
-
   const handleInstall = (runtimeId: string) => {
     installRuntimeMutation.mutate({ runtimeId })
   }
@@ -317,59 +254,45 @@ export function AcpAgentManager() {
 
   return (
     <div className="h-full overflow-y-auto space-y-8 p-6">
-      {/* Default Agent Selector */}
+      {/* Installed Agent Display */}
       <section className="space-y-4">
         <div>
-          <h3 className="text-sm font-semibold">Default Agent</h3>
+          <h3 className="text-sm font-semibold">Installed Agent</h3>
           <p className="text-xs text-muted-foreground mt-0.5">
-            Choose the default agent for new chats.
+            Agents detected on this machine.
           </p>
         </div>
 
         <div className="flex flex-wrap gap-2">
-          {/* Auto pill */}
-          <DefaultAgentPill active={isAutoDefault} onClick={handleSetAuto}>
-            {isAutoDefault && <Check className="size-3.5" />}
-            Auto
-          </DefaultAgentPill>
-
-          {/* Each installed agent as a pill */}
-          {installedRuntimes.map((runtime) => {
-            const isActive = defaultRuntimeId === runtime.id
-            return (
-              <DefaultAgentPill
-                key={runtime.id}
-                active={isActive}
-                onClick={() => handleSetDefault(runtime.id)}
-              >
-                <AgentIcon runtime={runtime} size={14} />
-                {runtime.label}
-                {isActive && <Check className="size-3.5" />}
-              </DefaultAgentPill>
-            )
-          })}
+          {installedRuntimes.map((runtime) => (
+            <div
+              key={runtime.id}
+              className="inline-flex items-center gap-1.5 rounded-full border border-border/60 bg-background/80 px-3 py-1.5 text-xs font-medium text-muted-foreground"
+            >
+              <AgentIcon runtime={runtime} size={14} />
+              {runtime.label}
+            </div>
+          ))}
         </div>
       </section>
 
-      {/* Installed Agents */}
+      {/* Config */}
       {installedRuntimes.length > 0 && (
         <section className="space-y-3">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <h3 className="text-sm font-semibold text-muted-foreground">Installed</h3>
-              <span className="inline-flex items-center rounded-md bg-accent px-1.5 py-0.5 text-[10px] font-medium text-accent-foreground">
-                {installedRuntimes.length} detected
-              </span>
+          <div className="flex items-start justify-between">
+            <div>
+              <h3 className="text-sm font-semibold text-muted-foreground">Config</h3>
+              <p className="text-[11px] text-muted-foreground/70 mt-0.5">Uses user config by default</p>
             </div>
             <Button
               type="button"
-              variant="ghost"
+              variant="outline"
               size="xs"
-              onClick={() => refetch()}
-              className="h-7 gap-1.5 text-xs text-muted-foreground hover:text-foreground"
+              onClick={() => openConfigDialog(null)}
+              className="h-7 gap-1.5 text-xs"
             >
-              <RefreshCw className="size-3" />
-              Refresh
+              <Plus className="size-3" />
+              Create Agent
             </Button>
           </div>
 
@@ -378,8 +301,7 @@ export function AcpAgentManager() {
               <InstalledAgentRow
                 key={runtime.id}
                 runtime={runtime}
-                isDefault={defaultRuntimeId === runtime.id}
-                onSetDefault={() => handleSetDefault(runtime.id)}
+                onConfig={() => openConfigDialog(runtime)}
               />
             ))}
           </div>
@@ -458,6 +380,16 @@ export function AcpAgentManager() {
           No agents detected. Install one to get started.
         </div>
       )}
+
+      {/* Agent Config Dialog */}
+      <AcpAgentConfigDialog
+        open={configDialogOpen}
+        onOpenChange={closeConfigDialog}
+        runtime={configDialogRuntime}
+        onSuccess={() => {
+          refetch()
+        }}
+      />
     </div>
   )
 }

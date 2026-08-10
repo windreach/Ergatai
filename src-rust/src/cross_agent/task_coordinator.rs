@@ -1,5 +1,5 @@
 // Task Coordinator - File-based cross-agent collaboration
-// Manages task plans, git worktrees, and agent coordination
+// Manages task plans and agent coordination with file access control
 
 use std::path::{Path, PathBuf};
 
@@ -7,7 +7,6 @@ use anyhow::Context;
 use crate::error::{ErgataiError, ErgataiResult};
 use serde::{Deserialize, Serialize};
 use tokio::fs;
-use tokio::process::Command;
 
 /// Validate that a string is safe to use as a path component.
 ///
@@ -45,14 +44,13 @@ pub struct AgentAssignment {
     pub files_to_modify: Vec<PathBuf>,
     pub files_to_read: Vec<PathBuf>,
     pub task_type: TaskType,
-    pub worktree_name: String,
 
     // DAG support: dependencies (ID is auto-generated UUID)
     #[serde(default)]
     pub depends_on: Vec<String>,
 }
 
-/// Type of task (determines worktree isolation level)
+/// Type of task (determines file access level)
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum TaskType {
     /// Agent only reads files, outputs result to result file
@@ -83,29 +81,10 @@ pub struct TaskPlan {
     pub plan_file: PathBuf,
 }
 
-/// Result of merging a worktree
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MergeResult {
-    pub success: bool,
-    pub conflicts: Vec<PathBuf>,
-    pub merged_files: Vec<PathBuf>,
-    pub error: Option<String>,
-}
-
-/// Worktree status
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WorktreeStatus {
-    pub modified_files: Vec<PathBuf>,
-    pub new_files: Vec<PathBuf>,
-    pub deleted_files: Vec<PathBuf>,
-    pub has_changes: bool,
-}
-
 /// Task Coordinator - manages cross-agent collaboration
 pub struct TaskCoordinator {
     pub project_root: PathBuf,
     plan_dir: PathBuf,
-    worktree_dir: PathBuf,
     results_dir: PathBuf,
 }
 
@@ -114,13 +93,11 @@ impl TaskCoordinator {
     pub fn new(project_root: PathBuf) -> Self {
         let ergatai_dir = project_root.join(".ergatai");
         let plan_dir = ergatai_dir.join(".plan");
-        let worktree_dir = ergatai_dir.join("worktrees");
         let results_dir = plan_dir.join("results");
 
         Self {
             project_root,
             plan_dir,
-            worktree_dir,
             results_dir,
         }
     }
@@ -128,7 +105,6 @@ impl TaskCoordinator {
     /// Initialize directories
     pub async fn init(&self) -> ErgataiResult<()> {
         fs::create_dir_all(&self.plan_dir).await?;
-        fs::create_dir_all(&self.worktree_dir).await?;
         fs::create_dir_all(&self.results_dir).await?;
         Ok(())
     }
@@ -156,7 +132,7 @@ impl TaskCoordinator {
         // Parse markdown to extract task info and assignments
         let task_name = extract_task_name(&content).unwrap_or_else(|| "Unknown Task".to_string());
         let coordinator = extract_coordinator(&content).unwrap_or_else(|| "unknown".to_string());
-        let assignments = parse_assignments(&content, &task_id)?;
+        let assignments = parse_assignments(&content)?;
         let merge_strategy = extract_merge_strategy(&content)
             .unwrap_or_else(|| "Main agent handles conflicts".to_string());
 
@@ -171,268 +147,18 @@ impl TaskCoordinator {
         })
     }
 
-    /// Create git worktree for an agent
-    pub async fn create_worktree(&self, task_id: &str, agent: &str) -> ErgataiResult<PathBuf> {
-        validate_path_component(task_id, "task_id")?;
-        validate_path_component(agent, "agent")?;
-        let worktree_name = format!("{}-{}", task_id, agent);
-        let worktree_path = self.worktree_dir.join(&worktree_name);
-
-        // Remove existing worktree if it exists
-        if tokio::fs::try_exists(&worktree_path).await.unwrap_or(false) {
-            let status = Command::new("git")
-                .args(["worktree", "remove", "--force"])
-                .arg(&worktree_path)
-                .current_dir(&self.project_root)
-                .status()
-                .await
-                .with_context(|| "Failed to invoke git worktree remove")?;
-            if !status.success() {
-                tracing::warn!(
-                    ?worktree_path,
-                    status = ?status,
-                    "git worktree remove returned non-zero (continuing)"
-                );
-            }
-        }
-
-        // Create new worktree based on the main repo's current HEAD.
-        // `--detach` avoids assuming a branch name (the project may use `main`,
-        // `master`, `trunk`, or anything else) and works regardless of which
-        // branch is currently checked out in the main worktree. The agent gets
-        // a detached HEAD at that commit; `merge_worktree` later creates a
-        // real branch via `git checkout -b` before merging back.
-        let output = Command::new("git")
-            .args(["worktree", "add", "--detach"])
-            .arg(&worktree_path)
-            .current_dir(&self.project_root)
-            .output()
-            .await
-            .with_context(|| "Failed to create git worktree")?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(ErgataiError::internal(format!("Git worktree add failed: {}", stderr)));
-        }
-
-        Ok(worktree_path)
-    }
-
-    /// Get worktree status (changed files)
-    pub async fn get_worktree_status(&self, worktree_path: &Path) -> ErgataiResult<WorktreeStatus> {
-        let output = Command::new("git")
-            .args(["status", "--porcelain"])
-            .current_dir(worktree_path)
-            .output()
-            .await?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let mut modified_files = Vec::new();
-        let mut new_files = Vec::new();
-        let mut deleted_files = Vec::new();
-
-        for line in stdout.lines() {
-            if line.len() < 3 {
-                continue;
-            }
-            let status = &line[0..2];
-            let file = line[3..].to_string();
-            let path = PathBuf::from(file);
-
-            match status.trim() {
-                "M" | "MM" => modified_files.push(path),
-                "A" | "AM" | "??" => new_files.push(path),
-                "D" => deleted_files.push(path),
-                _ => {}
-            }
-        }
-
-        let has_changes = !modified_files.is_empty() || !new_files.is_empty() || !deleted_files.is_empty();
-
-        Ok(WorktreeStatus {
-            modified_files,
-            new_files,
-            deleted_files,
-            has_changes,
-        })
-    }
-
-    /// Merge worktree changes to main branch
-    pub async fn merge_worktree(&self, task_id: &str, agent: &str) -> ErgataiResult<MergeResult> {
-        validate_path_component(task_id, "task_id")?;
-        validate_path_component(agent, "agent")?;
-        let worktree_name = format!("{}-{}", task_id, agent);
-        let worktree_path = self.worktree_dir.join(&worktree_name);
-
-        if !tokio::fs::try_exists(&worktree_path).await.unwrap_or(false) {
-            return Ok(MergeResult {
-                success: false,
-                conflicts: vec![],
-                merged_files: vec![],
-                error: Some(format!("Worktree not found: {}", worktree_name)),
-            });
-        }
-
-        // Check for changes
-        let status = self.get_worktree_status(&worktree_path).await?;
-        if !status.has_changes {
-            return Ok(MergeResult {
-                success: true,
-                conflicts: vec![],
-                merged_files: vec![],
-                error: None,
-            });
-        }
-
-        // Commit changes in worktree — each step must succeed before moving on.
-        let branch_name = format!("task-{}-{}", task_id, agent);
-
-        let checkout_status = Command::new("git")
-            .args(["checkout", "-b", &branch_name])
-            .current_dir(&worktree_path)
-            .output()
-            .await
-            .with_context(|| "Failed to invoke git checkout -b")?;
-        if !checkout_status.status.success() {
-            let stderr = String::from_utf8_lossy(&checkout_status.stderr);
-            return Err(ErgataiError::internal(format!("git checkout -b {} failed: {}", branch_name, stderr)));
-        }
-
-        let add_status = Command::new("git")
-            .args(["add", "-A"])
-            .current_dir(&worktree_path)
-            .output()
-            .await
-            .with_context(|| "Failed to invoke git add")?;
-        if !add_status.status.success() {
-            let stderr = String::from_utf8_lossy(&add_status.stderr);
-            return Err(ErgataiError::internal(format!("git add -A failed: {}", stderr)));
-        }
-
-        let commit_msg = format!("Task {}: {} completion", task_id, agent);
-        let commit_status = Command::new("git")
-            .args(["commit", "-m", &commit_msg, "--allow-empty"])
-            .current_dir(&worktree_path)
-            .output()
-            .await
-            .with_context(|| "Failed to invoke git commit")?;
-        if !commit_status.status.success() {
-            let stderr = String::from_utf8_lossy(&commit_status.stderr);
-            return Err(ErgataiError::internal(format!("git commit failed: {}", stderr)));
-        }
-
-        // Try to merge to main
-        let merge_output = Command::new("git")
-            .args(["merge", &branch_name, "--no-edit"])
-            .current_dir(&self.project_root)
-            .output()
-            .await?;
-
-        if !merge_output.status.success() {
-            // Merge conflict
-            let conflict_output = Command::new("git")
-                .args(["diff", "--name-only", "--diff-filter=U"])
-                .current_dir(&self.project_root)
-                .output()
-                .await?;
-
-            let conflicts = String::from_utf8_lossy(&conflict_output.stdout)
-                .lines()
-                .map(PathBuf::from)
-                .collect();
-
-            // Abort merge
-            Command::new("git")
-                .args(["merge", "--abort"])
-                .current_dir(&self.project_root)
-                .status()
-                .await?;
-
-            return Ok(MergeResult {
-                success: false,
-                conflicts,
-                merged_files: vec![],
-                error: Some("Merge conflict detected".to_string()),
-            });
-        }
-
-        // Successful merge
-        let merged_files = status
-            .modified_files
-            .into_iter()
-            .chain(status.new_files)
-            .collect();
-
-        Ok(MergeResult {
-            success: true,
-            conflicts: vec![],
-            merged_files,
-            error: None,
-        })
-    }
-
-    /// Clean up worktree
-    pub async fn cleanup_worktree(&self, task_id: &str, agent: &str) -> ErgataiResult<()> {
-        validate_path_component(task_id, "task_id")?;
-        validate_path_component(agent, "agent")?;
-        let worktree_name = format!("{}-{}", task_id, agent);
-        let worktree_path = self.worktree_dir.join(&worktree_name);
-
-        if tokio::fs::try_exists(&worktree_path).await.unwrap_or(false) {
-            let status = Command::new("git")
-                .args(["worktree", "remove", "--force"])
-                .arg(&worktree_path)
-                .current_dir(&self.project_root)
-                .status()
-                .await
-                .with_context(|| "Failed to invoke git worktree remove")?;
-            if !status.success() {
-                tracing::warn!(
-                    ?worktree_path,
-                    status = ?status,
-                    "git worktree remove returned non-zero during cleanup"
-                );
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Clean up all worktrees for a task
+    /// Clean up task files (plan and results)
     pub async fn cleanup_task(&self, task_id: &str) -> ErgataiResult<()> {
         validate_path_component(task_id, "task_id")?;
         let pattern = format!("{}-", task_id);
-        if let Ok(mut entries) = fs::read_dir(&self.worktree_dir).await {
-            while let Ok(Some(entry)) = entries.next_entry().await {
-                let path = entry.path();
-                if path.is_dir() {
-                    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                        if name.starts_with(&pattern) {
-                            let status = Command::new("git")
-                                .args(["worktree", "remove", "--force"])
-                                .arg(&path)
-                                .current_dir(&self.project_root)
-                                .status()
-                                .await;
-                            if let Err(e) = status {
-                                tracing::warn!(
-                                    ?path,
-                                    error = %e,
-                                    "Failed to invoke git worktree remove during task cleanup"
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-        }
 
-        // Clean up plan file and results
+        // Clean up plan file
         let plan_file = self.plan_dir.join(format!("{}.md", task_id));
         if tokio::fs::try_exists(&plan_file).await.unwrap_or(false) {
             fs::remove_file(&plan_file).await?;
         }
 
+        // Clean up result files
         if let Ok(mut entries) = fs::read_dir(&self.results_dir).await {
             while let Ok(Some(entry)) = entries.next_entry().await {
                 let path = entry.path();
@@ -519,7 +245,7 @@ fn extract_merge_strategy(content: &str) -> Option<String> {
     None
 }
 
-fn parse_assignments(content: &str, task_id: &str) -> ErgataiResult<Vec<AgentAssignment>> {
+fn parse_assignments(content: &str) -> ErgataiResult<Vec<AgentAssignment>> {
     let mut assignments = Vec::new();
     let mut current_assignment: Option<AgentAssignmentBuilder> = None;
 
@@ -535,8 +261,7 @@ fn parse_assignments(content: &str, task_id: &str) -> ErgataiResult<Vec<AgentAss
             let agent_part = line.trim_start_matches("### @");
             if let Some(agent_name) = agent_part.split_whitespace().next() {
                 let agent_name = agent_name.trim_end_matches('-').trim().to_string();
-                let worktree_name = format!("{}-{}", task_id, agent_name);
-                let builder = AgentAssignmentBuilder::new(agent_name, worktree_name);
+                let builder = AgentAssignmentBuilder::new(agent_name);
 
                 current_assignment = Some(builder);
             }
@@ -694,7 +419,6 @@ fn parse_file_list(s: &str) -> Vec<PathBuf> {
 
 struct AgentAssignmentBuilder {
     agent_name: String,
-    worktree_name: String,
     objective: Option<String>,
     files_to_create: Vec<PathBuf>,
     files_to_modify: Vec<PathBuf>,
@@ -704,10 +428,9 @@ struct AgentAssignmentBuilder {
 }
 
 impl AgentAssignmentBuilder {
-    fn new(agent_name: String, worktree_name: String) -> Self {
+    fn new(agent_name: String) -> Self {
         Self {
             agent_name,
-            worktree_name,
             objective: None,
             files_to_create: Vec::new(),
             files_to_modify: Vec::new(),
@@ -728,7 +451,6 @@ impl AgentAssignmentBuilder {
             files_to_modify: self.files_to_modify,
             files_to_read: self.files_to_read,
             task_type,
-            worktree_name: self.worktree_name,
             depends_on: self.depends_on,
         })
     }
@@ -762,7 +484,7 @@ mod tests {
 - **Files to create**: src/test.ts
 "#;
 
-        let assignments = parse_assignments(content, "task-001").unwrap();
+        let assignments = parse_assignments(content).unwrap();
         assert_eq!(assignments.len(), 2);
         assert_eq!(assignments[0].agent_name, "codex");
         assert_eq!(assignments[0].task_type, TaskType::ReadOnly);

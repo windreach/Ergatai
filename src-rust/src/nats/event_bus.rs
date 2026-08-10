@@ -126,6 +126,161 @@ impl EventBus {
         self.connection.subscribe("ergatai.agent.message.*").await
     }
 
+    // ── File Access Control publish helpers ──
+
+    /// Publish a file access request
+    pub async fn publish_file_access_request(&self, payload: &FileAccessRequestPayload) -> ErgataiResult<()> {
+        self.publish("ergatai.file.access.request", payload).await
+    }
+
+    /// Publish a file access grant (to specific agent)
+    pub async fn publish_file_access_grant(&self, payload: &FileAccessGrantPayload) -> ErgataiResult<()> {
+        let subject = format!("ergatai.file.access.grant.{}", sanitize_agent_name(&payload.agent_id));
+        self.publish(&subject, payload).await
+    }
+
+    /// Publish a file access deny (to specific agent)
+    pub async fn publish_file_access_deny(&self, payload: &FileAccessDenyPayload) -> ErgataiResult<()> {
+        let subject = format!("ergatai.file.access.deny.{}", sanitize_agent_name(&payload.agent_id));
+        self.publish(&subject, payload).await
+    }
+
+    /// Publish a file access escalation (to main agent)
+    pub async fn publish_file_access_escalate(&self, payload: &FileAccessEscalatePayload, main_agent_id: &str) -> ErgataiResult<()> {
+        let subject = format!("ergatai.file.access.escalate.{}", sanitize_agent_name(main_agent_id));
+        self.publish(&subject, payload).await
+    }
+
+    /// Publish a file access approval (from main agent)
+    pub async fn publish_file_access_approve(&self, payload: &FileAccessApprovePayload) -> ErgataiResult<()> {
+        self.publish("ergatai.file.access.approve", payload).await
+    }
+
+    /// Publish a file access rejection (from main agent)
+    pub async fn publish_file_access_reject(&self, payload: &FileAccessRejectPayload) -> ErgataiResult<()> {
+        self.publish("ergatai.file.access.reject", payload).await
+    }
+
+    /// Publish a file access release
+    pub async fn publish_file_access_release(&self, payload: &FileAccessReleasePayload) -> ErgataiResult<()> {
+        self.publish("ergatai.file.access.release", payload).await
+    }
+
+    /// Publish a file access revocation (to specific agent)
+    pub async fn publish_file_access_revoke(&self, payload: &FileAccessRevokePayload, agent_id: &str) -> ErgataiResult<()> {
+        let subject = format!("ergatai.file.access.revoke.{}", sanitize_agent_name(agent_id));
+        self.publish(&subject, payload).await
+    }
+
+    /// Publish a file conflict arbitration request (to main agent)
+    pub async fn publish_file_conflict_arbitrate(&self, payload: &FileConflictArbitratePayload, main_agent_id: &str) -> ErgataiResult<()> {
+        let subject = format!("ergatai.file.conflict.arbitrate.{}", sanitize_agent_name(main_agent_id));
+        self.publish(&subject, payload).await
+    }
+
+    /// Publish a file ready notification
+    pub async fn publish_file_ready(&self, payload: &FileReadyPayload) -> ErgataiResult<()> {
+        // Use file path hash for subject (avoid special characters)
+        let file_hash = format!("{:x}", md5::compute(payload.file_path.as_bytes()));
+        let subject = format!("ergatai.file.ready.{}", file_hash);
+        self.publish(&subject, payload).await
+    }
+
+    /// Publish a file error notification
+    pub async fn publish_file_error(&self, payload: &FileErrorPayload) -> ErgataiResult<()> {
+        let file_hash = format!("{:x}", md5::compute(payload.file_path.as_bytes()));
+        let subject = format!("ergatai.file.error.{}", file_hash);
+        self.publish(&subject, payload).await
+    }
+
+    /// Publish a system token issuance
+    pub async fn publish_system_token(&self, payload: &SystemTokenPayload) -> ErgataiResult<()> {
+        let subject = format!("ergatai.system.token.{}", sanitize_agent_name(&payload.agent_id));
+        self.publish(&subject, payload).await
+    }
+
+    // ── File Access Control subscribe helpers ──
+
+    /// Subscribe to file access requests (FileLockManager)
+    pub async fn subscribe_file_access_request(&self) -> ErgataiResult<async_nats::Subscriber> {
+        self.connection.subscribe("ergatai.file.access.request").await
+    }
+
+    /// Subscribe to file access grants for a specific agent
+    pub async fn subscribe_file_access_grant(&self, agent_id: &str) -> ErgataiResult<async_nats::Subscriber> {
+        let subject = format!("ergatai.file.access.grant.{}", sanitize_agent_name(agent_id));
+        self.connection.subscribe(&subject).await
+    }
+
+    /// Subscribe to ALL file access grants (wildcard)
+    pub async fn subscribe_all_file_access_grants(&self) -> ErgataiResult<async_nats::Subscriber> {
+        self.connection.subscribe("ergatai.file.access.grant.*").await
+    }
+
+    /// Subscribe to file access denials for a specific agent
+    pub async fn subscribe_file_access_deny(&self, agent_id: &str) -> ErgataiResult<async_nats::Subscriber> {
+        let subject = format!("ergatai.file.access.deny.{}", sanitize_agent_name(agent_id));
+        self.connection.subscribe(&subject).await
+    }
+
+    /// Subscribe to file access escalations (Main Agent)
+    pub async fn subscribe_file_access_escalate(&self, main_agent_id: &str) -> ErgataiResult<async_nats::Subscriber> {
+        let subject = format!("ergatai.file.access.escalate.{}", sanitize_agent_name(main_agent_id));
+        self.connection.subscribe(&subject).await
+    }
+
+    /// Subscribe to file access approvals (FileLockManager)
+    pub async fn subscribe_file_access_approve(&self) -> ErgataiResult<async_nats::Subscriber> {
+        self.connection.subscribe("ergatai.file.access.approve").await
+    }
+
+    /// Subscribe to file access rejections (FileLockManager)
+    pub async fn subscribe_file_access_reject(&self) -> ErgataiResult<async_nats::Subscriber> {
+        self.connection.subscribe("ergatai.file.access.reject").await
+    }
+
+    /// Subscribe to file access releases (FileLockManager)
+    pub async fn subscribe_file_access_release(&self) -> ErgataiResult<async_nats::Subscriber> {
+        self.connection.subscribe("ergatai.file.access.release").await
+    }
+
+    /// Subscribe to file access revocations for a specific agent
+    pub async fn subscribe_file_access_revoke(&self, agent_id: &str) -> ErgataiResult<async_nats::Subscriber> {
+        let subject = format!("ergatai.file.access.revoke.{}", sanitize_agent_name(agent_id));
+        self.connection.subscribe(&subject).await
+    }
+
+    /// Subscribe to file conflict arbitration (Main Agent)
+    pub async fn subscribe_file_conflict_arbitrate(&self, main_agent_id: &str) -> ErgataiResult<async_nats::Subscriber> {
+        let subject = format!("ergatai.file.conflict.arbitrate.{}", sanitize_agent_name(main_agent_id));
+        self.connection.subscribe(&subject).await
+    }
+
+    /// Subscribe to file ready notifications for a specific file
+    pub async fn subscribe_file_ready(&self, file_path: &str) -> ErgataiResult<async_nats::Subscriber> {
+        let file_hash = format!("{:x}", md5::compute(file_path.as_bytes()));
+        let subject = format!("ergatai.file.ready.{}", file_hash);
+        self.connection.subscribe(&subject).await
+    }
+
+    /// Subscribe to file error notifications for a specific file
+    pub async fn subscribe_file_error(&self, file_path: &str) -> ErgataiResult<async_nats::Subscriber> {
+        let file_hash = format!("{:x}", md5::compute(file_path.as_bytes()));
+        let subject = format!("ergatai.file.error.{}", file_hash);
+        self.connection.subscribe(&subject).await
+    }
+
+    /// Subscribe to system token issuance for a specific agent
+    pub async fn subscribe_system_token(&self, agent_id: &str) -> ErgataiResult<async_nats::Subscriber> {
+        let subject = format!("ergatai.system.token.{}", sanitize_agent_name(agent_id));
+        self.connection.subscribe(&subject).await
+    }
+
+    /// Subscribe to ALL file access events (wildcard)
+    pub async fn subscribe_all_file_access_events(&self) -> ErgataiResult<async_nats::Subscriber> {
+        self.connection.subscribe("ergatai.file.>").await
+    }
+
     // ── Generic publish ──
 
     /// Publish a typed payload to a subject (JSON serialized)

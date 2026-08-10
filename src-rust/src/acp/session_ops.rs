@@ -9,13 +9,14 @@ use agent_client_protocol::schema::v1::{
     SetSessionModeRequest, TextContent,
 };
 use agent_client_protocol::schema::ProtocolVersion;
-use agent_client_protocol::{AcpAgent, AcpAgentConfig, Agent, Client, ConnectionTo};
+use agent_client_protocol::{AcpAgent, Agent, Client, ConnectionTo};
 
 use super::manager::{event_tx, manager, SessionCommand, SessionEvent, SessionHandle, SessionKind};
-use crate::agent::config::AgentConfig;
+use crate::agent::config::{build_acp_agent_config, AgentConfig};
 use crate::error::{ErgataiError, ErgataiResult};
 
 const SESSION_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_TURN_DURATION: Duration = Duration::from_secs(7200); // 2 hours (matches sdk_session.rs)
 
 /// 通过临时连接执行一次性 ACP 操作。
 /// 连接 → 初始化 → 执行闭包 → 断开。
@@ -24,10 +25,7 @@ where
     F: FnOnce(ConnectionTo<Agent>) -> Fut,
     Fut: std::future::Future<Output = ErgataiResult<T>>,
 {
-    let mut agent_config = AcpAgentConfig::new(&config.command).args(config.args.clone());
-    for (k, v) in &config.env {
-        agent_config = agent_config.env(k, v);
-    }
+    let agent_config = build_acp_agent_config(config);
     let agent = AcpAgent::new(agent_config);
 
     let result = Client.builder()
@@ -105,10 +103,7 @@ pub fn load_session_task(
 
     let session_id_tx = std::sync::Arc::new(std::sync::Mutex::new(Some(session_id_tx)));
 
-    let mut agent_config = AcpAgentConfig::new(&config.command).args(config.args.clone());
-    for (k, v) in &config.env {
-        agent_config = agent_config.env(k, v);
-    }
+    let agent_config = build_acp_agent_config(&config);
     let agent = AcpAgent::new(agent_config);
 
     tokio::spawn({
@@ -134,8 +129,13 @@ pub fn load_session_task(
                             agent_client_protocol::schema::v1::SessionUpdate::UsageUpdate(_) => "usage_update",
                             _ => "other",
                         };
-                        let data = serde_json::to_value(&notification.update)
-                            .unwrap_or(serde_json::Value::Null);
+                        let data = match serde_json::to_value(&notification.update) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                tracing::warn!(error = %e, update_type = %event_type, "Failed to serialize session update");
+                                serde_json::Value::Null
+                            }
+                        };
                         let _ = evt_tx.send(SessionEvent {
                             session_id,
                             event_type: event_type.to_string(),
@@ -171,7 +171,13 @@ pub fn load_session_task(
                     let session_id_clone = session_id.clone();
                     let cwd_clone = cwd.clone();
                     move |connection: ConnectionTo<Agent>| async move {
-                        let tx = tx_for_closure.lock().ok().and_then(|mut g| g.take());
+                        let tx = match tx_for_closure.lock() {
+                            Ok(mut g) => g.take(),
+                            Err(e) => {
+                                tracing::error!("session_id_tx mutex poisoned: {}", e);
+                                None
+                            }
+                        };
 
                         // 1. 初始化
                         let init_result = timeout(SESSION_TIMEOUT, connection
@@ -216,7 +222,7 @@ pub fn load_session_task(
                         loop {
                             match cmd_rx.recv().await {
                                 Some(SessionCommand::SendPrompt { text, reply_tx }) => {
-                                    let result = timeout(SESSION_TIMEOUT, connection
+                                    let result = timeout(MAX_TURN_DURATION, connection
                                         .send_request(agent_client_protocol::schema::v1::PromptRequest::new(
                                             session_id_arc.clone(),
                                             vec![ContentBlock::Text(TextContent::new(text))],
@@ -263,10 +269,15 @@ pub fn load_session_task(
                                 }
                                 Some(SessionCommand::Close) => {
                                     // 通过 ACP 协议发送 CloseSessionRequest
-                                    let _ = timeout(SESSION_TIMEOUT, connection
+                                    match timeout(SESSION_TIMEOUT, connection
                                         .send_request(CloseSessionRequest::new(session_id_arc.clone()))
                                         .block_task())
-                                        .await;
+                                        .await
+                                    {
+                                        Ok(Ok(_)) => {}
+                                        Ok(Err(e)) => tracing::warn!(error = %e, "CloseSession request failed"),
+                                        Err(_) => tracing::warn!("CloseSession request timed out"),
+                                    }
 
                                     let _ = evt_tx.send(SessionEvent {
                                         session_id: session_id_clone.clone(),
@@ -277,10 +288,15 @@ pub fn load_session_task(
                                     break;
                                 }
                                 None => {
-                                    let _ = timeout(std::time::Duration::from_secs(5), connection
+                                    match timeout(std::time::Duration::from_secs(5), connection
                                         .send_request(CloseSessionRequest::new(session_id_arc.clone()))
                                         .block_task())
-                                        .await;
+                                        .await
+                                    {
+                                        Ok(Ok(_)) => {}
+                                        Ok(Err(e)) => tracing::warn!(error = %e, "CloseSession request failed"),
+                                        Err(_) => tracing::warn!("CloseSession request timed out"),
+                                    }
                                     manager().unregister(&session_id_clone).await;
                                     break;
                                 }
@@ -293,7 +309,14 @@ pub fn load_session_task(
 
             if let Err(e) = result {
                 tracing::error!("Load session connection failed: {}", e);
-                if let Some(tx) = session_id_tx.lock().ok().and_then(|mut g| g.take()) {
+                let tx = match session_id_tx.lock() {
+                    Ok(mut g) => g.take(),
+                    Err(e) => {
+                        tracing::error!("session_id_tx mutex poisoned: {}", e);
+                        None
+                    }
+                };
+                if let Some(tx) = tx {
                     let _ = tx.send(Err(ErgataiError::network(format!("Connection failed: {}", e))));
                 }
             }
@@ -314,10 +337,7 @@ pub fn resume_session_task(
 
     let session_id_tx = std::sync::Arc::new(std::sync::Mutex::new(Some(session_id_tx)));
 
-    let mut agent_config = AcpAgentConfig::new(&config.command).args(config.args.clone());
-    for (k, v) in &config.env {
-        agent_config = agent_config.env(k, v);
-    }
+    let agent_config = build_acp_agent_config(&config);
     let agent = AcpAgent::new(agent_config);
 
     tokio::spawn({
@@ -343,8 +363,13 @@ pub fn resume_session_task(
                             agent_client_protocol::schema::v1::SessionUpdate::UsageUpdate(_) => "usage_update",
                             _ => "other",
                         };
-                        let data = serde_json::to_value(&notification.update)
-                            .unwrap_or(serde_json::Value::Null);
+                        let data = match serde_json::to_value(&notification.update) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                tracing::warn!(error = %e, update_type = %event_type, "Failed to serialize session update");
+                                serde_json::Value::Null
+                            }
+                        };
                         let _ = evt_tx.send(SessionEvent {
                             session_id,
                             event_type: event_type.to_string(),
@@ -380,7 +405,13 @@ pub fn resume_session_task(
                     let session_id_clone = session_id.clone();
                     let cwd_clone = cwd.clone();
                     move |connection: ConnectionTo<Agent>| async move {
-                        let tx = tx_for_closure.lock().ok().and_then(|mut g| g.take());
+                        let tx = match tx_for_closure.lock() {
+                            Ok(mut g) => g.take(),
+                            Err(e) => {
+                                tracing::error!("session_id_tx mutex poisoned: {}", e);
+                                None
+                            }
+                        };
 
                         // 1. 初始化
                         let init_result = timeout(SESSION_TIMEOUT, connection
@@ -425,7 +456,7 @@ pub fn resume_session_task(
                         loop {
                             match cmd_rx.recv().await {
                                 Some(SessionCommand::SendPrompt { text, reply_tx }) => {
-                                    let result = timeout(SESSION_TIMEOUT, connection
+                                    let result = timeout(MAX_TURN_DURATION, connection
                                         .send_request(agent_client_protocol::schema::v1::PromptRequest::new(
                                             session_id_arc.clone(),
                                             vec![ContentBlock::Text(TextContent::new(text))],
@@ -468,10 +499,15 @@ pub fn resume_session_task(
                                     )));
                                 }
                                 Some(SessionCommand::Close) => {
-                                    let _ = timeout(SESSION_TIMEOUT, connection
+                                    match timeout(SESSION_TIMEOUT, connection
                                         .send_request(CloseSessionRequest::new(session_id_arc.clone()))
                                         .block_task())
-                                        .await;
+                                        .await
+                                    {
+                                        Ok(Ok(_)) => {}
+                                        Ok(Err(e)) => tracing::warn!(error = %e, "CloseSession request failed"),
+                                        Err(_) => tracing::warn!("CloseSession request timed out"),
+                                    }
                                     let _ = evt_tx.send(SessionEvent {
                                         session_id: session_id_clone.clone(),
                                         event_type: "closed".to_string(),
@@ -481,10 +517,15 @@ pub fn resume_session_task(
                                     break;
                                 }
                                 None => {
-                                    let _ = timeout(std::time::Duration::from_secs(5), connection
+                                    match timeout(std::time::Duration::from_secs(5), connection
                                         .send_request(CloseSessionRequest::new(session_id_arc.clone()))
                                         .block_task())
-                                        .await;
+                                        .await
+                                    {
+                                        Ok(Ok(_)) => {}
+                                        Ok(Err(e)) => tracing::warn!(error = %e, "CloseSession request failed"),
+                                        Err(_) => tracing::warn!("CloseSession request timed out"),
+                                    }
                                     manager().unregister(&session_id_clone).await;
                                     break;
                                 }
@@ -497,7 +538,14 @@ pub fn resume_session_task(
 
             if let Err(e) = result {
                 tracing::error!("Resume session connection failed: {}", e);
-                if let Some(tx) = session_id_tx.lock().ok().and_then(|mut g| g.take()) {
+                let tx = match session_id_tx.lock() {
+                    Ok(mut g) => g.take(),
+                    Err(e) => {
+                        tracing::error!("session_id_tx mutex poisoned: {}", e);
+                        None
+                    }
+                };
+                if let Some(tx) = tx {
                     let _ = tx.send(Err(ErgataiError::network(format!("Connection failed: {}", e))));
                 }
             }

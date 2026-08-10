@@ -727,12 +727,10 @@ export function AgentsSubChatsSidebar({
       newId = crypto.randomUUID()
     } else {
       // Local mode: create sub-chat in DB first to get the real ID
-      // Map new AgentMode to legacy backend mode (auto/team → agent for now)
-      const backendMode = defaultAgentMode === "plan" ? "plan" : "agent"
       const newSubChat = await trpcClient.chats.createSubChat.mutate({
         chatId: parentChatId,
         name: "New Chat",
-        mode: backendMode,
+        mode: defaultAgentMode,
       })
       newId = newSubChat.id
     }

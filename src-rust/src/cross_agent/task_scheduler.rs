@@ -477,7 +477,6 @@ impl TaskScheduler {
                 files_to_modify: vec![],
                 files_to_read: vec![],
                 task_type: super::task_coordinator::TaskType::CreateNew,
-                worktree_name: payload.task_id.clone(),
                 depends_on: vec![],
             }],
             merge_strategy: "none".to_string(),

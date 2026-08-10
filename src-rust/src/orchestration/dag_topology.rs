@@ -73,6 +73,11 @@ pub struct TaskNode {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<u64>,
 
+    /// Optional: file access scope (glob pattern, e.g., "src/**/*.rs")
+    /// Phase 3: For file access control - defines which files this task can access
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+
     /// Optional: metadata (for AI to attach context)
     #[serde(default)]
     pub metadata: HashMap<String, String>,
@@ -367,6 +372,7 @@ impl TaskNode {
             retry_count: 0,
             priority: None,
             timeout: None,
+            scope: None,  // Phase 3: File access scope (default: None)
             metadata: HashMap::new(),
         }
     }
