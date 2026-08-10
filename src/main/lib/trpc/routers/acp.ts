@@ -306,7 +306,10 @@ export const acpRouter = router({
         prompt: z.string(),
         cwd: z.string(),
         projectPath: z.string().optional(),
-        mode: z.enum(["auto", "plan"]).default("auto"),
+        mode: z
+          .union([z.literal("agent"), z.literal("team"), z.enum(["auto", "plan"])])
+          .transform((v): "auto" | "plan" => (v === "agent" || v === "team" ? "auto" : v))
+          .default("auto"),
         sessionId: z.string().optional(),
         model: z.string().optional(),
         maxThinkingTokens: z.number().optional(),

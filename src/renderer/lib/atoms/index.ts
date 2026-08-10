@@ -511,6 +511,19 @@ if (typeof window !== "undefined") {
     localStorage.removeItem(oldKey)
     console.log("[atoms] Migrated isPlanMode to defaultAgentMode:", wasInPlanMode ? "plan" : "auto")
   }
+  // Migrate legacy "agent"/"team" values in the new key → "auto"
+  const currentRaw = localStorage.getItem(newKey)
+  if (currentRaw !== null) {
+    try {
+      const parsed = JSON.parse(currentRaw)
+      if (parsed === "agent" || parsed === "team") {
+        localStorage.setItem(newKey, JSON.stringify("auto"))
+        console.log("[atoms] Migrated legacy mode value in defaultAgentMode:", parsed, "→ auto")
+      }
+    } catch {
+      // Ignore malformed values
+    }
+  }
 }
 
 export const defaultAgentModeAtom = atomWithStorage<AgentModeType>(

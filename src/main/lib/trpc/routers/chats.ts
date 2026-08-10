@@ -4,6 +4,12 @@ import * as fs from "fs/promises"
 import * as path from "path"
 import simpleGit from "simple-git"
 import { z } from "zod"
+
+// Coerce legacy mode values ("agent" / "team") to "auto"
+const modeSchema = z
+  .union([z.literal("agent"), z.literal("team"), z.enum(["auto", "plan"])])
+  .transform((v): "auto" | "plan" => (v === "agent" || v === "team" ? "auto" : v))
+  .default("auto")
 import { getAuthManager } from "../../../index"
 import {
   trackPRCreated,
@@ -309,7 +315,7 @@ export const chatsRouter = router({
         baseBranch: z.string().optional(), // Branch to base the worktree off
         branchType: z.enum(["local", "remote"]).optional(), // Whether baseBranch is local or remote
         useWorktree: z.boolean().default(true), // If false, work directly in project dir
-        mode: z.enum(["auto", "plan"]).default("auto"),
+        mode: modeSchema,
         runtimeId: z.string().optional(), // ACP runtime binding (e.g., "claude", "codex")
       }),
     )
@@ -720,7 +726,7 @@ export const chatsRouter = router({
       z.object({
         chatId: z.string(),
         name: z.string().optional(),
-        mode: z.enum(["auto", "plan"]).default("auto"),
+        mode: modeSchema,
         runtimeId: z.string().optional(), // ACP runtime ID (e.g., "claude", "goose", "codex")
       }),
     )
@@ -1036,7 +1042,7 @@ export const chatsRouter = router({
    * Update sub-chat mode
    */
   updateSubChatMode: publicProcedure
-    .input(z.object({ id: z.string(), mode: z.enum(["plan", "auto"]) }))
+    .input(z.object({ id: z.string(), mode: modeSchema }))
     .mutation(({ input }) => {
       const db = getDatabase()
       return db
