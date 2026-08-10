@@ -211,6 +211,11 @@ pub fn load_session_task(
                             kind: SessionKind::Chat,
                         }).await;
 
+                        // Register with file access control for single-agent mode detection
+                        if let Ok(lock_manager) = crate::file_access::get_lock_manager(&cwd_clone).await {
+                            lock_manager.register_session();
+                        }
+
                         // 4. 通知 NAPI
                         if let Some(tx) = tx {
                             let _ = tx.send(Ok(session_id_clone.clone()));
@@ -284,6 +289,10 @@ pub fn load_session_task(
                                         event_type: "closed".to_string(),
                                         data: serde_json::Value::Null,
                                     });
+                                    // Unregister from file access control (single-agent mode detection)
+                                    if let Ok(lock_manager) = crate::file_access::get_lock_manager(&cwd_clone).await {
+                                        lock_manager.unregister_session();
+                                    }
                                     manager().unregister(&session_id_clone).await;
                                     break;
                                 }
@@ -296,6 +305,10 @@ pub fn load_session_task(
                                         Ok(Ok(_)) => {}
                                         Ok(Err(e)) => tracing::warn!(error = %e, "CloseSession request failed"),
                                         Err(_) => tracing::warn!("CloseSession request timed out"),
+                                    }
+                                    // Unregister from file access control (single-agent mode detection)
+                                    if let Ok(lock_manager) = crate::file_access::get_lock_manager(&cwd_clone).await {
+                                        lock_manager.unregister_session();
                                     }
                                     manager().unregister(&session_id_clone).await;
                                     break;
@@ -445,6 +458,11 @@ pub fn resume_session_task(
                             kind: SessionKind::Chat,
                         }).await;
 
+                        // Register with file access control for single-agent mode detection
+                        if let Ok(lock_manager) = crate::file_access::get_lock_manager(&cwd_clone).await {
+                            lock_manager.register_session();
+                        }
+
                         // 4. 通知 NAPI
                         if let Some(tx) = tx {
                             let _ = tx.send(Ok(session_id_clone.clone()));
@@ -513,6 +531,10 @@ pub fn resume_session_task(
                                         event_type: "closed".to_string(),
                                         data: serde_json::Value::Null,
                                     });
+                                    // Unregister from file access control (single-agent mode detection)
+                                    if let Ok(lock_manager) = crate::file_access::get_lock_manager(&cwd_clone).await {
+                                        lock_manager.unregister_session();
+                                    }
                                     manager().unregister(&session_id_clone).await;
                                     break;
                                 }
@@ -525,6 +547,10 @@ pub fn resume_session_task(
                                         Ok(Ok(_)) => {}
                                         Ok(Err(e)) => tracing::warn!(error = %e, "CloseSession request failed"),
                                         Err(_) => tracing::warn!("CloseSession request timed out"),
+                                    }
+                                    // Unregister from file access control (single-agent mode detection)
+                                    if let Ok(lock_manager) = crate::file_access::get_lock_manager(&cwd_clone).await {
+                                        lock_manager.unregister_session();
                                     }
                                     manager().unregister(&session_id_clone).await;
                                     break;

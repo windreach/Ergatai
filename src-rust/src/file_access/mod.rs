@@ -21,6 +21,7 @@ pub mod lock_mode;
 pub mod renewal;
 pub mod audit;
 pub mod performance;
+pub mod config;
 
 pub use lock_manager::FileLockManager;
 pub use token::{FileLock, FileMode, FileToken, SystemToken, TokenId, TokenStatus};
@@ -32,4 +33,5 @@ pub use lock_mode::LockModeManager;
 pub use renewal::RenewalManager;
 pub use audit::{AuditManager, AuditEntry, FileAccessStats, SecurityReport};
 pub use performance::{LockCache, BatchOperations, AsyncLockQueue, AsyncLockRequest};
+pub use config::{ConfigManager, FileAccessConfig};
 pub use manager::{init_file_access, get_lock_manager, get_snapshot_manager, get_watchdog, shutdown_file_access};

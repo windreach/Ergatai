@@ -88,6 +88,13 @@ Agent A (WRITE lock on src/foo.rs)
 Agent B (等待 WRITE lock → 获取 → 继续)
 ```
 
+**两级 Token 体系：**
+
+| Token 类型 | 级别 | 生命周期 | 用途 |
+|-----------|------|---------|------|
+| `SystemToken` | Session 级 | Agent 会话全程 | Agent 准入凭证，绑定 agent_id + session_id |
+| `FileToken` | 操作级 | 单次文件操作 | 关联 system_token_id，定义 scope + mode（READ/WRITE/ADMIN） |
+
 **Token 权限模型：**
 
 | Mode | 权限 | 用途 |
@@ -121,9 +128,10 @@ Agent B (等待 WRITE lock → 获取 → 继续)
 
 Tables:
 - system_tokens   → Agent session 级别的 token（id, agent_id, session_id, expires_at, heartbeat_at）
+- file_tokens     → 操作级 token（id, agent_id, session_id, system_token_id, scope, mode, reason, approved_by）
 - file_locks      → 文件级锁（token_id, file_path, mode, status, expires_at）
 - audit_log       → 审计日志（timestamp, agent_id, action, file_path, mode）
-- snapshots       → Git 快照记录（file_path, git_hash, agent_id, created_at）
+- snapshots       → Git 快照记录（file_path, git_hash, created_by, created_at）
 ```
 
 **Watchdog 渐进式超时：**
@@ -135,7 +143,46 @@ Tables:
 └── 第 3 次超时：回收所有锁 + 广播 file.error 事件
 ```
 
-Agent 执行长任务时可调用 `mark_busy(session_id, duration_secs)` 延长超时。
+Agent 执行长任务时可调用 `mark_busy(session_id, duration_secs)` 延长超时。任务完成后调用 `clear_busy(session_id)` 清除忙状态。
+
+**单 Agent 模式自动跳过：**
+
+当系统中只有一个 ACP session 活跃时，不存在文件竞争风险，自动绕过审批流程和 WRITE 冲突仲裁：
+
+```
+register_session() → active_session_count++
+unregister_session() → active_session_count--
+is_single_agent_mode() → count==1 且持续 ≥5 秒（滞后防抖）→ true
+```
+
+- **滞后防抖**：count 变化时重置计时器，必须连续 5 秒 count==1 才进入单 agent 模式
+- **绕过范围**：WRITE 冲突检查 + ADMIN 审批请求
+- **故障安全**：Mutex 中毒时返回 false（不绕过，走完整审批）
+
+**审批流程（Escalation）：**
+
+当 ADMIN 模式权限请求到达且不在单 agent 模式时：
+
+```
+Agent 请求 ADMIN 权限
+    ↓
+acquire_file_locks_for_permission() 检测 needs_approval
+    ↓
+创建 oneshot channel → 存入 approval_waiters HashMap
+    ↓
+通过 NATS/事件通知 TypeScript 前端 → 主 Agent 或用户审批
+    ↓
+file_access_respond_approval(request_id, approved, approved_by) → 唤醒 oneshot
+    ↓
+acquire_lock 继续执行 or 返回 PermissionDenied
+```
+
+**READ_LATEST 语义：**
+
+`read_latest(file_path)` 等待任何进行中的 WRITE 完成后读取文件最新内容：
+- 如果文件当前有 WRITE 锁 → 注册 waiter，等待 WRITE 释放后通知
+- 如果文件无 WRITE 锁 → 直接读取
+- 超时机制防止无限等待（默认 30 秒）
 
 #### NATS 文件事件流（Phase 7）
 
@@ -204,30 +251,35 @@ Agent B 通过 ACP 收到消息
 #### 文件访问 NAPI 接口
 
 ```typescript
-// 初始化（应用启动时）
-file_access_init(project_root: string): void
+// 初始化 / 关闭（多项目支持，project_id 隔离）
+file_access_init(project_id: string, project_root: string): Promise<void>
+file_access_shutdown(project_id: string): Promise<void>
 
-// Token 管理
-file_access_create_token(agent_id, session_id, project_root, mode, scope): FileToken
-file_access_acquire_lock(token, file_path): void
-file_access_release_lock(token_id, file_path): void
-file_access_heartbeat(token_id): void
+// 两级 Token 管理
+file_access_register_system_token(
+  project_id, agent_id, session_id, project_root, ttl_secs, heartbeat_interval_secs
+): Promise<string>  // 返回 system_token_id
 
-// 锁模式切换
-file_access_upgrade_to_write(token_id, file_path): void
-file_access_downgrade_to_read(token_id, file_path): void
+file_access_request_token(
+  project_id, agent_id, session_id, scope, mode, reason?, ttl_secs, heartbeat_interval_secs
+): Promise<string>  // 返回 file_token_id（自动查找 SystemToken）
+
+// 文件锁操作
+file_access_acquire_lock(project_id, token_id, file_path): Promise<void>
+file_access_release_lock(project_id, token_id, file_path): Promise<void>
+
+// READ_LATEST：等待 WRITE 完成后读最新内容
+file_access_read_latest(project_id, file_path): Promise<Buffer>
 
 // 快照
-file_access_create_snapshot(file_path, agent_id): string  // 返回 git hash
-file_access_get_latest_snapshot(file_path): string | null
+file_access_create_snapshot(project_id, file_path, agent_id): Promise<string>  // 返回 git hash
 
-// 审计
-file_access_generate_security_report(): FileAccessStats
-file_access_get_audit_log(agent_id?, action?, limit?): AuditEntry[]
+// 忙状态管理（任务感知心跳）
+file_access_mark_busy(project_id, session_id, duration_secs): Promise<void>
+file_access_clear_busy(project_id, session_id): Promise<void>
 
-// 监控
-file_access_mark_busy(session_id, duration_secs): void
-file_access_get_active_locks(file_path?): ActiveLock[]
+// 审批响应
+file_access_respond_approval(request_id, approved, approved_by, reason?): Promise<void>
 ```
 
 ### Rust 后端 (`src-rust/`)
@@ -242,7 +294,7 @@ src-rust/src/
 │
 ├── file_access/             # 文件访问控制（多 Agent 安全隔离）
 │   ├── token.rs             # FileToken / SystemToken 数据结构
-│   ├── lock_manager.rs      # SQLite 持久化锁管理
+│   ├── lock_manager.rs      # SQLite 持久化锁管理 + 单 Agent 模式检测
 │   ├── lock_mode.rs         # 锁升级/降级
 │   ├── renewal.rs           # Token/Lock 续期
 │   ├── audit.rs             # 安全审计日志
@@ -253,7 +305,7 @@ src-rust/src/
 │   ├── sensitive_paths.rs   # 敏感路径检测
 │   ├── performance.rs       # 锁缓存 + 批量操作优化
 │   ├── file_events_consumer.rs # JetStream 事件消费者
-│   ├── manager.rs           # 全局 FileLockManager 初始化
+│   ├── manager.rs           # 全局多项目管理（per-project FileLockManager）
 │   └── mod.rs               # 模块导出
 │
 ├── nats/                    # NATS 集成（事件总线）
@@ -262,7 +314,7 @@ src-rust/src/
 │   ├── task_queue.rs        # JetStream WorkQueue
 │   ├── events.rs            # 事件 payload 定义（DAG + 文件访问）
 │   ├── event_bus.rs         # 类型化 pub/sub 封装
-│   ├── file_access_streams.rs # FILE_EVENTS JetStream 流定义
+│   ├── file_access_streams.rs # 4 个 JetStream 流定义（REQUESTS/GRANTS/ESCALATIONS/EVENTS）
 │   └── manager.rs           # 全局 NATS 状态 (init/shutdown)
 │
 ├── orchestration/           # DAG 编排
@@ -275,7 +327,8 @@ src-rust/src/
 │   ├── dag_scheduler.rs     # DAG 事件驱动调度器
 │   ├── task_scheduler.rs    # 任务调度 (NATS consumer / 轮询 fallback)
 │   ├── agent_launcher.rs    # Agent 启动 + 完成检测
-│   └── task_coordinator.rs  # Plan 文件解析 + AgentAssignment
+│   ├── task_coordinator.rs  # Plan 文件解析 + AgentAssignment
+│   └── message_router.rs    # Agent 间消息路由（@mention 检测 + NATS 转发）
 │
 ├── agent/                   # Agent 发现与配置
 │   ├── config.rs            # Agent JSON 配置加载（含路径遍历防护）
@@ -301,24 +354,28 @@ ergatai.
 ├── dag.node_complete.{node}         # AgentLauncher → DagScheduler
 ├── dag.node_failed.{node}           # AgentLauncher → DagScheduler
 ├── dag.complete.{dag_id}            # DAG 全部完成
-├── agent.spawned.{agent_id}         # Agent 启动
-├── agent.stopped.{agent_id}         # Agent 停止
 ├── agent.message.{agent_id}         # Agent 间消息路由（@mention）
 │
-├── file.access.request              # 文件访问请求
-├── file.access.grant                # 文件访问授权
-├── file.access.deny                 # 文件访问拒绝
-├── file.access.approve              # 管理员审批通过
-├── file.access.revoke               # 文件访问撤销
-├── file.ready.{md5_hash}            # 文件 WRITE 完成通知 (JetStream)
-└── file.error.{md5_hash}            # 文件 WRITE 失败通知 (JetStream)
+├── file.access.request              # 文件访问请求 (JetStream: FILE_ACCESS_REQUESTS)
+├── file.access.grant.{agent}        # 文件访问授权 (JetStream: FILE_ACCESS_GRANTS)
+├── file.access.deny.{agent}         # 文件访问拒绝
+├── file.access.escalate.{agent}     # 升级到主 Agent 审批 (JetStream: FILE_ACCESS_ESCALATIONS)
+├── file.access.revoke.{agent}       # 文件访问撤销
+├── file.access.release.{agent}      # 文件锁释放通知
+├── file.conflict.arbitrate.{agent}  # WRITE 冲突仲裁结果
+├── file.ready.{md5_hash}            # 文件 WRITE 完成通知 (JetStream: FILE_EVENTS)
+├── file.error.{md5_hash}            # 文件 WRITE 失败通知 (JetStream: FILE_EVENTS)
+└── system.token.{agent_id}          # System Token 注册/续期通知
 ```
 
 **JetStream Streams：**
 
 | Stream | Subjects | Retention | 用途 |
 |--------|----------|-----------|------|
-| `FILE_EVENTS` | `ergatai.file.ready.*`, `ergatai.file.error.*` | WorkQueue | 文件事件持久化，保证不丢失 |
+| `FILE_ACCESS_REQUESTS` | `ergatai.file.access.request` | WorkQueue | 文件访问请求持久化（1h TTL） |
+| `FILE_ACCESS_GRANTS` | `ergatai.file.access.grant.*` | WorkQueue | 授权结果持久化，保证 Agent 断连后仍能收到 |
+| `FILE_ACCESS_ESCALATIONS` | `ergatai.file.access.escalate.*` | WorkQueue | 审批升级持久化（30min TTL，匹配审批超时） |
+| `FILE_EVENTS` | `ergatai.file.ready.*`, `ergatai.file.error.*` | WorkQueue | 文件事件持久化，保证 READ_LATEST 等待者不丢通知 |
 | `TASK_QUEUE` | `ergatai.task.submit.*` | WorkQueue | 任务分发，Agent 消费 |
 
 ### DAG 编排流程
@@ -472,13 +529,18 @@ cargo test --lib agent::config          # Agent 配置加载 (28 测试)
 
 **已完成 (Phase 6)：文件访问控制**
 - ✅ Token 权限模型（READ / WRITE / ADMIN）+ 路径范围匹配
-- ✅ SQLite 持久化锁管理（事务保证原子性）
+- ✅ 两级 Token 体系（SystemToken 准入 + FileToken 操作）
+- ✅ SQLite 持久化锁管理（事务保证原子性，5 张表）
 - ✅ 锁升级/降级 + 续期 + 心跳
 - ✅ Watchdog 渐进式超时 + 自动回收
 - ✅ Git snapshot 快照（WRITE 前自动创建，用于回滚）
-- ✅ 安全审计日志 + 敏感路径检测
+- ✅ 安全审计日志 + 敏感路径检测 + 审计清理 API
 - ✅ 冲突仲裁（WRITE 冲突优先级决策）
 - ✅ 性能优化（锁缓存 + BinaryHeap 优先队列 + 批量操作）
+- ✅ 单 Agent 模式自动跳过（5 秒滞后防抖，绕过审批 + 冲突检查）
+- ✅ 审批流程（escalate → respond_approval 交互链）
+- ✅ READ_LATEST 等待者模型（WRITE 完成后通知读者）
+- ✅ 多项目支持（per-project 独立 lock_manager / snapshot_manager / watchdog）
 
 **已完成 (Phase 7)：NATS 文件事件流**
 - ✅ FILE_EVENTS JetStream 流（WorkQueue retention）

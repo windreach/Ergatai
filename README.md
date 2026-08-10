@@ -69,7 +69,7 @@ The system operates on two independent communication layers:
 | Layer | Protocol | Direction | Purpose |
 |---|---|---|---|
 | **Agent ↔ Ergatai** | ACP (JSON-RPC over stdio) | Bidirectional | Prompts, responses, tool calls, approval requests |
-| **Ergatani Internal** | NATS (JetStream) | Event stream | Task routing, completion events, file notifications |
+| **Ergatai Internal** | NATS (JetStream) | Event stream | Task routing, completion events, file notifications |
 
 Agents never communicate directly with each other. All inter-agent messaging is relayed through Ergatai via NATS, ensuring centralized control and observability.
 
@@ -143,20 +143,33 @@ An embedded `nats-server` subprocess provides reliable internal messaging:
 | Stream | Subjects | Retention | Purpose |
 |---|---|---|---|
 | `TASK_QUEUE` | `ergatai.task.submit.*` | WorkQueue | Task distribution to agents |
-| `FILE_EVENTS` | `ergatai.file.ready.*`, `ergatai.file.error.*` | WorkQueue | File completion notifications |
-| DAG Events | `ergatai.dag.*` | Limits | Orchestration state transitions |
+| `FILE_ACCESS_REQUESTS` | `ergatai.file.access.request` | WorkQueue | File access request persistence |
+| `FILE_ACCESS_GRANTS` | `ergatai.file.access.grant.*` | WorkQueue | Token grant delivery guarantee |
+| `FILE_ACCESS_ESCALATIONS` | `ergatai.file.access.escalate.*` | WorkQueue | Approval escalation persistence |
+| `FILE_EVENTS` | `ergatai.file.ready.*`, `ergatai.file.error.*` | WorkQueue | File completion/error notifications |
+
+DAG events (`ergatai.dag.*`) use core NATS pub/sub without JetStream persistence.
 
 **Subject Naming Convention**
 
 ```
 ergatai.
-├── task.submit.{agent}         # Task submission
-├── task.complete.{task_id}     # Task completion
-├── dag.node_complete.{node}    # DAG node finished
-├── dag.complete.{dag_id}       # Entire DAG finished
-├── agent.message.{agent_id}    # Inter-agent messaging
-├── file.ready.{hash}           # File WRITE completed
-└── file.error.{hash}           # File WRITE failed
+├── task.submit.{agent}              # Task submission
+├── task.complete.{task_id}          # Task completion
+├── task.fail.{task_id}              # Task failure
+├── dag.node_complete.{node}         # DAG node finished
+├── dag.node_failed.{node}           # DAG node failed
+├── dag.complete.{dag_id}            # Entire DAG finished
+├── agent.message.{agent_id}         # Inter-agent messaging (@mention relay)
+├── file.access.request              # File access request
+├── file.access.grant.{agent}        # File access granted
+├── file.access.deny.{agent}         # File access denied
+├── file.access.escalate.{agent}     # Escalated to main agent for approval
+├── file.access.revoke.{agent}       # File access revoked
+├── file.conflict.arbitrate.{agent}  # WRITE conflict arbitration result
+├── file.ready.{hash}                # File WRITE completed (JetStream)
+├── file.error.{hash}                # File WRITE failed (JetStream)
+└── system.token.{agent_id}          # System token registration/renewal
 ```
 
 Every component implements dual-mode operation: NATS when available, direct function calls as fallback.
@@ -242,15 +255,15 @@ bun run db:push      # Push schema (dev only)
 
 ## Project Status
 
-| Phase | Description | Status |
-|---|---|---|
-| **Phase 1** | NATS infrastructure + Pool task queue | ✅ Complete |
-| **Phase 2** | Template engine + data flow pipeline | ✅ Complete |
-| **Phase 3** | DAG event-driven scheduling | ✅ Complete |
-| **Phase 4** | Markdown orchestration enhancement | ✅ Complete |
-| **Phase 5** | Agent message routing (@mention relay) | ✅ Complete |
-| **Phase 6** | File access control + lock management | ✅ Complete |
-| **Phase 7** | NATS file event streams (JetStream) | ✅ Complete |
+| Phase | Description | Key Deliverables | Status |
+|---|---|---|---|
+| **Phase 1** | NATS infrastructure + Pool task queue | Embedded nats-server, JetStream TASK_QUEUE, dual-mode (VecDeque + JetStream) | ✅ Complete |
+| **Phase 2** | Template engine + data flow pipeline | `{{global.*}}` / `{{node.*}}` rendering, DagContext | ✅ Complete |
+| **Phase 3** | DAG event-driven scheduling | NATS pub/sub triggers, direct-call fallback | ✅ Complete |
+| **Phase 4** | Markdown orchestration enhancement | input/output/retry/timeout/priority fields | ✅ Complete |
+| **Phase 5** | Agent message routing | `message_router.rs`, @mention detection, `ergatai.agent.message.*` | ✅ Complete |
+| **Phase 6** | File access control | Two-level tokens, SQLite locks, watchdog, snapshots, conflict arbitration, single-agent bypass, approval flow, READ_LATEST | ✅ Complete |
+| **Phase 7** | NATS file event streams | 4 JetStream streams, FileEventsConsumer, typed EventBus publish | ✅ Complete |
 
 ## Community
 

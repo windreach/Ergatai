@@ -15,6 +15,7 @@ use tracing::{info, warn};
 
 use crate::error::ErgataiResult;
 use crate::file_access::{FileLockManager, SnapshotManager, Watchdog, WatchdogConfig};
+use crate::nats::get_nats_connection;
 
 /// Per-project file access control state
 struct ProjectFileAccess {
@@ -40,6 +41,7 @@ fn file_access_manager() -> &'static RwLock<FileAccessManagerState> {
 ///
 /// Creates lock database, snapshot manager, and watchdog.
 /// Idempotent - calling multiple times is safe.
+/// If NATS is initialized, enables multi-agent approval flow.
 pub async fn init_file_access(project_id: &str, project_root: &PathBuf) -> ErgataiResult<()> {
     let manager = file_access_manager();
     let mut manager = manager.write().await;
@@ -61,8 +63,23 @@ pub async fn init_file_access(project_id: &str, project_root: &PathBuf) -> Ergat
     })?;
     tokio::fs::create_dir_all(lock_db_parent).await?;
 
-    // Create FileLockManager
-    let lock_manager = FileLockManager::new(&lock_db_path, project_root.clone())?;
+    // Try to get NATS client (optional, None = degraded mode)
+    let nats_client = if let Some(conn) = get_nats_connection().await {
+        info!(project_id = project_id, "NATS available, enabling multi-agent approval flow");
+        Some(Arc::new(conn.client().clone()))
+    } else {
+        warn!(project_id = project_id, "NATS not available, running in degraded mode (no multi-agent approval)");
+        None
+    };
+
+    // Create FileLockManager with optional NATS client
+    let lock_manager = FileLockManager::new(&lock_db_path, project_root.clone(), nats_client)?;
+
+    // If NATS is available, subscribe to approval responses
+    if let Err(e) = lock_manager.subscribe_to_nats().await {
+        warn!(project_id = project_id, error = %e, "Failed to subscribe to NATS approval subjects, continuing without approval flow");
+    }
+
     let lock_manager = Arc::new(lock_manager);
 
     // Create SnapshotManager
@@ -148,6 +165,9 @@ pub async fn shutdown_file_access(project_id: &str) -> ErgataiResult<()> {
     let mut manager = manager.write().await;
 
     if let Some(project) = manager.projects.remove(project_id) {
+        // Stop NATS subscription first
+        project.lock_manager.shutdown_nats_subscription();
+
         // Stop watchdog
         let mut watchdog = project.watchdog.write().await;
         watchdog.stop()?;

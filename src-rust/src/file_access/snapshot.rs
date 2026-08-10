@@ -282,6 +282,109 @@ impl SnapshotManager {
 
         Ok(deleted)
     }
+
+    /// Cleanup snapshots to enforce disk size limit
+    ///
+    /// Removes oldest snapshots until total size is under the limit.
+    /// This is a best-effort cleanup - git objects may not be immediately freed.
+    ///
+    /// # Arguments
+    /// * `conn` - SQLite connection
+    /// * `max_bytes` - Maximum total size in bytes (e.g., 500MB = 500_000_000)
+    ///
+    /// # Returns
+    /// Number of snapshots deleted
+    pub fn cleanup_snapshots_by_size(
+        conn: &rusqlite::Connection,
+        max_bytes: u64,
+    ) -> Result<usize, ErgataiError> {
+        // Get all snapshots ordered by creation date (oldest first)
+        let mut stmt = conn.prepare(
+            "SELECT id, file_path, created_at FROM snapshots ORDER BY created_at ASC"
+        )?;
+
+        let snapshots: Vec<(String, String, String)> = stmt.query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?.collect::<Result<Vec<_>, _>>()?;
+
+        // Estimate total size (approximate: 10KB per snapshot average)
+        // In production, this could be enhanced to query git object sizes
+        let estimated_size_per_snapshot = 10_000u64;
+        let total_estimated = snapshots.len() as u64 * estimated_size_per_snapshot;
+
+        if total_estimated <= max_bytes {
+            debug!(
+                snapshot_count = snapshots.len(),
+                estimated_bytes = total_estimated,
+                max_bytes = max_bytes,
+                "Snapshot size within limit, no cleanup needed"
+            );
+            return Ok(0);
+        }
+
+        // Calculate how many to delete
+        let target_count = (max_bytes / estimated_size_per_snapshot) as usize;
+        let to_delete = snapshots.len().saturating_sub(target_count);
+
+        if to_delete == 0 {
+            return Ok(0);
+        }
+
+        // Delete oldest snapshots
+        let ids_to_delete: Vec<String> = snapshots.iter()
+            .take(to_delete)
+            .map(|(id, _, _)| id.clone())
+            .collect();
+
+        let mut deleted = 0;
+        for id in &ids_to_delete {
+            let count = conn.execute(
+                "DELETE FROM snapshots WHERE id = ?1",
+                rusqlite::params![id],
+            )?;
+            deleted += count;
+        }
+
+        info!(
+            deleted = deleted,
+            estimated_bytes_before = total_estimated,
+            max_bytes = max_bytes,
+            "Cleaned up snapshots to enforce size limit"
+        );
+
+        Ok(deleted)
+    }
+
+    /// Run git garbage collection to free unreferenced objects
+    ///
+    /// This should be run periodically (e.g., daily) to reclaim disk space
+    /// from deleted snapshots.
+    pub fn run_git_gc(repo: &Repository) -> Result<(), ErgataiError> {
+        use std::process::Command;
+
+        let repo_path = repo.path().parent()
+            .ok_or_else(|| ErgataiError::internal("Failed to get repo path"))?;
+
+        // Run git gc --auto
+        let output = Command::new("git")
+            .arg("gc")
+            .arg("--auto")
+            .current_dir(repo_path)
+            .output()
+            .map_err(|e| {
+                ErgataiError::internal(format!("Failed to run git gc: {}", e))
+            })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(ErgataiError::internal(format!(
+                "git gc failed: {}", stderr
+            )));
+        }
+
+        info!("Git garbage collection completed");
+        Ok(())
+    }
 }
 
 #[cfg(test)]

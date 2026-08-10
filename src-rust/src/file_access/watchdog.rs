@@ -505,7 +505,7 @@ mod tests {
         let project_root = temp_dir.path().to_path_buf();
 
         let lock_manager = Arc::new(
-            FileLockManager::new(&db_path, project_root).unwrap(),
+            FileLockManager::new(&db_path, project_root, None).unwrap(),
         );
 
         (temp_dir, lock_manager)
