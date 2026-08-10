@@ -13,6 +13,20 @@ use tokio::sync::{Mutex, oneshot};
 use super::task_coordinator::{AgentAssignment, TaskCoordinator, TaskPlan};
 use crate::acp::manager::{manager as session_manager, SessionCommand, SessionKind};
 
+/// Detect if the instruction needs DAG orchestration guide
+/// Returns true if keywords suggest multi-agent collaboration is needed
+fn needs_dag_guide(instruction: &str) -> bool {
+    let lower = instruction.to_lowercase();
+
+    // Chinese keywords
+    let zh_keywords = ["多agent", "多代理", "协作", "并行", "编排", "分布式任务"];
+    // English keywords
+    let en_keywords = ["multi-agent", "orchestrate", "parallel", "dag", "distributed task"];
+
+    zh_keywords.iter().any(|k| lower.contains(k))
+        || en_keywords.iter().any(|k| lower.contains(k))
+}
+
 /// Agent session status
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum AgentStatus {
@@ -372,9 +386,12 @@ Write your results in markdown:
                 anyhow::anyhow!("Session {} lost immediately after creation", session_id)
             })?;
 
-        // Build the full instruction with appropriate prompt context
+        // Build the full instruction with layered prompt context
+        // Base prompt (always injected): identity statement to prevent hallucination
+        let base_prompt = include_str!("../../prompts/base.md");
+
         let full_instruction = if node_id.is_some() {
-            // DAG task: inject orchest prompt (teaches agent how to collaborate)
+            // DAG node task: inject full orchestration guide
             let dag_prompt = include_str!("../../prompts/dag_orchestration.md");
 
             // Get list of available agents
@@ -388,11 +405,10 @@ Write your results in markdown:
             // Replace {{agent_list}} placeholder
             let dag_prompt = dag_prompt.replace("{{agent_list}}", &agent_list);
 
-            // Combine: DAG orchestration guide + actual task instruction
-            format!("{}\n\n---\n\n{}", dag_prompt, instruction)
-        } else {
-            // Regular session (possibly primary agent): inject generation prompt
-            // (teaches agent how to generate DAG when needed)
+            // Combine: base + DAG orchestration guide + actual task instruction
+            format!("{}\n\n{}\n\n---\n\n{}", base_prompt, dag_prompt, instruction)
+        } else if needs_dag_guide(instruction) {
+            // Primary agent + DAG keywords detected: inject generation guide
             let gen_prompt = include_str!("../../prompts/dag_generation.md");
 
             // Get list of available agents
@@ -406,8 +422,11 @@ Write your results in markdown:
             // Replace {{agent_list}} placeholder
             let gen_prompt = gen_prompt.replace("{{agent_list}}", &agent_list);
 
-            // Combine: DAG generation guide + user instruction
-            format!("{}\n\n---\n\n{}", gen_prompt, instruction)
+            // Combine: base + DAG generation guide + user instruction
+            format!("{}\n\n{}\n\n---\n\n{}", base_prompt, gen_prompt, instruction)
+        } else {
+            // Regular conversation: only base prompt (minimal overhead)
+            format!("{}\n\n---\n\n{}", base_prompt, instruction)
         };
 
         // Send instruction as prompt
