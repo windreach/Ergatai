@@ -40,12 +40,21 @@ src-rust/target/
 *.node
 !index.*.node
 
-# AI plan docs (local-only, not tracked)
+# AI tool artifacts & config (local-only)
 .plan/
 .architecture/
 .codegraph/
-
-# Task documents
 .tasks/
+.superpowers/
+.deprecated-engines/
+.codegraphignore
+.rustsafe-*.md
+ocr-review-report.md
+
+# AI-generated docs (local-only)
+docs/superpowers/
+openspec/
+AGENTS.md
+
 network-demo/target/
 src-rust/serde::Deserialize
