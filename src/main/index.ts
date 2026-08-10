@@ -1019,6 +1019,7 @@ if (gotTheLock) {
     } catch (error) {
       console.error("[App] Failed to initialize agent configs:", error)
     }
+    }
 
     // Create main window
     createMainWindow()
