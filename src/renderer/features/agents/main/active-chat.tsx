@@ -3145,13 +3145,12 @@ const ChatViewInner = memo(function ChatViewInner({
   // Handle plan approval - sends "Build plan" message and switches to agent mode
   const handleApprovePlan = useCallback(() => {
     // Update store mode synchronously BEFORE sending (transport reads from store)
-    // Note: "agent" mode is now "auto" in the new three-mode system
+    // Note: legacy "agent" mode renamed to "auto"
     useAgentSubChatStore.getState().updateSubChatMode(subChatId, "auto")
 
     // Sync mode to database for sidebar indicator (getPendingPlanApprovals)
-    // Backend still uses "agent", will be updated in Plan 8
     if (!subChatId.startsWith("temp-")) {
-      updateSubChatModeMutation.mutate({ subChatId, mode: "agent" })
+      updateSubChatModeMutation.mutate({ subChatId, mode: "auto" })
     }
 
     // Update atomFamily state (for UI) - this also syncs to store via effect

@@ -21,7 +21,6 @@ import {
   PlanIcon,
   SearchIcon,
   SparkleIcon,
-  TeamIcon,
 } from "../../../components/ui/icons"
 import {
   Popover,
@@ -505,7 +504,7 @@ export function NewChatForm({
   const [modeTooltip, setModeTooltip] = useState<{
     visible: boolean
     position: { top: number; left: number }
-    mode: "agent" | "plan"
+    mode: "auto" | "plan"
   } | null>(null)
   const tooltipTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const hasShownTooltipRef = useRef(false)
@@ -1370,7 +1369,7 @@ export function NewChatForm({
             return
           case "agent":
             if (agentMode === "plan") {
-              setAgentMode("agent")
+              setAgentMode("auto")
             }
             return
         }
@@ -1711,12 +1710,10 @@ export function NewChatForm({
                         <DropdownMenuTrigger className="flex items-center gap-1.5 px-2 py-1 text-sm text-muted-foreground hover:text-foreground transition-[background-color,color] duration-150 ease-out rounded-md hover:bg-muted/50 outline-offset-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring/70">
                           {agentMode === "plan" ? (
                             <PlanIcon className="h-3.5 w-3.5" />
-                          ) : agentMode === "team" ? (
-                            <TeamIcon className="h-3.5 w-3.5" />
                           ) : (
                             <SparkleIcon className="h-3.5 w-3.5" />
                           )}
-                          <span>{agentMode === "plan" ? "Plan" : agentMode === "team" ? "Team" : "Auto"}</span>
+                          <span>{agentMode === "plan" ? "Plan" : "Auto"}</span>
                           <IconChevronDown className="h-3 w-3 shrink-0 opacity-50" />
                         </DropdownMenuTrigger>
                         <DropdownMenuContent
@@ -1729,12 +1726,6 @@ export function NewChatForm({
                             <DropdownMenuItem
                               key={mode}
                               onClick={() => {
-                                if (mode === "team") {
-                                  // Team mode not yet implemented
-                                  toast("Team mode coming soon")
-                                  setModeDropdownOpen(false)
-                                  return
-                                }
                                 if (tooltipTimeoutRef.current) {
                                   clearTimeout(tooltipTimeoutRef.current)
                                   tooltipTimeoutRef.current = null
@@ -1782,12 +1773,10 @@ export function NewChatForm({
                               <div className="flex items-center gap-2">
                                 {mode === "plan" ? (
                                   <PlanIcon className="w-4 h-4 text-muted-foreground" />
-                                ) : mode === "team" ? (
-                                  <TeamIcon className="w-4 h-4 text-muted-foreground" />
                                 ) : (
                                   <SparkleIcon className="w-4 h-4 text-muted-foreground" />
                                 )}
-                                <span>{mode === "plan" ? "Plan" : mode === "team" ? "Team" : "Auto"}</span>
+                                <span>{mode === "plan" ? "Plan" : "Auto"}</span>
                               </div>
                               {agentMode === mode && (
                                 <CheckIcon className="h-3.5 w-3.5 ml-auto shrink-0" />
@@ -1812,8 +1801,6 @@ export function NewChatForm({
                                 <span>
                                   {modeTooltip.mode === "plan"
                                     ? "Create a plan before making changes"
-                                    : modeTooltip.mode === "team"
-                                    ? "Coordinate multiple agents on a task (coming soon)"
                                     : "AI decides whether to plan or act directly"}
                                 </span>
                               </div>
@@ -2124,7 +2111,7 @@ export function NewChatForm({
                       { type: "text", text: prompt },
                     ],
                     useWorktree: false,
-                    mode: "agent",
+                    mode: "auto",
                   })
                 }
               }}

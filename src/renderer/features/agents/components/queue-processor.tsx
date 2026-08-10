@@ -129,7 +129,7 @@ export function QueueProcessor() {
         const subChatMeta = useAgentSubChatStore
           .getState()
           .allSubChats.find((sc) => sc.id === subChatId)
-        const mode = subChatMeta?.mode || "agent"
+        const mode = subChatMeta?.mode || "auto"
 
         // Track message sent
         trackMessageSent({

@@ -306,7 +306,7 @@ export const acpRouter = router({
         prompt: z.string(),
         cwd: z.string(),
         projectPath: z.string().optional(),
-        mode: z.enum(["plan", "agent"]).default("agent"),
+        mode: z.enum(["auto", "plan"]).default("auto"),
         sessionId: z.string().optional(),
         model: z.string().optional(),
         maxThinkingTokens: z.number().optional(),
@@ -635,7 +635,7 @@ export const acpRouter = router({
   // ── Session Configuration ──
 
   /**
-   * Set session mode (e.g., "plan", "agent")
+   * Set session mode (e.g., "plan", "auto")
    */
   setSessionMode: publicProcedure
     .input(z.object({

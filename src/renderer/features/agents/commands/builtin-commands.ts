@@ -74,7 +74,7 @@ export const BUILTIN_SLASH_COMMANDS: SlashCommandOption[] = [
     id: "builtin:agent",
     name: "agent",
     command: "/agent",
-    description: "Switch mode (Auto/Plan/Team)",
+    description: "Switch mode (Auto/Plan)",
     category: "builtin",
   },
   {

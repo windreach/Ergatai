@@ -458,7 +458,7 @@ function ProjectDetail({ projectId }: { projectId: string }) {
                     name: "Worktree Setup",
                     initialMessageParts: [{ type: "text", text: prompt }],
                     useWorktree: false,
-                    mode: "agent",
+                    mode: "auto",
                   })
                 }
               }}

@@ -76,7 +76,7 @@ function ChatIconWithBadge({
 }: {
   isLoading: boolean
   hasUnseenChanges: boolean
-  lastMode: "plan" | "agent"
+  lastMode: "plan" | "auto"
   isSelected?: boolean
   gitOwner?: string | null
   gitProvider?: string | null
@@ -147,7 +147,7 @@ export function AgentChatCard({
   const lastChatModes = useAtomValue(lastChatModesAtom)
 
   const hasUnseenChanges = unseenChanges.has(chat.id)
-  const lastMode = lastChatModes.get(chat.id) || "agent"
+  const lastMode = lastChatModes.get(chat.id) || "auto"
   // isLoading is already derived from loadingSubChatsAtom (local tracking)
   const actualIsLoading = isLoading
 

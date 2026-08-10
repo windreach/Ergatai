@@ -24,7 +24,7 @@ export interface KanbanCardData {
   chatName: string | null
   projectName: string | null
   branch: string | null
-  mode: "plan" | "agent"
+  mode: "plan" | "auto"
   status: SubChatStatus
   hasUnseenChanges: boolean
   hasPendingPlan: boolean

@@ -96,7 +96,7 @@ const SearchHistoryPopover = memo(forwardRef<SearchHistoryPopoverRef, SearchHist
     const timeAgo = formatTimeAgo(subChat.updated_at || subChat.created_at)
     const isLoading = loadingSubChats.has(subChat.id)
     const hasUnseen = subChatUnseenChanges.has(subChat.id)
-    const mode = subChat.mode || "agent"
+    const mode = subChat.mode || "auto"
     const hasPendingQuestion = pendingQuestionsMap.has(subChat.id)
     const hasPendingPlan = pendingPlanApprovals.has(subChat.id)
 
@@ -712,8 +712,8 @@ export function SubChatSelector({
                 const hasUnseen = subChatUnseenChanges.has(subChat.id)
                 const hasTabsToRight = index < openSubChats.length - 1
                 const isPinned = pinnedSubChatIds.includes(subChat.id)
-                // Get mode from sub-chat itself (defaults to "agent")
-                const mode = subChat.mode || "agent"
+                // Get mode from sub-chat itself (defaults to "auto")
+                const mode = subChat.mode || "auto"
                 // Check if this chat is waiting for user answer
                 const hasPendingQuestion = pendingQuestionsMap.has(subChat.id)
                 // Check if this chat has a pending plan approval

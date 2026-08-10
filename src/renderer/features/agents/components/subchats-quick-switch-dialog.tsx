@@ -38,7 +38,7 @@ function SubChatCard({
   fileChanges: SubChatFileChange[]
   onMouseEnter?: () => void
 }) {
-  const mode = subChat.mode || "agent"
+  const mode = subChat.mode || "auto"
   const timeAgo = formatTimeAgo(subChat.updated_at || subChat.created_at)
 
   // Calculate totals from file changes

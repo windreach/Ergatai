@@ -225,13 +225,12 @@ export function AgentsPreferencesTab() {
           >
             <SelectTrigger className="w-auto px-2">
               <span className="text-xs">
-                {defaultAgentMode === "auto" ? "Auto" : defaultAgentMode === "plan" ? "Plan" : "Team"}
+                {defaultAgentMode === "auto" ? "Auto" : "Plan"}
               </span>
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="auto">Auto</SelectItem>
               <SelectItem value="plan">Plan</SelectItem>
-              <SelectItem value="team">Team</SelectItem>
             </SelectContent>
           </Select>
         </div>

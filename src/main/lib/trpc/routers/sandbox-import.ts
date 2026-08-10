@@ -243,7 +243,7 @@ export const sandboxImportRouter = router({
 					.values({
 						chatId: chat.id,
 						name: remoteSubChat.name,
-						mode: remoteSubChat.mode === "plan" ? "plan" : "agent",
+						mode: remoteSubChat.mode === "plan" ? "plan" : "auto",
 						messages: JSON.stringify(messagesArray),
 						// Set sessionId if we have matching Claude session (enables resume)
 						...(matchingSession && { sessionId: messageSessionId }),
@@ -278,7 +278,7 @@ export const sandboxImportRouter = router({
 					.values({
 						chatId: chat.id,
 						name: "Main",
-						mode: "agent",
+						mode: "auto",
 						messages: "[]",
 					})
 					.run();
@@ -607,7 +607,7 @@ export const sandboxImportRouter = router({
 					.values({
 						chatId: chat.id,
 						name: remoteSubChat.name,
-						mode: remoteSubChat.mode === "plan" ? "plan" : "agent",
+						mode: remoteSubChat.mode === "plan" ? "plan" : "auto",
 						messages: JSON.stringify(messagesArray),
 						// Set sessionId if we have matching Claude session (enables resume)
 						...(matchingSession && { sessionId: messageSessionId }),
@@ -647,7 +647,7 @@ export const sandboxImportRouter = router({
 					.values({
 						chatId: chat.id,
 						name: "Main",
-						mode: "agent",
+						mode: "auto",
 						messages: "[]",
 					})
 					.run();

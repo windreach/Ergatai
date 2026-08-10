@@ -29,7 +29,7 @@ export function AgentPlanSidebar({
   onClose,
   onBuildPlan,
   refetchTrigger,
-  mode = "agent",
+  mode = "auto",
 }: AgentPlanSidebarProps) {
   // View mode: rendered markdown or plaintext
   const [viewMode, setViewMode] = useState<"rendered" | "plaintext">("rendered")

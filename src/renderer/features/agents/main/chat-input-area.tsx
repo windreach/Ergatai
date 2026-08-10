@@ -1,7 +1,7 @@
 "use client"
 
 import { useAtom, useAtomValue, useSetAtom } from "jotai"
-import { ChevronDown, RefreshCw, Users } from "lucide-react"
+import { ChevronDown, RefreshCw } from "lucide-react"
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { createPortal } from "react-dom"
 
@@ -1355,13 +1355,11 @@ export const ChatInputArea = memo(function ChatInputArea({
                       <button className="flex items-center gap-1.5 px-2 py-1 text-sm text-muted-foreground hover:text-foreground transition-colors rounded-md hover:bg-muted/50 outline-offset-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring/70">
                         {subChatMode === "plan" ? (
                           <PlanIcon className="h-3.5 w-3.5 shrink-0" />
-                        ) : subChatMode === "team" ? (
-                          <Users className="h-3.5 w-3.5 shrink-0" />
                         ) : (
                           <AgentIcon className="h-3.5 w-3.5 shrink-0" />
                         )}
                         <span className="truncate">
-                          {subChatMode === "plan" ? "Plan" : subChatMode === "team" ? "Team" : "Auto"}
+                          {subChatMode === "plan" ? "Plan" : "Auto"}
                         </span>
                         <ChevronDown className="h-3 w-3 shrink-0 opacity-50" />
                       </button>
@@ -1482,56 +1480,6 @@ export const ChatInputArea = memo(function ChatInputArea({
                           <CheckIcon className="h-3.5 w-3.5 ml-auto shrink-0" />
                         )}
                       </DropdownMenuItem>
-                      <DropdownMenuItem
-                        onClick={() => {
-                          // Team mode is a placeholder - show coming soon toast
-                          toast.info("Team mode coming soon")
-                          setModeDropdownOpen(false)
-                        }}
-                        className="justify-between gap-2 opacity-60"
-                        onMouseEnter={(e) => {
-                          if (tooltipTimeoutRef.current) {
-                            clearTimeout(tooltipTimeoutRef.current)
-                            tooltipTimeoutRef.current = null
-                          }
-                          const rect = e.currentTarget.getBoundingClientRect()
-                          const showTooltip = () => {
-                            setModeTooltip({
-                              visible: true,
-                              position: {
-                                top: rect.top,
-                                left: rect.right + 8,
-                              },
-                              mode: "team",
-                            })
-                            hasShownTooltipRef.current = true
-                            tooltipTimeoutRef.current = null
-                          }
-                          if (hasShownTooltipRef.current) {
-                            showTooltip()
-                          } else {
-                            tooltipTimeoutRef.current = setTimeout(
-                              showTooltip,
-                              1000,
-                            )
-                          }
-                        }}
-                        onMouseLeave={() => {
-                          if (tooltipTimeoutRef.current) {
-                            clearTimeout(tooltipTimeoutRef.current)
-                            tooltipTimeoutRef.current = null
-                          }
-                          setModeTooltip(null)
-                        }}
-                      >
-                        <div className="flex items-center gap-2">
-                          <Users className="w-4 h-4 text-muted-foreground" />
-                          <span>Team</span>
-                        </div>
-                        {subChatMode === "team" && (
-                          <CheckIcon className="h-3.5 w-3.5 ml-auto shrink-0" />
-                        )}
-                      </DropdownMenuItem>
                     </DropdownMenuContent>
                     {modeTooltip?.visible &&
                       createPortal(
@@ -1550,9 +1498,7 @@ export const ChatInputArea = memo(function ChatInputArea({
                             <span>
                               {modeTooltip.mode === "auto"
                                 ? "System decides when to plan or apply changes"
-                                : modeTooltip.mode === "plan"
-                                ? "Create a plan before making changes"
-                                : "Multi-agent collaboration (coming soon)"}
+                                : "Create a plan before making changes"}
                             </span>
                           </div>
                         </div>,

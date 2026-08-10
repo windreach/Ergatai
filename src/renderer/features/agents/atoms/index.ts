@@ -3,18 +3,18 @@ import { atomFamily, atomWithStorage } from "jotai/utils"
 import { atomWithWindowStorage } from "../../../lib/window-storage"
 import type { FileMentionOption } from "../mentions/agents-mentions-editor"
 
-// Agent mode type - three modes: auto (default), plan (read-only), team (placeholder)
-export type AgentMode = "auto" | "plan" | "team"
+// Agent mode type - two modes: auto (default), plan (read-only)
+export type AgentMode = "auto" | "plan"
 
 // Ordered list of modes - Shift+Tab cycles through these
-export const AGENT_MODES: AgentMode[] = ["auto", "plan", "team"]
+export const AGENT_MODES: AgentMode[] = ["auto", "plan"]
 
-// Migration: old "agent" → new "auto"
+// Migration: old "agent" → new "auto", old "team" → "auto"
 const MIGRATE_MODE: Record<string, AgentMode> = {
   agent: "auto",
   plan: "plan",
   auto: "auto",
-  team: "team",
+  team: "auto",
 }
 
 // Migrate mode value from storage

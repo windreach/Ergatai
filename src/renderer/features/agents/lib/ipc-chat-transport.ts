@@ -129,7 +129,7 @@ type IPCChatTransportConfig = {
   subChatId: string
   cwd: string
   projectPath?: string // Original project path for MCP config lookup (when using worktrees)
-  mode: "plan" | "agent"
+  mode: "plan" | "auto"
   model?: string
   agentName?: string
 }
@@ -194,8 +194,8 @@ export class IPCChatTransport implements ChatTransport<UIMessage> {
         .allSubChats.find((subChat) => subChat.id === this.config.subChatId)
         ?.mode as AgentMode | undefined) || this.config.mode
 
-    // Convert frontend AgentMode ("auto"|"plan"|"team") to backend mode ("plan"|"agent")
-    const backendMode: "plan" | "agent" = currentMode === "plan" ? "plan" : "agent"
+    // Mode is now unified between frontend and backend: "auto" | "plan"
+    const mode = currentMode || "auto"
 
     // Stream debug logging
     const subId = this.config.subChatId.slice(-8)
@@ -217,7 +217,7 @@ export class IPCChatTransport implements ChatTransport<UIMessage> {
             prompt,
             cwd: this.config.cwd,
             projectPath: this.config.projectPath, // Original project path for MCP config lookup
-            mode: backendMode,
+            mode: mode,
             sessionId,
             agentName,
             ...(maxThinkingTokens && { maxThinkingTokens }),
