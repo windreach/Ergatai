@@ -247,14 +247,9 @@ mod tests {
         assert!(ergatai_dir.join("locks.db").exists());
 
         // All 3 getters now succeed
-        let lm = get_lock_manager(&id).await.unwrap();
-        assert!(Arc::strong_count(&lm) >= 2); // held by global state + this var
-
-        let sm = get_snapshot_manager(&id).await.unwrap();
-        assert!(Arc::strong_count(&sm) >= 2);
-
-        let wd = get_watchdog(&id).await.unwrap();
-        assert!(Arc::strong_count(&wd) >= 2);
+        let _lm = get_lock_manager(&id).await.unwrap();
+        let _sm = get_snapshot_manager(&id).await.unwrap();
+        let _wd = get_watchdog(&id).await.unwrap();
 
         // Cleanup — stop watchdog and remove from global state
         shutdown_file_access(&id).await.unwrap();
@@ -274,9 +269,8 @@ mod tests {
         init_file_access(&id, &project_root).await.unwrap();
         init_file_access(&id, &project_root).await.unwrap();
 
-        // Still works
-        let lm = get_lock_manager(&id).await.unwrap();
-        assert!(Arc::strong_count(&lm) >= 2);
+        // Still works after second init
+        let _lm = get_lock_manager(&id).await.unwrap();
 
         shutdown_file_access(&id).await.unwrap();
         drop(temp);

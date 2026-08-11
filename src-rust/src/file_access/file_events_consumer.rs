@@ -176,7 +176,9 @@ impl FileEventsConsumer {
     /// Consume the next file event from the queue
     ///
     /// Returns None if no events are available.
-    /// The event must be acknowledged with `ack()` or it will be redelivered.
+    /// Messages are acknowledged internally before returning — the caller does not
+    /// need to call `ack()` separately. Malformed payloads are ACKed before returning
+    /// Err because they cannot succeed on retry.
     pub async fn consume_next(&self) -> ErgataiResult<Option<FileEvent>> {
         let stream = self.connection.jetstream().get_stream(&self.stream_name).await
             .map_err(|e| ErgataiError::NatsError(format!("Stream {} not found: {}", self.stream_name, e)))?;

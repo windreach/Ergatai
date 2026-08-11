@@ -344,11 +344,16 @@ mod tests {
     }
 
     // ─── Lock-based violation detection ────────────────────────────
+    //
+    // NOTE: `log_violation()` is currently a no-op stub (only emits warn!),
+    // so these tests verify that handle_event returns Ok for both locked and
+    // unlocked files. Once log_violation writes to audit_log (see TODO in
+    // watcher.rs:190), these tests should be extended to assert on audit entries.
 
     #[tokio::test]
-    async fn test_handle_event_unlocked_file_is_violation() {
+    async fn test_handle_event_unlocked_file_returns_ok() {
         let (_temp, manager, root) = setup();
-        // main.rs is not locked — should log a violation (but still return Ok)
+        // main.rs is not locked — handle_event returns Ok (violation logged via warn!)
         let event = make_event(
             EventKind::Modify(notify::event::ModifyKind::Data(
                 notify::event::DataChange::Content,
@@ -357,11 +362,10 @@ mod tests {
         );
         let result = FileSystemWatcher::handle_event(&manager, &root, event).await;
         assert!(result.is_ok());
-        // The violation is logged via warn! — functionally it still succeeds
     }
 
     #[tokio::test]
-    async fn test_handle_event_locked_file_is_not_violation() {
+    async fn test_handle_event_locked_file_returns_ok() {
         let (_temp, manager, root) = setup();
 
         // Create a token and acquire a lock on main.rs
