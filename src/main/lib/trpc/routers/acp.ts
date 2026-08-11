@@ -30,6 +30,7 @@ const {
   acpPollEvents,
   acpRespondPermission,
   acpListSessions,
+  acpListAgentSessions,
   acpResumeSession,
   acpDeleteSession,
   acpGetPersistedSessions,
@@ -789,6 +790,19 @@ export const acpRouter = router({
   poolList: publicProcedure.query(async () => {
     try {
       return await acpPoolList()
+    } catch (err) {
+      throw new Error(String(err))
+    }
+  }),
+
+  /**
+   * List all active ACP agent sessions with status
+   * Returns session info including agent name, status, and metadata
+   */
+  listAgentSessions: publicProcedure.query(async () => {
+    try {
+      const sessions = await acpListAgentSessions()
+      return sessions
     } catch (err) {
       throw new Error(String(err))
     }
