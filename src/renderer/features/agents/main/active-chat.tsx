@@ -4,7 +4,6 @@ import {
   stripEmojis
 } from "../../../components/chat-markdown-renderer"
 import { Button } from "../../../components/ui/button"
-import { BrowserTabBar } from "../../../components/browser-tab-bar"
 import {
   AgentIcon,
   AttachIcon,
@@ -7512,8 +7511,6 @@ Make sure to preserve all functionality from both branches when resolving confli
           className="flex-1 flex flex-col overflow-hidden relative"
           style={{ minWidth: "350px" }}
         >
-          {/* Browser-style Tab Bar for Agent Sessions */}
-          <BrowserTabBar />
           {/* SubChatSelector header - absolute when sidebar open (desktop only), regular div otherwise */}
           {!shouldHideChatHeader && (
             <div

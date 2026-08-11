@@ -1,16 +1,46 @@
 "use client"
 
 import React, { useMemo } from "react"
-import { X, Plus, Bot, FileText } from "lucide-react"
-import { cn } from "../lib/utils"
+import { Plus, Bot, FileText } from "lucide-react"
+import "./chrome-tabs.css"
 import { useAgentSubChatStore, type SubChatMeta } from "../features/agents/stores/sub-chat-store"
 
 /**
- * Chrome-style tab bar (adamschwartz/chrome-tabs technique).
- *
- * Uses pseudo-elements with radial-gradient at bottom corners to create
- * the characteristic "round-out" curved transition between tab and strip.
+ * SVG tab shape — the chrome-tab-geometry path.
+ * This is the same SVG used by adamschwartz/chrome-tabs.
+ * The path: M17 0h197v36H0v-2c4.5 0 9-3.5 9-8V8c0-4.5 3.5-8 8-8z
  */
+const ChromeTabSVG = () => (
+  <svg version="1.1" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <symbol id="chrome-tab-geometry-left" viewBox="0 0 214 36">
+        <path d="M17 0h197v36H0v-2c4.5 0 9-3.5 9-8V8c0-4.5 3.5-8 8-8z" />
+      </symbol>
+      <symbol id="chrome-tab-geometry-right" viewBox="0 0 214 36">
+        <use xlinkHref="#chrome-tab-geometry-left" />
+      </symbol>
+    </defs>
+    <svg width="52%" height="100%">
+      <use
+        xlinkHref="#chrome-tab-geometry-left"
+        width="214"
+        height="36"
+        className="chrome-tab-geometry"
+      />
+    </svg>
+    <g transform="scale(-1, 1)">
+      <svg width="52%" height="100%" x="-100%" y="0">
+        <use
+          xlinkHref="#chrome-tab-geometry-right"
+          width="214"
+          height="36"
+          className="chrome-tab-geometry"
+        />
+      </svg>
+    </g>
+  </svg>
+)
+
 export function BrowserTabBar() {
   const {
     openSubChatIds,
@@ -36,102 +66,59 @@ export function BrowserTabBar() {
   const handleNewTab = () => console.log("[BrowserTabBar] New tab clicked")
 
   const getTabIcon = (mode?: string) => {
-    if (mode === "plan") return <FileText className="w-3.5 h-3.5" />
-    return <Bot className="w-3.5 h-3.5" />
+    if (mode === "plan") return <FileText />
+    return <Bot />
   }
 
   return (
-    <div className="h-10 flex-shrink-0 flex items-end gap-0.5 px-2 overflow-x-auto scrollbar-hide bg-[#dee1e6]">
-      {openSubChatIds.map((subChatId: string) => {
-        const subChat = subChatMap.get(subChatId)
-        if (!subChat) return null
-        const isActive = subChatId === activeSubChatId
+    <>
+      <div className="chrome-tabs">
+        <div className="chrome-tabs-content">
+          {openSubChatIds.map((subChatId: string) => {
+            const subChat = subChatMap.get(subChatId)
+            if (!subChat) return null
+            const isActive = subChatId === activeSubChatId
 
-        const tabColor = isActive ? "#ffffff" : "#c8ccd1"
-
-        return (
-          <div
-            key={subChatId}
-            onClick={() => handleTabClick(subChatId)}
-            className="group relative cursor-pointer flex-shrink-0"
-            style={{ height: "36px", minWidth: "100px", maxWidth: "240px" }}
-          >
-            {/* Tab body */}
-            <div
-              className={cn(
-                "relative z-10 flex items-center gap-1.5 px-3 h-full rounded-t-[8px] transition-colors",
-                "group-hover:opacity-90"
-              )}
-              style={{ backgroundColor: tabColor }}
-            >
-              {/* Icon */}
-              <div className="flex-shrink-0 text-muted-foreground flex items-center">
-                {getTabIcon(subChat.mode)}
+            return (
+              <div
+                key={subChatId}
+                className="chrome-tab"
+                active={isActive ? "" : undefined}
+                onClick={() => handleTabClick(subChatId)}
+              >
+                <div className="chrome-tab-dividers" />
+                <div className="chrome-tab-background">
+                  <ChromeTabSVG />
+                </div>
+                <div className="chrome-tab-content">
+                  <div className="chrome-tab-favicon">
+                    {getTabIcon(subChat.mode)}
+                  </div>
+                  <div className="chrome-tab-title">
+                    {subChat.name || "New Chat"}
+                  </div>
+                  <button
+                    className="chrome-tab-close"
+                    onClick={(e) => handleTabClose(e, subChatId)}
+                    aria-label={`Close ${subChat.name || "tab"}`}
+                  />
+                </div>
               </div>
+            )
+          })}
 
-              {/* Name */}
-              <span
-                className={cn(
-                  "text-xs truncate flex-1",
-                  isActive ? "text-foreground font-medium" : "text-muted-foreground"
-                )}
-              >
-                {subChat.name || "New Chat"}
-              </span>
-
-              {/* Close button */}
-              <button
-                onClick={(e) => handleTabClose(e, subChatId)}
-                className={cn(
-                  "flex-shrink-0 w-4 h-4 flex items-center justify-center rounded-sm",
-                  isActive
-                    ? "opacity-50 hover:opacity-100"
-                    : "opacity-0 group-hover:opacity-50 hover:opacity-100",
-                  "hover:bg-black/10 transition-opacity"
-                )}
-                aria-label={`Close ${subChat.name || "tab"}`}
-              >
-                <X className="w-3 h-3" />
-              </button>
-            </div>
-
-            {/* Left round-out curve (::before) - creates the outward curve at bottom-left */}
-            <div
-              className="absolute z-[5] pointer-events-none"
-              style={{
-                bottom: "-4px",
-                left: "-8px",
-                width: "16px",
-                height: "16px",
-                background: `radial-gradient(circle at 0% 0%, transparent 8px, ${tabColor} 8px)`,
-              }}
-            />
-
-            {/* Right round-out curve (::after) - creates the outward curve at bottom-right */}
-            <div
-              className="absolute z-[5] pointer-events-none"
-              style={{
-                bottom: "-4px",
-                right: "-8px",
-                width: "16px",
-                height: "16px",
-                background: `radial-gradient(circle at 100% 0%, transparent 8px, ${tabColor} 8px)`,
-              }}
-            />
-          </div>
-        )
-      })}
-
-      {/* New Tab Button */}
-      <button
-        onClick={handleNewTab}
-        className="flex-shrink-0 w-7 h-7 flex items-center justify-center rounded-sm ml-1 mb-1 text-muted-foreground hover:text-foreground hover:bg-black/10 transition-colors z-10"
-        aria-label="New tab"
-      >
-        <Plus className="w-4 h-4" />
-      </button>
-
-      <div className="flex-1" />
-    </div>
+          {/* New Tab Button */}
+          <button
+            className="chrome-tab-new"
+            onClick={handleNewTab}
+            aria-label="New tab"
+          >
+            <Plus size={16} />
+          </button>
+        </div>
+        <div className="chrome-tabs-bottom-bar" />
+      </div>
+      <div className="chrome-tabs-optional-shadow-below-bottom-bar" />
+    </>
   )
 }
