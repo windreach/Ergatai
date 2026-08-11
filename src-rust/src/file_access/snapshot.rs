@@ -389,4 +389,137 @@ mod tests {
         let content2 = manager.read_snapshot(&hash2).unwrap();
         assert_eq!(content2, b"version 2");
     }
+
+    #[test]
+    fn test_snapshot_restore() {
+        let (temp_dir, _repo) = create_test_repo();
+
+        // Create a test file
+        let test_file = temp_dir.path().join("test.txt");
+        fs::write(&test_file, "original content").unwrap();
+
+        let manager = SnapshotManager::new(temp_dir.path()).unwrap();
+
+        // Create snapshot
+        let hash = manager.create_snapshot("test.txt", "test-agent").unwrap();
+
+        // Modify file
+        fs::write(&test_file, "modified content").unwrap();
+
+        // Verify file is modified
+        let content = fs::read_to_string(&test_file).unwrap();
+        assert_eq!(content, "modified content");
+
+        // Restore from snapshot
+        let snapshot_content = manager.read_snapshot(&hash).unwrap();
+        fs::write(&test_file, snapshot_content).unwrap();
+
+        // Verify file is restored
+        let restored_content = fs::read_to_string(&test_file).unwrap();
+        assert_eq!(restored_content, "original content");
+    }
+
+    #[test]
+    fn test_snapshot_path_traversal_protection() {
+        let (temp_dir, _repo) = create_test_repo();
+
+        // Create a file outside the project root
+        let outside_file = temp_dir.path().parent().unwrap().join("outside.txt");
+        fs::write(&outside_file, "outside content").unwrap();
+
+        let manager = SnapshotManager::new(temp_dir.path()).unwrap();
+
+        // Try to access file outside project root using path traversal
+        // This should fail because the canonical path doesn't start with repo_path
+        let result = manager.create_snapshot("../outside.txt", "test-agent");
+        assert!(result.is_err(), "Path traversal should be rejected");
+        assert!(result.unwrap_err().to_string().contains("Path traversal"));
+
+        // Clean up
+        fs::remove_file(&outside_file).ok();
+    }
+
+    #[test]
+    fn test_concurrent_snapshots() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let (temp_dir, _repo) = create_test_repo();
+
+        // Create multiple test files
+        for i in 0..5 {
+            let test_file = temp_dir.path().join(format!("file{}.txt", i));
+            fs::write(&test_file, format!("content {}", i)).unwrap();
+        }
+
+        let manager = Arc::new(SnapshotManager::new(temp_dir.path()).unwrap());
+
+        // Spawn threads to create snapshots concurrently
+        let mut handles = Vec::new();
+
+        for i in 0..5 {
+            let mgr = Arc::clone(&manager);
+            let handle = thread::spawn(move || {
+                let file_name = format!("file{}.txt", i);
+                let agent_id = format!("agent-{}", i);
+                mgr.create_snapshot(&file_name, &agent_id).unwrap()
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all threads to complete
+        let mut hashes = Vec::new();
+        for handle in handles {
+            let hash = handle.join().unwrap();
+            assert!(!hash.is_empty(), "Snapshot should succeed");
+            hashes.push(hash);
+        }
+
+        // All hashes should be unique
+        for i in 0..hashes.len() {
+            for j in (i + 1)..hashes.len() {
+                assert_ne!(hashes[i], hashes[j], "Snapshots should be unique");
+            }
+        }
+    }
+
+    #[test]
+    fn test_large_file_snapshot() {
+        let (temp_dir, _repo) = create_test_repo();
+
+        // Create a large test file (1MB)
+        let test_file = temp_dir.path().join("large.txt");
+        let large_content = "x".repeat(1024 * 1024); // 1MB
+        fs::write(&test_file, &large_content).unwrap();
+
+        let manager = SnapshotManager::new(temp_dir.path()).unwrap();
+
+        // Create snapshot
+        let hash = manager.create_snapshot("large.txt", "test-agent").unwrap();
+        assert!(!hash.is_empty());
+
+        // Read snapshot
+        let content = manager.read_snapshot(&hash).unwrap();
+        assert_eq!(content.len(), large_content.len());
+        assert_eq!(content, large_content.as_bytes());
+    }
+
+    #[test]
+    fn test_empty_file_snapshot() {
+        let (temp_dir, _repo) = create_test_repo();
+
+        // Create an empty test file
+        let test_file = temp_dir.path().join("empty.txt");
+        fs::write(&test_file, "").unwrap();
+
+        let manager = SnapshotManager::new(temp_dir.path()).unwrap();
+
+        // Create snapshot
+        let hash = manager.create_snapshot("empty.txt", "test-agent").unwrap();
+        assert!(!hash.is_empty());
+
+        // Read snapshot
+        let content = manager.read_snapshot(&hash).unwrap();
+        assert_eq!(content.len(), 0);
+    }
 }

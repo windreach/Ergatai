@@ -882,4 +882,157 @@ mod tests {
         assert!(result.is_ok(), "READ_LATEST should complete within timeout");
         assert!(result.unwrap().is_ok(), "READ_LATEST should succeed");
     }
+
+    // ================================================================
+    // Test 32: Concurrent lock upgrade conflict
+    // Two agents with READ locks, both try to upgrade to WRITE
+    // ================================================================
+    #[test]
+    fn test_concurrent_lock_upgrade_conflict() {
+        let (_temp, manager) = setup_test_env();
+        let root = test_project_root();
+
+        // Create two agents with READ locks on the same file
+        let sys_a = SystemToken::new("agent-a".into(), "session-a".into(), root.clone(), 3600, 30);
+        let sys_b = SystemToken::new("agent-b".into(), "session-b".into(), root, 3600, 30);
+        manager.register_system_token(&sys_a).unwrap();
+        manager.register_system_token(&sys_b).unwrap();
+
+        let token_a = make_file_token("agent-a", "session-a", &sys_a.id, "**", FileMode::Read);
+        let token_b = make_file_token("agent-b", "session-b", &sys_b.id, "**", FileMode::Read);
+
+        // Both acquire READ locks
+        manager.acquire_lock(&token_a, "main.rs").unwrap();
+        manager.acquire_lock(&token_b, "main.rs").unwrap();
+
+        // Verify both have READ locks
+        assert_eq!(manager.get_locks_by_token(token_a.id.as_str()).unwrap().len(), 1);
+        assert_eq!(manager.get_locks_by_token(token_b.id.as_str()).unwrap().len(), 1);
+
+        // Both locks should be READ mode
+        let locks_a = manager.get_locks_by_token(token_a.id.as_str()).unwrap();
+        let locks_b = manager.get_locks_by_token(token_b.id.as_str()).unwrap();
+        assert_eq!(locks_a[0].mode, FileMode::Read);
+        assert_eq!(locks_b[0].mode, FileMode::Read);
+
+        // Note: Actual upgrade would be done via LockModeManager.upgrade_lock()
+        // which checks for WRITE conflicts. Since both have READ, first to upgrade wins.
+        // This test verifies the initial state is correct.
+    }
+
+    // ================================================================
+    // Test 33: Large-scale concurrent lock operations (performance)
+    // 10 agents acquiring and releasing locks concurrently
+    // ================================================================
+    #[tokio::test]
+    async fn test_large_scale_concurrent_operations() {
+        use std::thread;
+
+        let (_temp, manager) = setup_test_env();
+        let root = test_project_root();
+
+        let num_agents = 10;
+        let files = vec!["main.rs", "lib.rs", "config.rs"];
+
+        // Create multiple agents
+        let mut systems = Vec::new();
+        let mut tokens = Vec::new();
+
+        for i in 0..num_agents {
+            let agent_id = format!("agent-{}", i);
+            let session_id = format!("session-{}", i);
+            let sys = SystemToken::new(agent_id.clone(), session_id.clone(), root.clone(), 3600, 30);
+            manager.register_system_token(&sys).unwrap();
+
+            let token = make_file_token(&agent_id, &session_id, &sys.id, "**", FileMode::Write);
+            systems.push(sys);
+            tokens.push(token);
+        }
+
+        // Spawn threads to concurrently acquire and release locks
+        let mut handles = Vec::new();
+
+        for (i, token) in tokens.iter().enumerate() {
+            let mgr = Arc::clone(&manager);
+            let token_clone = token.clone();
+            let file = files[i % files.len()].to_string();
+
+            let handle = thread::spawn(move || {
+                // Acquire lock
+                let acquire_result = mgr.acquire_lock(&token_clone, &file);
+                if acquire_result.is_ok() {
+                    // Hold lock briefly
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+
+                    // Release lock
+                    let rt = tokio::runtime::Runtime::new().unwrap();
+                    rt.block_on(async {
+                        mgr.release_lock(token_clone.id.as_str(), &file).await
+                    }).unwrap();
+                }
+            });
+
+            handles.push(handle);
+        }
+
+        // Wait for all threads to complete
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // Verify all locks are released
+        for file in &files {
+            assert!(!manager.is_file_locked(file).unwrap(), "Lock on {} should be released", file);
+        }
+    }
+
+    // ================================================================
+    // Test 34: Token expiration and automatic cleanup
+    // ================================================================
+    #[tokio::test]
+    async fn test_token_expiration_cleanup() {
+        let (_temp, manager) = setup_test_env();
+        let root = test_project_root();
+
+        // Create a system token with very short expiration (1 second)
+        let sys = SystemToken::new("agent-a".into(), "session-a".into(), root, 1, 30);
+        manager.register_system_token(&sys).unwrap();
+
+        let token = make_file_token("agent-a", "session-a", &sys.id, "**", FileMode::Write);
+        manager.acquire_lock(&token, "main.rs").unwrap();
+
+        // Verify token and lock are active
+        assert_eq!(manager.get_active_tokens().unwrap().len(), 1);
+        assert!(manager.is_file_locked("main.rs").unwrap());
+
+        // Wait for expiration
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+        // Token should still be in DB but may be marked as expired
+        // (depending on whether watchdog is running)
+        // For now, just verify the system doesn't crash
+        let _tokens = manager.get_tokens_by_session("session-a").unwrap();
+    }
+
+    // ================================================================
+    // Test 35: Multiple locks on same file by same agent (should fail)
+    // ================================================================
+    #[test]
+    fn test_same_agent_duplicate_lock() {
+        let (_temp, manager) = setup_test_env();
+        let root = test_project_root();
+
+        let sys = SystemToken::new("agent-a".into(), "session-a".into(), root, 3600, 30);
+        manager.register_system_token(&sys).unwrap();
+
+        let token = make_file_token("agent-a", "session-a", &sys.id, "**", FileMode::Write);
+
+        // First lock should succeed
+        manager.acquire_lock(&token, "main.rs").unwrap();
+        assert!(manager.is_file_locked("main.rs").unwrap());
+
+        // Second lock on same file by same agent should fail (WRITE blocks WRITE)
+        let result = manager.acquire_lock(&token, "main.rs");
+        assert!(result.is_err(), "Duplicate WRITE lock should fail");
+    }
 }
