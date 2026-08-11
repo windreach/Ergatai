@@ -76,6 +76,7 @@ contextBridge.exposeInMainWorld("desktopApi", {
   // Window controls
   windowMinimize: () => ipcRenderer.invoke("window:minimize"),
   windowMaximize: () => ipcRenderer.invoke("window:maximize"),
+  windowRestore: () => ipcRenderer.invoke("window:restore"),
   windowClose: () => ipcRenderer.invoke("window:close"),
   windowIsMaximized: () => ipcRenderer.invoke("window:is-maximized"),
   windowToggleFullscreen: () => ipcRenderer.invoke("window:toggle-fullscreen"),
@@ -305,6 +306,7 @@ export interface DesktopApi {
   // Window controls
   windowMinimize: () => Promise<void>
   windowMaximize: () => Promise<void>
+  windowRestore: () => Promise<void>
   windowClose: () => Promise<void>
   windowIsMaximized: () => Promise<boolean>
   windowToggleFullscreen: () => Promise<void>

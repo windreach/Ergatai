@@ -164,6 +164,12 @@ function registerIpcHandlers(): void {
       win?.maximize()
     }
   })
+  ipcMain.handle("window:restore", (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    if (win) {
+      win.restore()
+    }
+  })
   ipcMain.handle("window:close", (event) => {
     getWindowFromEvent(event)?.close()
   })
