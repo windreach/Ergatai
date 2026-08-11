@@ -6,14 +6,14 @@ import { cn } from "../lib/utils"
 import { useAgentSubChatStore, type SubChatMeta } from "../features/agents/stores/sub-chat-store"
 
 /**
- * Chrome-style tab bar for Agent Sessions (sub-chats).
+ * Firefox/Chrome-style tab bar for Agent Sessions (sub-chats).
  *
- * Design inspired by Chrome/Edge browser tabs:
- * - Trapezoid-like shape with rounded top corners
- * - Active tab: white background, connected to content area
- * - Inactive tabs: gray background, slightly shorter
- * - Hover: slightly lighter gray
- * - Close button appears on hover
+ * Key design characteristics:
+ * - Tab bar has light gray background strip
+ * - Active tab: white bg, rounded-top, connects to content below (no gap)
+ * - Inactive tabs: gray bg, slightly shorter, rounded-top
+ * - Close × visible on hover (inactive) / always (active)
+ * - + button on the right for new tab
  */
 export function BrowserTabBar() {
   const {
@@ -24,31 +24,25 @@ export function BrowserTabBar() {
     removeFromOpenSubChats,
   } = useAgentSubChatStore()
 
-  // Build a map of sub-chat metadata for quick lookup
   const subChatMap = useMemo(() => {
     const map = new Map<string, SubChatMeta>()
     allSubChats.forEach((sc: SubChatMeta) => map.set(sc.id, sc))
     return map
   }, [allSubChats])
 
-  // Handle tab click - switch active sub-chat
   const handleTabClick = (subChatId: string) => {
     setActiveSubChat(subChatId)
   }
 
-  // Handle tab close - remove from open tabs
   const handleTabClose = (e: React.MouseEvent, subChatId: string) => {
     e.stopPropagation()
     removeFromOpenSubChats(subChatId)
   }
 
-  // Handle new tab - placeholder for now (will be connected to chat creation)
   const handleNewTab = () => {
-    // TODO: Connect to "New Chat" creation flow
     console.log("[BrowserTabBar] New tab clicked")
   }
 
-  // Get icon based on sub-chat mode
   const getTabIcon = (mode?: string) => {
     if (mode === "plan") {
       return <FileText className="w-3.5 h-3.5" />
@@ -57,7 +51,8 @@ export function BrowserTabBar() {
   }
 
   return (
-    <div className="h-10 flex-shrink-0 flex items-end bg-[#dee1e6] dark:bg-[#202124] px-2 pt-2 gap-0.5 overflow-x-auto scrollbar-hide">
+    // Tab strip background - light gray bar
+    <div className="h-9 flex-shrink-0 flex items-end gap-px px-1 bg-[#dfe1e5] dark:bg-[#1b1b1f]">
       {/* Tabs */}
       {openSubChatIds.map((subChatId: string) => {
         const subChat = subChatMap.get(subChatId)
@@ -70,24 +65,24 @@ export function BrowserTabBar() {
             key={subChatId}
             onClick={() => handleTabClick(subChatId)}
             className={cn(
-              "group relative flex items-center gap-2 px-4 py-2 min-w-[150px] max-w-[240px] cursor-pointer rounded-t-lg transition-all duration-150",
-              // Active tab: white background, slightly taller, no bottom border gap
+              "group flex items-center gap-1.5 px-3 cursor-pointer rounded-t-md transition-colors",
+              // Active: white bg, taller (h-8), connects to content
               isActive
-                ? "bg-background dark:bg-[#2d2d2d] shadow-sm"
-                : // Inactive tabs: gray background, hover effect
-                  "bg-[#c8ccd1] dark:bg-[#35363a] hover:bg-[#d8dce1] dark:hover:bg-[#404145]"
+                ? "h-8 bg-background dark:bg-[#2b2b2b] -mb-px"
+                : // Inactive: gray bg, shorter (h-7)
+                  "h-7 bg-[#c8ccd1] dark:bg-[#3a3a3e] hover:bg-[#d8dce1] dark:hover:bg-[#45454a]"
             )}
           >
             {/* Icon */}
-            <div className="flex-shrink-0 text-muted-foreground">
+            <div className="flex-shrink-0 text-muted-foreground flex items-center">
               {getTabIcon(subChat.mode)}
             </div>
 
             {/* Name */}
             <span
               className={cn(
-                "text-xs truncate flex-1 font-medium",
-                isActive ? "text-foreground" : "text-muted-foreground"
+                "text-xs truncate max-w-[160px]",
+                isActive ? "text-foreground font-medium" : "text-muted-foreground"
               )}
             >
               {subChat.name || "New Chat"}
@@ -97,9 +92,12 @@ export function BrowserTabBar() {
             <button
               onClick={(e) => handleTabClose(e, subChatId)}
               className={cn(
-                "flex-shrink-0 w-4 h-4 flex items-center justify-center rounded",
-                "opacity-0 group-hover:opacity-100 transition-opacity",
-                "hover:bg-black/10 dark:hover:bg-white/10"
+                "flex-shrink-0 w-4 h-4 flex items-center justify-center rounded-sm",
+                // Active: always visible; Inactive: hover only
+                isActive
+                  ? "opacity-60 hover:opacity-100"
+                  : "opacity-0 group-hover:opacity-60 hover:opacity-100",
+                "hover:bg-black/10 dark:hover:bg-white/10 transition-opacity"
               )}
               aria-label={`Close ${subChat.name || "tab"}`}
             >
@@ -112,13 +110,13 @@ export function BrowserTabBar() {
       {/* New Tab Button */}
       <button
         onClick={handleNewTab}
-        className="flex-shrink-0 w-8 h-8 flex items-center justify-center rounded-lg ml-1 text-muted-foreground hover:text-foreground hover:bg-black/10 dark:hover:bg-white/10 transition-colors"
+        className="flex-shrink-0 w-6 h-6 flex items-center justify-center rounded-sm mx-0.5 text-muted-foreground hover:text-foreground hover:bg-black/10 dark:hover:bg-white/10 transition-colors"
         aria-label="New tab"
       >
-        <Plus className="w-4 h-4" />
+        <Plus className="w-3.5 h-3.5" />
       </button>
 
-      {/* Spacer to fill remaining width */}
+      {/* Spacer */}
       <div className="flex-1" />
     </div>
   )
