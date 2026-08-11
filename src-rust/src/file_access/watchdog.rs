@@ -446,11 +446,15 @@ impl Watchdog {
     pub async fn handle_acp_disconnect(&self, session_id: &str) -> ErgataiResult<()> {
         info!(session_id = session_id, "ACP disconnect detected, reclaiming all tokens");
 
-        // Get all tokens for this session
+        // Get all active locks for this session (by session_id, not token_id)
+        let locks = self.lock_manager.get_locks_by_session(session_id)?;
+        let lock_count = locks.len();
+
+        // Get all system tokens for this session (to expire them)
         let tokens = self.lock_manager.get_tokens_by_session(session_id)?;
         let token_count = tokens.len();
 
-        // Collect token IDs to reclaim (release timeout_states lock before reclaiming)
+        // Collect token IDs to expire (release timeout_states lock before reclaiming)
         let token_ids: Vec<String> = {
             let mut states = self.timeout_states.lock().await;
             let ids: Vec<String> = tokens.iter().map(|t| t.id.as_str().to_string()).collect();
@@ -466,20 +470,44 @@ impl Watchdog {
             busy.remove(session_id);
         }
 
-        // Reclaim locks (no timeout_states or busy_status held)
+        // Release each lock using its own token_id (FileToken ID, not SystemToken ID)
+        for lock in &locks {
+            if let Err(e) = self.lock_manager.release_lock(lock.token_id.as_str(), &lock.file_path) {
+                error!(
+                    session_id = session_id,
+                    file_path = %lock.file_path,
+                    token_id = %lock.token_id,
+                    error = %e,
+                    "Failed to release lock on ACP disconnect"
+                );
+            }
+
+            // Broadcast file.error event
+            if let Some(bus) = &self.event_bus {
+                let payload = FileErrorPayload {
+                    file_path: lock.file_path.clone(),
+                    agent_id: lock.agent_id.clone(),
+                    reason: format!("ACP session {} disconnected", session_id),
+                    timestamp: Utc::now().timestamp() as u64,
+                };
+                if let Err(e) = bus.publish_file_error(&payload).await {
+                    error!(
+                        session_id = session_id,
+                        file_path = %lock.file_path,
+                        error = %e,
+                        "Failed to broadcast file.error event"
+                    );
+                }
+            }
+        }
+
+        // Expire all system tokens for this session
         for token_id in &token_ids {
-            if let Err(e) = Self::reclaim_locks_for_token(
-                &self.lock_manager,
-                &self.event_bus,
-                token_id,
-                session_id,
-            )
-            .await
-            {
+            if let Err(e) = self.lock_manager.expire_token(token_id) {
                 error!(
                     token_id = token_id,
                     error = %e,
-                    "Failed to reclaim locks on ACP disconnect"
+                    "Failed to expire token on ACP disconnect"
                 );
             }
         }
@@ -487,7 +515,8 @@ impl Watchdog {
         info!(
             session_id = session_id,
             token_count = token_count,
-            "All tokens reclaimed on ACP disconnect"
+            lock_count = lock_count,
+            "All tokens and locks reclaimed on ACP disconnect"
         );
 
         Ok(())

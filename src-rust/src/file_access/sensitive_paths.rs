@@ -11,8 +11,11 @@ use tracing::warn;
 /// These always require ADMIN permission
 const SYSTEM_SENSITIVE_PATTERNS: &[&str] = &[
     // Environment files (may contain secrets)
+    ".env",
     ".env*",
     ".env.*",
+    "**/.env",
+    "**/.env.*",
     // Git internal files
     ".git/**",
     ".gitignore",

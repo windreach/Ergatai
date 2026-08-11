@@ -22,6 +22,9 @@ pub mod renewal;
 pub mod audit;
 pub mod performance;
 
+#[cfg(test)]
+mod multi_agent_tests;
+
 pub use lock_manager::FileLockManager;
 pub use token::{FileLock, FileMode, FileToken, SystemToken, TokenId, TokenStatus};
 pub use snapshot::SnapshotManager;
