@@ -601,25 +601,6 @@ export function getAllWindows(): BrowserWindow[] {
 }
 
 /**
- * Read window frame preference from settings file (Windows only)
- * Returns true if native frame should be used, false for frameless
- */
-function getUseNativeFramePreference(): boolean {
-  if (process.platform !== "win32") return false
-
-  try {
-    const settingsPath = join(app.getPath("userData"), "window-settings.json")
-    if (existsSync(settingsPath)) {
-      const settings = JSON.parse(readFileSync(settingsPath, "utf-8"))
-      return settings.useNativeFrame === true
-    }
-    return false // Default: frameless (dark title bar)
-  } catch {
-    return false
-  }
-}
-
-/**
  * Create a new application window
  * @param options Optional settings for the new window
  * @param options.chatId Open this chat in the new window
@@ -629,34 +610,34 @@ export function createWindow(options?: { chatId?: string; subChatId?: string }):
   // Register IPC handlers before creating first window
   registerIpcHandlers()
 
-  // Read Windows frame preference
-  const useNativeFrame = getUseNativeFramePreference()
-
   const window = new BrowserWindow({
     width: 1400,
     height: 900,
-    minWidth: 500, // Allow narrow mobile-like mode
+    minWidth: 500,
     minHeight: 600,
     show: false,
-    title: "1Code",
+    title: "Ergatai",
     backgroundColor: nativeTheme.shouldUseDarkColors ? "#09090b" : "#ffffff",
-    // hiddenInset shows native traffic lights inset in the window
-    // hiddenInset hides the native title bar but keeps traffic lights visible
-    titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "default",
-    trafficLightPosition:
-      process.platform === "darwin" ? { x: 15, y: 12 } : undefined,
-    // Windows: Use native frame or frameless based on user preference
-    ...(process.platform === "win32" && {
-      frame: useNativeFrame,
-      autoHideMenuBar: true,
+
+    // macOS: hiddenInset titlebar (unchanged)
+    ...(process.platform === "darwin" && {
+      titleBarStyle: "hiddenInset",
+      trafficLightPosition: { x: 15, y: 12 },
     }),
+
+    // Windows + Linux: frameless
+    ...(process.platform === "win32" || process.platform === "linux") && {
+      frame: false,
+      autoHideMenuBar: true,
+    },
+
     webPreferences: {
       preload: join(__dirname, "../preload/index.js"),
       nodeIntegration: false,
       contextIsolation: true,
-      sandbox: false, // Required for electron-trpc
+      sandbox: false,
       webSecurity: true,
-      partition: "persist:main", // Use persistent session for cookies
+      partition: "persist:main",
     },
   })
 
