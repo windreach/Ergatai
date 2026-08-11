@@ -433,4 +433,155 @@ mod tests {
         assert_eq!(tokens_renewed, 1);
         assert_eq!(locks_renewed, 1);
     }
+
+    #[test]
+    fn test_renew_nonexistent_token() {
+        let (_temp_dir, manager) = setup_test_db();
+
+        // Try to renew a token that doesn't exist
+        let result = manager.renew_system_token("nonexistent-token", Some(7200));
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ErgataiError::NotFound(_)));
+    }
+
+    #[test]
+    fn test_renew_nonexistent_lock() {
+        let (_temp_dir, manager) = setup_test_db();
+
+        // Try to renew a lock that doesn't exist
+        let result = manager.renew_lock("nonexistent-token", "nonexistent.rs", Some(7200));
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ErgataiError::NotFound(_)));
+    }
+
+    #[test]
+    fn test_renew_expired_token() {
+        let (_temp_dir, manager) = setup_test_db();
+
+        // Insert an expired token
+        {
+            let conn = manager.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO system_tokens (id, agent_id, session_id, status, expires_at)
+                 VALUES ('token1', 'agent1', 'session1', 'EXPIRED', datetime('now', '-1 hour'))",
+                [],
+            )
+            .unwrap();
+        }
+
+        // Try to renew expired token - should fail
+        let result = manager.renew_system_token("token1", Some(7200));
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ErgataiError::InvalidArgument(_)));
+    }
+
+    #[test]
+    fn test_renew_expired_lock() {
+        let (_temp_dir, manager) = setup_test_db();
+
+        // Insert an expired lock
+        {
+            let conn = manager.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO file_locks (id, file_path, token_id, status, expires_at)
+                 VALUES ('lock1', 'test.rs', 'token1', 'EXPIRED', datetime('now', '-1 hour'))",
+                [],
+            )
+            .unwrap();
+        }
+
+        // Try to renew expired lock - should fail with NotFound
+        // (because the query filters by status = 'ACTIVE')
+        let result = manager.renew_lock("token1", "test.rs", Some(7200));
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ErgataiError::NotFound(_)));
+    }
+
+    #[test]
+    fn test_auto_renew_no_expiring() {
+        let (_temp_dir, manager) = setup_test_db();
+
+        // Insert tokens/locks that are not expiring soon (far in the future)
+        {
+            let conn = manager.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO system_tokens (id, agent_id, session_id, status, expires_at)
+                 VALUES ('token1', 'agent1', 'session1', 'ACTIVE', datetime('now', '+1 day'))",
+                [],
+            )
+            .unwrap();
+
+            conn.execute(
+                "INSERT INTO file_locks (id, file_path, token_id, status, expires_at)
+                 VALUES ('lock1', 'test.rs', 'token1', 'ACTIVE', datetime('now', '+1 day'))",
+                [],
+            )
+            .unwrap();
+        }
+
+        // Auto-renew with short threshold - should not renew anything
+        let result = manager.auto_renew_expiring(60, 3600);
+        assert!(result.is_ok());
+
+        let (tokens_renewed, locks_renewed) = result.unwrap();
+        assert_eq!(tokens_renewed, 0);
+        assert_eq!(locks_renewed, 0);
+    }
+
+    #[test]
+    fn test_renew_with_default_duration() {
+        let (_temp_dir, manager) = setup_test_db();
+
+        // Insert a token
+        {
+            let conn = manager.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO system_tokens (id, agent_id, session_id, status, expires_at)
+                 VALUES ('token1', 'agent1', 'session1', 'ACTIVE', datetime('now', '+1 hour'))",
+                [],
+            )
+            .unwrap();
+        }
+
+        // Renew with None (use default duration)
+        let result = manager.renew_system_token("token1", None);
+        assert!(result.is_ok());
+
+        // Verify expiry was extended
+        let new_expiry = result.unwrap();
+        assert!(!new_expiry.is_empty());
+    }
+
+    #[test]
+    fn test_renew_multiple_locks() {
+        let (_temp_dir, manager) = setup_test_db();
+
+        // Insert multiple locks for the same token
+        {
+            let conn = manager.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO file_locks (id, file_path, token_id, status, expires_at)
+                 VALUES ('lock1', 'file1.rs', 'token1', 'ACTIVE', datetime('now', '+1 hour'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO file_locks (id, file_path, token_id, status, expires_at)
+                 VALUES ('lock2', 'file2.rs', 'token1', 'ACTIVE', datetime('now', '+1 hour'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO file_locks (id, file_path, token_id, status, expires_at)
+                 VALUES ('lock3', 'file3.rs', 'token1', 'ACTIVE', datetime('now', '+1 hour'))",
+                [],
+            )
+            .unwrap();
+        }
+
+        // Renew each lock individually
+        assert!(manager.renew_lock("token1", "file1.rs", Some(7200)).is_ok());
+        assert!(manager.renew_lock("token1", "file2.rs", Some(7200)).is_ok());
+        assert!(manager.renew_lock("token1", "file3.rs", Some(7200)).is_ok());
+    }
 }

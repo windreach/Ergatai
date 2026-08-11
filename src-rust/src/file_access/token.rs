@@ -389,4 +389,352 @@ mod tests {
         assert_eq!(FileMode::Read.to_string(), "READ");
         assert_eq!(FileMode::Write.to_string(), "WRITE");
     }
+
+    #[test]
+    fn test_file_mode_admin_display() {
+        assert_eq!(FileMode::Admin.to_string(), "ADMIN");
+    }
+
+    #[test]
+    fn test_token_status_display_all_variants() {
+        assert_eq!(TokenStatus::Active.to_string(), "ACTIVE");
+        assert_eq!(TokenStatus::Upgrading.to_string(), "UPGRADING");
+        assert_eq!(TokenStatus::Expired.to_string(), "EXPIRED");
+        assert_eq!(TokenStatus::Revoked.to_string(), "REVOKED");
+    }
+
+    #[test]
+    fn test_token_id_from_string_and_as_str() {
+        let id = TokenId::from_string("custom-id-123".to_string());
+        assert_eq!(id.as_str(), "custom-id-123");
+        assert_eq!(id.to_string(), "custom-id-123");
+    }
+
+    #[test]
+    fn test_token_id_default_is_unique() {
+        let id1: TokenId = Default::default();
+        let id2: TokenId = Default::default();
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn test_token_id_equality() {
+        let a = TokenId::from_string("same".to_string());
+        let b = TokenId::from_string("same".to_string());
+        let c = TokenId::from_string("different".to_string());
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn test_system_token_update_heartbeat() {
+        let mut token = SystemToken::new(
+            "agent".to_string(),
+            "session".to_string(),
+            "/project".to_string(),
+            3600,
+            30,
+        );
+        let original_heartbeat = token.heartbeat_at;
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        token.update_heartbeat();
+        assert!(token.heartbeat_at > original_heartbeat);
+    }
+
+    #[test]
+    fn test_system_token_is_heartbeat_timeout_not_timed_out() {
+        let token = SystemToken::new(
+            "agent".to_string(),
+            "session".to_string(),
+            "/project".to_string(),
+            3600,
+            30,
+        );
+        // Fresh heartbeat → no timeout even with multiplier=1
+        assert!(!token.is_heartbeat_timeout(1));
+        assert!(!token.is_heartbeat_timeout(2));
+    }
+
+    #[test]
+    fn test_system_token_is_heartbeat_timeout_when_stale() {
+        let mut token = SystemToken::new(
+            "agent".to_string(),
+            "session".to_string(),
+            "/project".to_string(),
+            3600,
+            1, // 1-second heartbeat interval
+        );
+        // Manually set heartbeat far in the past
+        token.heartbeat_at = Utc::now() - chrono::Duration::seconds(60);
+        // With multiplier=2, timeout = 1*2 = 2 seconds. 60s old → timed out
+        assert!(token.is_heartbeat_timeout(2));
+    }
+
+    #[test]
+    fn test_system_token_invalid_when_zero_ttl() {
+        let mut token = SystemToken::new(
+            "agent".to_string(),
+            "session".to_string(),
+            "/project".to_string(),
+            0, // 0-second TTL → already expired
+            30,
+        );
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        assert!(!token.is_valid());
+    }
+
+    #[test]
+    fn test_system_token_invalid_when_revoked() {
+        let mut token = SystemToken::new(
+            "agent".to_string(),
+            "session".to_string(),
+            "/project".to_string(),
+            3600,
+            30,
+        );
+        token.status = TokenStatus::Revoked;
+        assert!(!token.is_valid());
+    }
+
+    #[test]
+    fn test_system_token_invalid_when_upgrading() {
+        let mut token = SystemToken::new(
+            "agent".to_string(),
+            "session".to_string(),
+            "/project".to_string(),
+            3600,
+            30,
+        );
+        token.status = TokenStatus::Upgrading;
+        assert!(!token.is_valid());
+    }
+
+    #[test]
+    fn test_file_token_is_valid() {
+        let token = FileToken::new(
+            "agent".to_string(),
+            "session".to_string(),
+            TokenId::new(),
+            "**".to_string(),
+            FileMode::Read,
+            None,
+            "system".to_string(),
+            3600,
+            15,
+        );
+        assert!(token.is_valid());
+    }
+
+    #[test]
+    fn test_file_token_invalid_when_expired() {
+        let mut token = FileToken::new(
+            "agent".to_string(),
+            "session".to_string(),
+            TokenId::new(),
+            "**".to_string(),
+            FileMode::Read,
+            None,
+            "system".to_string(),
+            0, // 0-second TTL
+            15,
+        );
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        assert!(!token.is_valid());
+    }
+
+    #[test]
+    fn test_file_token_update_heartbeat() {
+        let mut token = FileToken::new(
+            "agent".to_string(),
+            "session".to_string(),
+            TokenId::new(),
+            "**".to_string(),
+            FileMode::Write,
+            Some("refactor".to_string()),
+            "system".to_string(),
+            3600,
+            15,
+        );
+        let original = token.heartbeat_at;
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        token.update_heartbeat();
+        assert!(token.heartbeat_at > original);
+    }
+
+    #[test]
+    fn test_file_token_is_heartbeat_timeout_when_stale() {
+        let mut token = FileToken::new(
+            "agent".to_string(),
+            "session".to_string(),
+            TokenId::new(),
+            "**".to_string(),
+            FileMode::Write,
+            None,
+            "system".to_string(),
+            3600,
+            1, // 1-second heartbeat
+        );
+        token.heartbeat_at = Utc::now() - chrono::Duration::seconds(60);
+        assert!(token.is_heartbeat_timeout(2));
+    }
+
+    #[test]
+    fn test_file_token_is_heartbeat_timeout_fresh() {
+        let token = FileToken::new(
+            "agent".to_string(),
+            "session".to_string(),
+            TokenId::new(),
+            "**".to_string(),
+            FileMode::Read,
+            None,
+            "system".to_string(),
+            3600,
+            30,
+        );
+        assert!(!token.is_heartbeat_timeout(1));
+    }
+
+    #[test]
+    fn test_matches_path_exact_file() {
+        let token = FileToken::new(
+            "agent".to_string(),
+            "session".to_string(),
+            TokenId::new(),
+            "src/main.rs".to_string(),
+            FileMode::Read,
+            None,
+            "system".to_string(),
+            3600,
+            15,
+        );
+        assert!(token.matches_path("src/main.rs"));
+        assert!(!token.matches_path("src/lib.rs"));
+        assert!(!token.matches_path("src/main.rs.bak"));
+    }
+
+    #[test]
+    fn test_matches_path_single_star_glob() {
+        let token = FileToken::new(
+            "agent".to_string(),
+            "session".to_string(),
+            TokenId::new(),
+            "src/*.rs".to_string(),
+            FileMode::Read,
+            None,
+            "system".to_string(),
+            3600,
+            15,
+        );
+        assert!(token.matches_path("src/main.rs"));
+        assert!(token.matches_path("src/lib.rs"));
+        // NOTE: Rust's `glob::Pattern::matches` uses default MatchOptions which
+        // has `require_literal_separator: false`, so `*` CAN cross `/`.
+        // Use `**` for explicitly recursive matching; single `*` here also matches.
+        assert!(token.matches_path("src/sub/mod.rs"));
+        // But a prefix mismatch still fails
+        assert!(!token.matches_path("tests/main.rs"));
+    }
+
+    #[test]
+    fn test_matches_path_double_star_recursive() {
+        let token = FileToken::new(
+            "agent".to_string(),
+            "session".to_string(),
+            TokenId::new(),
+            "src/**/*.rs".to_string(),
+            FileMode::Write,
+            None,
+            "system".to_string(),
+            3600,
+            15,
+        );
+        assert!(token.matches_path("src/main.rs"));
+        assert!(token.matches_path("src/auth/login.rs"));
+        assert!(token.matches_path("src/a/b/c/d.rs"));
+        assert!(!token.matches_path("src/main.ts"));
+        assert!(!token.matches_path("tests/test.rs"));
+    }
+
+    #[test]
+    fn test_matches_path_leading_dot_slash_stripped() {
+        let token = FileToken::new(
+            "agent".to_string(),
+            "session".to_string(),
+            TokenId::new(),
+            "src/**/*.rs".to_string(),
+            FileMode::Read,
+            None,
+            "system".to_string(),
+            3600,
+            15,
+        );
+        // Leading "./" should be normalized away
+        assert!(token.matches_path("./src/main.rs"));
+        assert!(token.matches_path("./src/auth/login.rs"));
+    }
+
+    #[test]
+    fn test_matches_path_invalid_glob_returns_false() {
+        // An unclosed bracket is an invalid glob pattern
+        let token = FileToken::new(
+            "agent".to_string(),
+            "session".to_string(),
+            TokenId::new(),
+            "src/[unclosed".to_string(),
+            FileMode::Read,
+            None,
+            "system".to_string(),
+            3600,
+            15,
+        );
+        assert!(!token.matches_path("src/anything.rs"));
+    }
+
+    #[test]
+    fn test_matches_path_double_star_all_files() {
+        let token = FileToken::new(
+            "agent".to_string(),
+            "session".to_string(),
+            TokenId::new(),
+            "**".to_string(),
+            FileMode::Admin,
+            None,
+            "system".to_string(),
+            3600,
+            15,
+        );
+        assert!(token.matches_path("anything.txt"));
+        assert!(token.matches_path("src/deep/path/file.rs"));
+    }
+
+    #[test]
+    fn test_file_mode_serde_roundtrip() {
+        let modes = vec![FileMode::Read, FileMode::Write, FileMode::Admin];
+        for mode in modes {
+            let json = serde_json::to_string(&mode).unwrap();
+            let expected = match mode {
+                FileMode::Read => "\"READ\"",
+                FileMode::Write => "\"WRITE\"",
+                FileMode::Admin => "\"ADMIN\"",
+            };
+            assert_eq!(json, expected);
+            let deserialized: FileMode = serde_json::from_str(&json).unwrap();
+            assert_eq!(deserialized, mode);
+        }
+    }
+
+    #[test]
+    fn test_token_status_serde_roundtrip() {
+        let statuses = vec![
+            TokenStatus::Active,
+            TokenStatus::Upgrading,
+            TokenStatus::Expired,
+            TokenStatus::Revoked,
+        ];
+        for status in statuses {
+            let json = serde_json::to_string(&status).unwrap();
+            let deserialized: TokenStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(deserialized, status);
+        }
+    }
 }

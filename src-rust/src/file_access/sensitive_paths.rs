@@ -184,4 +184,69 @@ mod tests {
         assert!(!is_in_sensitive_directory("src/main.rs"));
         assert!(!is_in_sensitive_directory("config/settings.json"));
     }
+
+    #[test]
+    fn test_aws_credentials() {
+        assert!(is_sensitive_path(".aws/credentials"));
+        assert!(is_sensitive_path("config/.aws/credentials"));
+        assert!(is_sensitive_path(".aws/config"));
+        assert!(is_in_sensitive_directory(".aws/credentials"));
+    }
+
+    #[test]
+    fn test_gcp_service_account() {
+        assert!(is_sensitive_path("service-account.json"));
+        assert!(is_sensitive_path("gcp/service-account-prod.json"));
+    }
+
+    #[test]
+    fn test_certificate_files() {
+        assert!(is_sensitive_path("server.crt"));
+        assert!(is_sensitive_path("ca.cer"));
+        assert!(is_sensitive_path("keystore.p12"));
+        assert!(is_sensitive_path("bundle.pfx"));
+        assert!(is_sensitive_path("truststore.jks"));
+    }
+
+    #[test]
+    fn test_database_files() {
+        assert!(is_sensitive_path("app.sqlite"));
+        assert!(is_sensitive_path("data/users.db"));
+    }
+
+    #[test]
+    fn test_private_key_and_secret_patterns() {
+        assert!(is_sensitive_path("my-private-key.pem"));
+        assert!(is_sensitive_path("config/secret.json"));
+        assert!(is_sensitive_path("app-secrets.yaml"));
+    }
+
+    #[test]
+    fn test_windows_path_separator_normalized() {
+        // Backslashes should be normalized to forward slashes before matching
+        assert!(is_sensitive_path(".aws\\credentials"));
+        assert!(is_sensitive_path(".ssh\\id_rsa"));
+    }
+
+    #[test]
+    fn test_non_sensitive_hidden_directory() {
+        // .vscode, .idea, etc. are not in the sensitive list
+        assert!(!is_in_sensitive_directory(".vscode/settings.json"));
+        assert!(!is_in_sensitive_directory(".idea/workspace.xml"));
+    }
+
+    #[test]
+    fn test_sensitive_directory_deeply_nested() {
+        assert!(is_in_sensitive_directory("project/nested/.ssh/id_rsa"));
+        assert!(is_in_sensitive_directory("a/b/c/credentials/db.json"));
+        assert!(is_in_sensitive_directory("a/b/secrets/key.txt"));
+    }
+
+    #[test]
+    fn test_empty_and_root_paths() {
+        // Empty or root paths shouldn't be detected as sensitive
+        assert!(!is_sensitive_path(""));
+        assert!(!is_in_sensitive_directory(""));
+        assert!(!is_in_sensitive_directory("/"));
+    }
 }

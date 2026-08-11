@@ -501,4 +501,282 @@ mod tests {
         let req3 = queue.dequeue().unwrap();
         assert_eq!(req3.priority, 1);
     }
+
+    #[test]
+    fn test_lock_cache_remove() {
+        let cache = LockCache::new(60, 1000);
+        cache.insert("a.rs".into(), "WRITE".into(), "t1".into(), "ag1".into());
+        cache.insert("b.rs".into(), "READ".into(), "t2".into(), "ag2".into());
+
+        assert!(cache.get("a.rs").is_some());
+        cache.remove("a.rs");
+        assert!(cache.get("a.rs").is_none());
+        assert!(cache.get("b.rs").is_some());
+    }
+
+    #[test]
+    fn test_lock_cache_remove_nonexistent_is_noop() {
+        let cache = LockCache::new(60, 1000);
+        cache.remove("ghost.rs"); // should not panic
+    }
+
+    #[test]
+    fn test_lock_cache_clear() {
+        let cache = LockCache::new(60, 1000);
+        for i in 0..5 {
+            cache.insert(format!("f{}.rs", i), "WRITE".into(), "t".into(), "ag".into());
+        }
+        assert!(cache.get("f0.rs").is_some());
+
+        cache.clear();
+
+        for i in 0..5 {
+            assert!(cache.get(&format!("f{}.rs", i)).is_none());
+        }
+    }
+
+    #[test]
+    fn test_lock_cache_get_stats_tracks_hits_misses_inserts() {
+        let cache = LockCache::new(60, 1000);
+
+        let s0 = cache.get_stats();
+        assert_eq!(s0.hits, 0);
+        assert_eq!(s0.misses, 0);
+        assert_eq!(s0.inserts, 0);
+
+        cache.insert("a.rs".into(), "WRITE".into(), "t".into(), "ag".into());
+        let _ = cache.get("a.rs");      // hit
+        let _ = cache.get("miss.rs");   // miss
+
+        let s1 = cache.get_stats();
+        assert_eq!(s1.inserts, 1);
+        assert_eq!(s1.hits, 1);
+        assert_eq!(s1.misses, 1);
+    }
+
+    #[test]
+    fn test_lock_cache_cleanup_expired() {
+        let cache = LockCache::new(0, 1000); // 0s TTL → expired immediately
+        cache.insert("a.rs".into(), "W".into(), "t".into(), "ag".into());
+        cache.insert("b.rs".into(), "W".into(), "t".into(), "ag".into());
+
+        std::thread::sleep(Duration::from_millis(5));
+
+        let cleaned = cache.cleanup_expired();
+        assert_eq!(cleaned, 2);
+
+        assert!(cache.get("a.rs").is_none());
+        assert!(cache.get("b.rs").is_none());
+    }
+
+    #[test]
+    fn test_lock_cache_cleanup_nothing_expired() {
+        let cache = LockCache::new(60, 1000);
+        cache.insert("a.rs".into(), "W".into(), "t".into(), "ag".into());
+        let cleaned = cache.cleanup_expired();
+        assert_eq!(cleaned, 0);
+        assert!(cache.get("a.rs").is_some());
+    }
+
+    #[test]
+    fn test_lock_cache_insert_evicts_when_full() {
+        let cache = LockCache::new(60, 3); // max 3 entries
+
+        cache.insert("a.rs".into(), "W".into(), "t".into(), "ag".into());
+        cache.insert("b.rs".into(), "W".into(), "t".into(), "ag".into());
+        cache.insert("c.rs".into(), "W".into(), "t".into(), "ag".into());
+
+        // Insert one more — should evict an older entry to make room
+        cache.insert("d.rs".into(), "W".into(), "t".into(), "ag".into());
+
+        // New entry must be present
+        assert!(cache.get("d.rs").is_some());
+        let stats = cache.get_stats();
+        assert_eq!(stats.inserts, 4);
+    }
+
+    #[test]
+    fn test_batch_operations_prewarm_cache() {
+        let cache = Arc::new(LockCache::new(60, 1000));
+        let batch = BatchOperations::new(cache.clone());
+
+        batch.prewarm_cache(vec![
+            ("a.rs".into(), "WRITE".into(), "t1".into(), "ag1".into()),
+            ("b.rs".into(), "READ".into(), "t2".into(), "ag2".into()),
+        ]);
+
+        assert!(cache.get("a.rs").is_some());
+        assert!(cache.get("b.rs").is_some());
+        assert_eq!(cache.get("a.rs").unwrap().mode, "WRITE");
+        assert_eq!(cache.get("b.rs").unwrap().mode, "READ");
+    }
+
+    #[test]
+    fn test_batch_operations_update_cache_insert_and_remove() {
+        let cache = Arc::new(LockCache::new(60, 1000));
+        let batch = BatchOperations::new(cache.clone());
+
+        cache.insert("old.rs".into(), "W".into(), "t".into(), "ag".into());
+        assert!(cache.get("old.rs").is_some());
+        assert!(cache.get("new.rs").is_none());
+
+        batch.batch_update_cache(vec![
+            CacheUpdate::Insert {
+                file_path: "new.rs".into(),
+                mode: "READ".into(),
+                token_id: "t".into(),
+                agent_id: "ag".into(),
+            },
+            CacheUpdate::Remove("old.rs".into()),
+        ]);
+
+        assert!(cache.get("old.rs").is_none());
+        assert!(cache.get("new.rs").is_some());
+    }
+
+    #[test]
+    fn test_async_lock_queue_size() {
+        let queue = AsyncLockQueue::new(100);
+        assert_eq!(queue.size(), 0);
+
+        queue.enqueue(AsyncLockRequest {
+            token_id: "t".into(), file_path: "f".into(), mode: "W".into(),
+            priority: 1, requested_at_ms: 0,
+        }).unwrap();
+        assert_eq!(queue.size(), 1);
+
+        queue.enqueue(AsyncLockRequest {
+            token_id: "t2".into(), file_path: "f2".into(), mode: "W".into(),
+            priority: 1, requested_at_ms: 0,
+        }).unwrap();
+        assert_eq!(queue.size(), 2);
+
+        queue.dequeue();
+        assert_eq!(queue.size(), 1);
+    }
+
+    #[test]
+    fn test_async_lock_queue_clear() {
+        let queue = AsyncLockQueue::new(100);
+        for i in 0..5 {
+            queue.enqueue(AsyncLockRequest {
+                token_id: format!("t{}", i),
+                file_path: format!("f{}.rs", i),
+                mode: "W".into(),
+                priority: i,
+                requested_at_ms: i as u64,
+            }).unwrap();
+        }
+        assert_eq!(queue.size(), 5);
+
+        queue.clear();
+        assert_eq!(queue.size(), 0);
+        assert!(queue.dequeue().is_none());
+    }
+
+    #[test]
+    fn test_async_lock_queue_enqueue_when_full_returns_error() {
+        let queue = AsyncLockQueue::new(2);
+        queue.enqueue(AsyncLockRequest {
+            token_id: "t1".into(), file_path: "f1".into(), mode: "W".into(),
+            priority: 1, requested_at_ms: 0,
+        }).unwrap();
+        queue.enqueue(AsyncLockRequest {
+            token_id: "t2".into(), file_path: "f2".into(), mode: "W".into(),
+            priority: 1, requested_at_ms: 0,
+        }).unwrap();
+
+        let result = queue.enqueue(AsyncLockRequest {
+            token_id: "t3".into(), file_path: "f3".into(), mode: "W".into(),
+            priority: 1, requested_at_ms: 0,
+        });
+        assert!(matches!(result, Err(ErgataiError::InvalidArgument(_))));
+    }
+
+    #[test]
+    fn test_async_lock_queue_dequeue_empty_returns_none() {
+        let queue = AsyncLockQueue::new(10);
+        assert!(queue.dequeue().is_none());
+    }
+
+    #[test]
+    fn test_async_lock_queue_fifo_within_same_priority() {
+        let queue = AsyncLockQueue::new(100);
+
+        // Same priority, different timestamps — earlier timestamp dequeues first
+        queue.enqueue(AsyncLockRequest {
+            token_id: "first".into(), file_path: "f".into(), mode: "W".into(),
+            priority: 5, requested_at_ms: 100,
+        }).unwrap();
+        queue.enqueue(AsyncLockRequest {
+            token_id: "second".into(), file_path: "f".into(), mode: "W".into(),
+            priority: 5, requested_at_ms: 200,
+        }).unwrap();
+        queue.enqueue(AsyncLockRequest {
+            token_id: "third".into(), file_path: "f".into(), mode: "W".into(),
+            priority: 5, requested_at_ms: 300,
+        }).unwrap();
+
+        assert_eq!(queue.dequeue().unwrap().token_id, "first");
+        assert_eq!(queue.dequeue().unwrap().token_id, "second");
+        assert_eq!(queue.dequeue().unwrap().token_id, "third");
+    }
+
+    #[test]
+    fn test_async_lock_request_equality() {
+        let a = AsyncLockRequest {
+            token_id: "t".into(), file_path: "f".into(), mode: "W".into(),
+            priority: 3, requested_at_ms: 42,
+        };
+        let b = AsyncLockRequest {
+            token_id: "different".into(), file_path: "different".into(), mode: "R".into(),
+            priority: 3, requested_at_ms: 42,
+        };
+        // Equality is based only on priority + requested_at_ms
+        assert!(a == b);
+    }
+
+    #[test]
+    fn test_cached_lock_is_expired_directly() {
+        let fresh = CachedLock {
+            file_path: "f".into(), mode: "W".into(), token_id: "t".into(),
+            agent_id: "ag".into(), cached_at: Instant::now(),
+            ttl: Duration::from_secs(60),
+        };
+        assert!(!fresh.is_expired());
+
+        let expired = CachedLock {
+            file_path: "f".into(), mode: "W".into(), token_id: "t".into(),
+            agent_id: "ag".into(),
+            cached_at: Instant::now() - Duration::from_secs(10),
+            ttl: Duration::from_secs(1),
+        };
+        assert!(expired.is_expired());
+    }
+
+    #[test]
+    fn test_batch_contains_distinguishes_cached_vs_missing() {
+        let cache = LockCache::new(60, 1000);
+        cache.insert("cached.rs".into(), "W".into(), "t".into(), "ag".into());
+
+        let results = cache.batch_contains(&[
+            "cached.rs".into(),
+            "missing.rs".into(),
+            "also-missing.rs".into(),
+        ]);
+
+        assert_eq!(results.get("cached.rs"), Some(&true));
+        assert_eq!(results.get("missing.rs"), Some(&false));
+        assert_eq!(results.get("also-missing.rs"), Some(&false));
+    }
+
+    #[test]
+    fn test_batch_contains_expired_entry_returns_false() {
+        let cache = LockCache::new(0, 1000); // 0s TTL
+        cache.insert("expired.rs".into(), "W".into(), "t".into(), "ag".into());
+        std::thread::sleep(Duration::from_millis(5));
+
+        let results = cache.batch_contains(&["expired.rs".into()]);
+        assert_eq!(results.get("expired.rs"), Some(&false));
+    }
 }

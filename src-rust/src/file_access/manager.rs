@@ -159,3 +159,153 @@ pub async fn shutdown_file_access(project_id: &str) -> ErgataiResult<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    /// Helper: create a temp directory that is also a git repo (SnapshotManager needs it).
+    fn setup_git_repo() -> (TempDir, PathBuf) {
+        let temp_dir = TempDir::new().unwrap();
+        let project_root = temp_dir.path().to_path_buf();
+
+        // Initialize a git repo so SnapshotManager::new succeeds
+        git2::Repository::init(&project_root).unwrap();
+
+        // Create an initial commit so HEAD exists
+        let repo = git2::Repository::open(&project_root).unwrap();
+        let sig = git2::Signature::now("Test", "test@test.com").unwrap();
+        let tree_id = {
+            let mut index = repo.index().unwrap();
+            index.write_tree().unwrap()
+        };
+        let tree = repo.find_tree(tree_id).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[])
+            .unwrap();
+
+        (temp_dir, project_root)
+    }
+
+    /// Each test uses a unique project ID to avoid collisions via the global OnceLock.
+    fn unique_project_id(label: &str) -> String {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        format!("test-mgr-{}-{}-{}", label, std::process::id(), n)
+    }
+
+    // ─── Getters on uninitialized projects ─────────────────────────
+
+    #[tokio::test]
+    async fn test_get_lock_manager_unknown_project() {
+        let id = unique_project_id("unknown-lock");
+        let result = get_lock_manager(&id).await;
+        assert!(matches!(result, Err(ErgataiError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn test_get_snapshot_manager_unknown_project() {
+        let id = unique_project_id("unknown-snap");
+        let result = get_snapshot_manager(&id).await;
+        assert!(matches!(result, Err(ErgataiError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn test_get_watchdog_unknown_project() {
+        let id = unique_project_id("unknown-wd");
+        let result = get_watchdog(&id).await;
+        assert!(matches!(result, Err(ErgataiError::NotFound(_))));
+    }
+
+    // ─── Shutdown of uninitialized project ─────────────────────────
+
+    #[tokio::test]
+    async fn test_shutdown_unknown_project_is_noop() {
+        let id = unique_project_id("unknown-shutdown");
+        // Should NOT error — just logs a warning
+        let result = shutdown_file_access(&id).await;
+        assert!(result.is_ok());
+    }
+
+    // ─── Full lifecycle ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_init_file_access_creates_directory_and_managers() {
+        let (temp, project_root) = setup_git_repo();
+        let id = unique_project_id("init");
+
+        // Before init: getters should fail
+        assert!(get_lock_manager(&id).await.is_err());
+
+        // Init
+        init_file_access(&id, &project_root).await.unwrap();
+
+        // .ergatai directory created
+        let ergatai_dir = project_root.join(".ergatai");
+        assert!(ergatai_dir.exists());
+        assert!(ergatai_dir.join("locks.db").exists());
+
+        // All 3 getters now succeed
+        let lm = get_lock_manager(&id).await.unwrap();
+        assert!(Arc::strong_count(&lm) >= 2); // held by global state + this var
+
+        let sm = get_snapshot_manager(&id).await.unwrap();
+        assert!(Arc::strong_count(&sm) >= 2);
+
+        let wd = get_watchdog(&id).await.unwrap();
+        assert!(Arc::strong_count(&wd) >= 2);
+
+        // Cleanup — stop watchdog and remove from global state
+        shutdown_file_access(&id).await.unwrap();
+
+        // After shutdown: getters should fail again
+        assert!(get_lock_manager(&id).await.is_err());
+
+        drop(temp);
+    }
+
+    #[tokio::test]
+    async fn test_init_file_access_idempotent() {
+        let (temp, project_root) = setup_git_repo();
+        let id = unique_project_id("idempotent");
+
+        // Call twice — second call should be a no-op, not error
+        init_file_access(&id, &project_root).await.unwrap();
+        init_file_access(&id, &project_root).await.unwrap();
+
+        // Still works
+        let lm = get_lock_manager(&id).await.unwrap();
+        assert!(Arc::strong_count(&lm) >= 2);
+
+        shutdown_file_access(&id).await.unwrap();
+        drop(temp);
+    }
+
+    #[tokio::test]
+    async fn test_multiple_projects_independent() {
+        let (temp_a, root_a) = setup_git_repo();
+        let (temp_b, root_b) = setup_git_repo();
+        let id_a = unique_project_id("multi-a");
+        let id_b = unique_project_id("multi-b");
+
+        init_file_access(&id_a, &root_a).await.unwrap();
+        init_file_access(&id_b, &root_b).await.unwrap();
+
+        // Both can be fetched
+        let lm_a = get_lock_manager(&id_a).await.unwrap();
+        let lm_b = get_lock_manager(&id_b).await.unwrap();
+
+        // They are different Arc instances pointing to different managers
+        assert!(!Arc::ptr_eq(&lm_a, &lm_b));
+
+        // Shutdown one doesn't affect the other
+        shutdown_file_access(&id_a).await.unwrap();
+        assert!(get_lock_manager(&id_a).await.is_err());
+        assert!(get_lock_manager(&id_b).await.is_ok());
+
+        shutdown_file_access(&id_b).await.unwrap();
+        drop(temp_a);
+        drop(temp_b);
+    }
+}

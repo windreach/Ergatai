@@ -578,4 +578,68 @@ mod tests {
         // Should not error, just ignore
         watchdog.mark_busy("session-1", 300).await.unwrap();
     }
+
+    #[tokio::test]
+    async fn test_watchdog_config() {
+        let (_temp_dir, lock_manager) = create_test_lock_manager();
+        let config = WatchdogConfig {
+            check_interval_secs: 30,
+            timeout_multiplier: 5,
+            grace_period_1_secs: 45,
+            grace_period_2_secs: 90,
+            task_aware: true,
+        };
+        let watchdog = Watchdog::new(lock_manager, config);
+
+        assert_eq!(watchdog.config.check_interval_secs, 30);
+        assert_eq!(watchdog.config.timeout_multiplier, 5);
+        assert_eq!(watchdog.config.grace_period_1_secs, 45);
+        assert_eq!(watchdog.config.grace_period_2_secs, 90);
+        assert_eq!(watchdog.config.task_aware, true);
+    }
+
+    #[tokio::test]
+    async fn test_clear_busy_nonexistent_session() {
+        let (_temp_dir, lock_manager) = create_test_lock_manager();
+        let config = WatchdogConfig::default();
+        let watchdog = Watchdog::new(lock_manager, config);
+
+        // Clear busy for non-existent session - should not error
+        let result = watchdog.clear_busy("nonexistent-session").await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_mark_busy_multiple_sessions() {
+        let (_temp_dir, lock_manager) = create_test_lock_manager();
+        let config = WatchdogConfig::default();
+        let watchdog = Watchdog::new(lock_manager, config);
+
+        // Mark multiple sessions as busy
+        watchdog.mark_busy("session-1", 300).await.unwrap();
+        watchdog.mark_busy("session-2", 600).await.unwrap();
+        watchdog.mark_busy("session-3", 900).await.unwrap();
+
+        // All should succeed
+        // Clear them
+        watchdog.clear_busy("session-1").await.unwrap();
+        watchdog.clear_busy("session-2").await.unwrap();
+        watchdog.clear_busy("session-3").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_mark_busy_update_existing() {
+        let (_temp_dir, lock_manager) = create_test_lock_manager();
+        let config = WatchdogConfig::default();
+        let watchdog = Watchdog::new(lock_manager, config);
+
+        // Mark session as busy
+        watchdog.mark_busy("session-1", 300).await.unwrap();
+
+        // Update with new duration
+        watchdog.mark_busy("session-1", 600).await.unwrap();
+
+        // Should succeed without error
+        watchdog.clear_busy("session-1").await.unwrap();
+    }
 }

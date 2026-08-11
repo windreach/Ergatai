@@ -103,28 +103,19 @@ impl FileEventsConsumer {
                         let subject = msg.subject.as_str();
 
                         // Parse event based on subject
-                        let event = if subject.starts_with("ergatai.file.ready.") {
-                            match serde_json::from_slice::<FileReadyPayload>(&msg.payload) {
-                                Ok(payload) => FileEvent::Ready(payload),
-                                Err(e) => {
-                                    warn!(error = %e, "Failed to parse file.ready payload");
-                                    msg.ack().await.ok();
-                                    continue;
-                                }
+                        let parsed = parse_file_event(subject, &msg.payload);
+                        let event = match parsed {
+                            Ok(Some(e)) => e,
+                            Ok(None) => {
+                                warn!(subject = subject, "Unknown file event subject");
+                                msg.ack().await.ok();
+                                continue;
                             }
-                        } else if subject.starts_with("ergatai.file.error.") {
-                            match serde_json::from_slice::<FileErrorPayload>(&msg.payload) {
-                                Ok(payload) => FileEvent::Error(payload),
-                                Err(e) => {
-                                    warn!(error = %e, "Failed to parse file.error payload");
-                                    msg.ack().await.ok();
-                                    continue;
-                                }
+                            Err(e) => {
+                                warn!(error = %e, subject = subject, "Failed to parse file event payload");
+                                msg.ack().await.ok();
+                                continue;
                             }
-                        } else {
-                            warn!(subject = subject, "Unknown file event subject");
-                            msg.ack().await.ok();
-                            continue;
                         };
 
                         // Acknowledge before processing
@@ -218,19 +209,23 @@ impl FileEventsConsumer {
                 let subject = msg.subject.as_str();
 
                 // Parse event based on subject
-                let event = if subject.starts_with("ergatai.file.ready.") {
-                    // File ready event
-                    let payload: FileReadyPayload = serde_json::from_slice(&msg.payload)?;
-                    FileEvent::Ready(payload)
-                } else if subject.starts_with("ergatai.file.error.") {
-                    // File error event
-                    let payload: FileErrorPayload = serde_json::from_slice(&msg.payload)?;
-                    FileEvent::Error(payload)
-                } else {
-                    warn!(subject = subject, "Unknown file event subject");
-                    // Acknowledge unknown messages to remove them from queue
-                    msg.ack().await.ok();
-                    return Ok(None);
+                let parsed = parse_file_event(subject, &msg.payload);
+                let event = match parsed {
+                    Ok(Some(e)) => e,
+                    Ok(None) => {
+                        warn!(subject = subject, "Unknown file event subject");
+                        // Acknowledge unknown messages to remove them from queue
+                        msg.ack().await.ok();
+                        return Ok(None);
+                    }
+                    Err(e) => {
+                        warn!(error = %e, subject = subject, "Failed to parse file event payload");
+                        // ACK before returning the error: malformed JSON can never succeed on
+                        // retry, so we remove it from the queue to avoid wasting redelivery
+                        // attempts (consistent with `start()` behavior).
+                        msg.ack().await.ok();
+                        return Err(e);
+                    }
                 };
 
                 debug!(subject = subject, "File event consumed");
@@ -261,6 +256,27 @@ pub enum FileEvent {
     Error(FileErrorPayload),
 }
 
+/// Parse a NATS subject + payload into a FileEvent.
+///
+/// Returns:
+/// - `Ok(Some(event))` if the subject matches `ergatai.file.ready.*` or `ergatai.file.error.*`
+///   and the payload deserializes correctly.
+/// - `Ok(None)` if the subject doesn't match either prefix (unknown subject).
+/// - `Err(...)` if the subject matches but the payload is malformed JSON.
+///
+/// Pure function — no NATS/async dependency, easy to unit-test.
+fn parse_file_event(subject: &str, payload: &[u8]) -> Result<Option<FileEvent>, ErgataiError> {
+    if subject.starts_with("ergatai.file.ready.") {
+        let p: FileReadyPayload = serde_json::from_slice(payload)?;
+        Ok(Some(FileEvent::Ready(p)))
+    } else if subject.starts_with("ergatai.file.error.") {
+        let p: FileErrorPayload = serde_json::from_slice(payload)?;
+        Ok(Some(FileEvent::Error(p)))
+    } else {
+        Ok(None)
+    }
+}
+
 /// File ready payload
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FileReadyPayload {
@@ -275,6 +291,8 @@ pub struct FileReadyPayload {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ─── Payload serialization (original tests) ────────────────────
 
     #[test]
     fn test_file_ready_payload_serialization() {
@@ -308,5 +326,193 @@ mod tests {
         assert_eq!(deserialized.agent_id, payload.agent_id);
         assert_eq!(deserialized.reason, payload.reason);
         assert_eq!(deserialized.timestamp, payload.timestamp);
+    }
+
+    // ─── parse_file_event: happy paths ─────────────────────────────
+
+    #[test]
+    fn test_parse_file_event_ready() {
+        let payload = FileReadyPayload {
+            file_path: "src/main.rs".to_string(),
+            agent_id: "agent-42".to_string(),
+            timestamp: 1_700_000_000,
+        };
+        let bytes = serde_json::to_vec(&payload).unwrap();
+
+        let result = parse_file_event("ergatai.file.ready.abc123", &bytes).unwrap();
+        match result {
+            Some(FileEvent::Ready(p)) => {
+                assert_eq!(p.file_path, "src/main.rs");
+                assert_eq!(p.agent_id, "agent-42");
+                assert_eq!(p.timestamp, 1_700_000_000);
+            }
+            other => panic!("expected Some(FileEvent::Ready(..)), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_file_event_error() {
+        let payload = FileErrorPayload {
+            file_path: "src/lib.rs".to_string(),
+            agent_id: "agent-7".to_string(),
+            reason: "OOM killed".to_string(),
+            timestamp: 1_700_000_001,
+        };
+        let bytes = serde_json::to_vec(&payload).unwrap();
+
+        let result = parse_file_event("ergatai.file.error.def456", &bytes).unwrap();
+        match result {
+            Some(FileEvent::Error(p)) => {
+                assert_eq!(p.file_path, "src/lib.rs");
+                assert_eq!(p.agent_id, "agent-7");
+                assert_eq!(p.reason, "OOM killed");
+            }
+            other => panic!("expected Some(FileEvent::Error(..)), got {:?}", other),
+        }
+    }
+
+    // ─── parse_file_event: unknown subject ─────────────────────────
+
+    #[test]
+    fn test_parse_file_event_unknown_subject_returns_none() {
+        let payload = serde_json::to_vec(&FileReadyPayload {
+            file_path: "x".to_string(),
+            agent_id: "a".to_string(),
+            timestamp: 0,
+        })
+        .unwrap();
+
+        // Subject doesn't match either prefix → None, not an error
+        let result = parse_file_event("ergatai.unknown.subject", &payload).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_file_event_similar_but_wrong_prefix() {
+        let payload = serde_json::to_vec(&FileReadyPayload {
+            file_path: "x".to_string(),
+            agent_id: "a".to_string(),
+            timestamp: 0,
+        })
+        .unwrap();
+
+        // Close but not matching — no dot after "ready"/"error"
+        assert!(parse_file_event("ergatai.file.readyfoo", &payload)
+            .unwrap()
+            .is_none());
+        assert!(parse_file_event("ergatai.file.errorfoo", &payload)
+            .unwrap()
+            .is_none());
+        assert!(parse_file_event("ergatai.file", &payload).unwrap().is_none());
+        assert!(parse_file_event("ergatai.", &payload).unwrap().is_none());
+        assert!(parse_file_event("", &payload).unwrap().is_none());
+    }
+
+    // ─── parse_file_event: malformed payloads ──────────────────────
+
+    #[test]
+    fn test_parse_file_event_ready_invalid_json() {
+        let bad = b"{\"file_path\": 42}"; // file_path should be a string
+        let result = parse_file_event("ergatai.file.ready.abc", bad);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_file_event_ready_missing_field() {
+        let bad = b"{\"file_path\": \"x\"}"; // missing agent_id and timestamp
+        let result = parse_file_event("ergatai.file.ready.abc", bad);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_file_event_error_invalid_json() {
+        let bad = b"not json at all";
+        let result = parse_file_event("ergatai.file.error.xyz", bad);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_file_event_empty_payload() {
+        let result = parse_file_event("ergatai.file.ready.abc", b"");
+        assert!(result.is_err());
+    }
+
+    // ─── parse_file_event: edge-case values ────────────────────────
+
+    #[test]
+    fn test_parse_file_event_unicode_path() {
+        let payload = FileReadyPayload {
+            file_path: "src/路径/файл.rs".to_string(),
+            agent_id: "agent-中文".to_string(),
+            timestamp: 0,
+        };
+        let bytes = serde_json::to_vec(&payload).unwrap();
+        let result = parse_file_event("ergatai.file.ready.hash", &bytes).unwrap();
+        match result {
+            Some(FileEvent::Ready(p)) => {
+                assert_eq!(p.file_path, "src/路径/файл.rs");
+                assert_eq!(p.agent_id, "agent-中文");
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_file_event_empty_strings() {
+        let payload = FileReadyPayload {
+            file_path: "".to_string(),
+            agent_id: "".to_string(),
+            timestamp: 0,
+        };
+        let bytes = serde_json::to_vec(&payload).unwrap();
+        let result = parse_file_event("ergatai.file.ready.hash", &bytes).unwrap();
+        assert!(matches!(result, Some(FileEvent::Ready(_))));
+    }
+
+    #[test]
+    fn test_parse_file_event_max_timestamp() {
+        let payload = FileReadyPayload {
+            file_path: "x".to_string(),
+            agent_id: "a".to_string(),
+            timestamp: u64::MAX,
+        };
+        let bytes = serde_json::to_vec(&payload).unwrap();
+        let result = parse_file_event("ergatai.file.ready.h", &bytes).unwrap();
+        match result {
+            Some(FileEvent::Ready(p)) => assert_eq!(p.timestamp, u64::MAX),
+            _ => panic!("expected Ready"),
+        }
+    }
+
+    #[test]
+    fn test_parse_file_event_extra_fields_ignored() {
+        // JSON with extra fields should still deserialize (serde default)
+        let bytes = br#"{"file_path":"f.rs","agent_id":"a","timestamp":1,"extra":"ignored"}"#;
+        let result = parse_file_event("ergatai.file.ready.h", bytes).unwrap();
+        assert!(matches!(result, Some(FileEvent::Ready(_))));
+    }
+
+    // ─── FileEvent enum ────────────────────────────────────────────
+
+    #[test]
+    fn test_file_event_debug_formatting() {
+        let ready = FileEvent::Ready(FileReadyPayload {
+            file_path: "a.rs".to_string(),
+            agent_id: "ag".to_string(),
+            timestamp: 1,
+        });
+        let debug_str = format!("{:?}", ready);
+        assert!(debug_str.contains("Ready"));
+        assert!(debug_str.contains("a.rs"));
+
+        let error = FileEvent::Error(FileErrorPayload {
+            file_path: "b.rs".to_string(),
+            agent_id: "ag".to_string(),
+            reason: "boom".to_string(),
+            timestamp: 2,
+        });
+        let debug_str = format!("{:?}", error);
+        assert!(debug_str.contains("Error"));
+        assert!(debug_str.contains("boom"));
     }
 }

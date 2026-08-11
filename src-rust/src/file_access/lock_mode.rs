@@ -377,4 +377,145 @@ mod tests {
         let result = manager.upgrade_lock("token1", "test.rs");
         assert!(result.is_err());
     }
+
+    #[test]
+    fn test_upgrade_nonexistent_lock() {
+        let (_temp_dir, manager) = setup_test_db();
+
+        // Try to upgrade a lock that doesn't exist
+        let result = manager.upgrade_lock("nonexistent-token", "nonexistent.rs");
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ErgataiError::NotFound(_)));
+    }
+
+    #[test]
+    fn test_downgrade_nonexistent_lock() {
+        let (_temp_dir, manager) = setup_test_db();
+
+        // Try to downgrade a lock that doesn't exist
+        let result = manager.downgrade_lock("nonexistent-token", "nonexistent.rs");
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ErgataiError::NotFound(_)));
+    }
+
+    #[test]
+    fn test_upgrade_write_to_write_noop() {
+        let (_temp_dir, manager) = setup_test_db();
+
+        // Insert a WRITE lock
+        {
+            let conn = manager.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO file_locks (id, file_path, agent_id, session_id, mode, token_id, status, created_at, expires_at)
+                 VALUES ('lock1', 'test.rs', 'agent1', 'session1', 'WRITE', 'token1', 'ACTIVE', datetime('now'), datetime('now', '+1 hour'))",
+                [],
+            )
+            .unwrap();
+        }
+
+        // Try to upgrade WRITE to WRITE - should succeed (no-op)
+        let result = manager.upgrade_lock("token1", "test.rs");
+        assert!(result.is_ok());
+
+        // Verify mode is still WRITE
+        let mode = manager.get_lock_mode("token1", "test.rs").unwrap();
+        assert_eq!(mode, Some(FileMode::Write));
+    }
+
+    #[test]
+    fn test_downgrade_read_to_read_noop() {
+        let (_temp_dir, manager) = setup_test_db();
+
+        // Insert a READ lock
+        {
+            let conn = manager.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO file_locks (id, file_path, agent_id, session_id, mode, token_id, status, created_at, expires_at)
+                 VALUES ('lock1', 'test.rs', 'agent1', 'session1', 'READ', 'token1', 'ACTIVE', datetime('now'), datetime('now', '+1 hour'))",
+                [],
+            )
+            .unwrap();
+        }
+
+        // Try to downgrade READ to READ - should succeed (no-op)
+        let result = manager.downgrade_lock("token1", "test.rs");
+        assert!(result.is_ok());
+
+        // Verify mode is still READ
+        let mode = manager.get_lock_mode("token1", "test.rs").unwrap();
+        assert_eq!(mode, Some(FileMode::Read));
+    }
+
+    #[test]
+    fn test_multiple_upgrades_and_downgrades() {
+        let (_temp_dir, manager) = setup_test_db();
+
+        // Start with READ lock
+        {
+            let conn = manager.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO file_locks (id, file_path, agent_id, session_id, mode, token_id, status, created_at, expires_at)
+                 VALUES ('lock1', 'test.rs', 'agent1', 'session1', 'READ', 'token1', 'ACTIVE', datetime('now'), datetime('now', '+1 hour'))",
+                [],
+            )
+            .unwrap();
+        }
+
+        // Upgrade to WRITE
+        assert!(manager.upgrade_lock("token1", "test.rs").is_ok());
+        assert_eq!(manager.get_lock_mode("token1", "test.rs").unwrap(), Some(FileMode::Write));
+
+        // Downgrade to READ
+        assert!(manager.downgrade_lock("token1", "test.rs").is_ok());
+        assert_eq!(manager.get_lock_mode("token1", "test.rs").unwrap(), Some(FileMode::Read));
+
+        // Upgrade to WRITE again
+        assert!(manager.upgrade_lock("token1", "test.rs").is_ok());
+        assert_eq!(manager.get_lock_mode("token1", "test.rs").unwrap(), Some(FileMode::Write));
+
+        // Downgrade to READ again
+        assert!(manager.downgrade_lock("token1", "test.rs").is_ok());
+        assert_eq!(manager.get_lock_mode("token1", "test.rs").unwrap(), Some(FileMode::Read));
+    }
+
+    #[test]
+    fn test_upgrade_with_other_read_locks() {
+        let (_temp_dir, manager) = setup_test_db();
+
+        // Insert READ locks for both agent1 and agent2
+        {
+            let conn = manager.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO file_locks (id, file_path, agent_id, session_id, mode, token_id, status, created_at, expires_at)
+                 VALUES ('lock1', 'test.rs', 'agent1', 'session1', 'READ', 'token1', 'ACTIVE', datetime('now'), datetime('now', '+1 hour'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO file_locks (id, file_path, agent_id, session_id, mode, token_id, status, created_at, expires_at)
+                 VALUES ('lock2', 'test.rs', 'agent2', 'session2', 'READ', 'token2', 'ACTIVE', datetime('now'), datetime('now', '+1 hour'))",
+                [],
+            )
+            .unwrap();
+        }
+
+        // Upgrade agent1's lock to WRITE - should succeed (other READ locks don't block)
+        let result = manager.upgrade_lock("token1", "test.rs");
+        assert!(result.is_ok());
+
+        // Verify agent1 now has WRITE
+        assert_eq!(manager.get_lock_mode("token1", "test.rs").unwrap(), Some(FileMode::Write));
+
+        // Verify agent2 still has READ
+        assert_eq!(manager.get_lock_mode("token2", "test.rs").unwrap(), Some(FileMode::Read));
+    }
+
+    #[test]
+    fn test_get_lock_mode_nonexistent() {
+        let (_temp_dir, manager) = setup_test_db();
+
+        // Query lock mode for non-existent lock
+        let mode = manager.get_lock_mode("nonexistent-token", "nonexistent.rs").unwrap();
+        assert_eq!(mode, None);
+    }
 }

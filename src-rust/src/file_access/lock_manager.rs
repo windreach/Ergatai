@@ -1335,4 +1335,334 @@ mod tests {
         let result = manager.acquire_lock(&file_token, "../etc/passwd");
         assert!(matches!(result, Err(ErgataiError::InvalidPath(_))));
     }
+
+    #[test]
+    fn test_get_active_tokens_excludes_non_active() {
+        let (manager, _temp) = create_test_manager();
+
+        let active_token = SystemToken::new(
+            "agent-active".to_string(),
+            "session-1".to_string(),
+            manager.project_root.to_string_lossy().to_string(),
+            3600,
+            30,
+        );
+        let revoked_token = SystemToken::new(
+            "agent-revoked".to_string(),
+            "session-2".to_string(),
+            manager.project_root.to_string_lossy().to_string(),
+            3600,
+            30,
+        );
+
+        manager.register_system_token(&active_token).unwrap();
+        manager.register_system_token(&revoked_token).unwrap();
+        manager.expire_token(&revoked_token.id.to_string()).unwrap();
+
+        let active_tokens = manager.get_active_tokens().unwrap();
+        assert_eq!(active_tokens.len(), 1);
+        assert_eq!(active_tokens[0].agent_id, "agent-active");
+    }
+
+    #[test]
+    fn test_get_active_tokens_empty_when_none_registered() {
+        let (manager, _temp) = create_test_manager();
+        let tokens = manager.get_active_tokens().unwrap();
+        assert!(tokens.is_empty());
+    }
+
+    #[test]
+    fn test_get_locks_by_session() {
+        let (manager, _temp) = create_test_manager();
+
+        let system_token = SystemToken::new(
+            "agent".to_string(),
+            "session-locks".to_string(),
+            manager.project_root.to_string_lossy().to_string(),
+            3600,
+            30,
+        );
+        manager.register_system_token(&system_token).unwrap();
+
+        let file_token = FileToken::new(
+            "agent".to_string(),
+            "session-locks".to_string(),
+            system_token.id.clone(),
+            "**".to_string(),
+            FileMode::Write,
+            None,
+            "system".to_string(),
+            3600,
+            15,
+        );
+
+        std::fs::write(manager.project_root.join("a.txt"), "a").unwrap();
+        std::fs::write(manager.project_root.join("b.txt"), "b").unwrap();
+        manager.acquire_lock(&file_token, "a.txt").unwrap();
+        manager.acquire_lock(&file_token, "b.txt").unwrap();
+
+        let locks = manager.get_locks_by_session("session-locks").unwrap();
+        assert_eq!(locks.len(), 2);
+        let paths: Vec<&str> = locks.iter().map(|l| l.file_path.as_str()).collect();
+        assert!(paths.contains(&"a.txt"));
+        assert!(paths.contains(&"b.txt"));
+
+        let empty = manager.get_locks_by_session("session-other").unwrap();
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn test_expire_token_marks_as_expired() {
+        let (manager, _temp) = create_test_manager();
+
+        let token = SystemToken::new(
+            "agent".to_string(),
+            "session-expire".to_string(),
+            manager.project_root.to_string_lossy().to_string(),
+            3600,
+            30,
+        );
+        manager.register_system_token(&token).unwrap();
+
+        let found = manager
+            .find_active_system_token_by_session("session-expire")
+            .unwrap();
+        assert_eq!(found.agent_id, "agent");
+
+        manager.expire_token(&token.id.to_string()).unwrap();
+
+        let result = manager.find_active_system_token_by_session("session-expire");
+        assert!(matches!(result, Err(ErgataiError::NotFound(_))));
+    }
+
+    #[test]
+    fn test_expire_nonexistent_token_is_noop() {
+        let (manager, _temp) = create_test_manager();
+        manager.expire_token("nonexistent-token-id").unwrap();
+    }
+
+    #[test]
+    fn test_find_active_system_token_by_session_not_found() {
+        let (manager, _temp) = create_test_manager();
+        let result = manager.find_active_system_token_by_session("no-such-session");
+        assert!(matches!(result, Err(ErgataiError::NotFound(_))));
+    }
+
+    #[test]
+    fn test_register_and_find_file_token_by_id() {
+        let (manager, _temp) = create_test_manager();
+
+        let system_token = SystemToken::new(
+            "agent".to_string(),
+            "session-ft".to_string(),
+            manager.project_root.to_string_lossy().to_string(),
+            3600,
+            30,
+        );
+        manager.register_system_token(&system_token).unwrap();
+
+        let file_token = FileToken::new(
+            "agent".to_string(),
+            "session-ft".to_string(),
+            system_token.id.clone(),
+            "src/**/*.rs".to_string(),
+            FileMode::Write,
+            Some("refactor".to_string()),
+            "system".to_string(),
+            3600,
+            15,
+        );
+        manager.register_file_token(&file_token).unwrap();
+
+        let found = manager
+            .find_active_file_token_by_id(&file_token.id.to_string())
+            .unwrap();
+        assert_eq!(found.agent_id, "agent");
+        assert_eq!(found.scope, "src/**/*.rs");
+        assert_eq!(found.reason, Some("refactor".to_string()));
+    }
+
+    #[test]
+    fn test_find_active_file_token_by_id_not_found() {
+        let (manager, _temp) = create_test_manager();
+        let result = manager.find_active_file_token_by_id("no-such-id");
+        assert!(matches!(result, Err(ErgataiError::NotFound(_))));
+    }
+
+    #[test]
+    fn test_find_active_file_token_by_session_returns_most_recent() {
+        let (manager, _temp) = create_test_manager();
+
+        let system_token = SystemToken::new(
+            "agent".to_string(),
+            "session-multi-ft".to_string(),
+            manager.project_root.to_string_lossy().to_string(),
+            3600,
+            30,
+        );
+        manager.register_system_token(&system_token).unwrap();
+
+        let ft1 = FileToken::new(
+            "agent".to_string(),
+            "session-multi-ft".to_string(),
+            system_token.id.clone(),
+            "src/auth/**".to_string(),
+            FileMode::Read,
+            None,
+            "system".to_string(),
+            3600,
+            15,
+        );
+        manager.register_file_token(&ft1).unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        let ft2 = FileToken::new(
+            "agent".to_string(),
+            "session-multi-ft".to_string(),
+            system_token.id.clone(),
+            "src/db/**".to_string(),
+            FileMode::Write,
+            None,
+            "system".to_string(),
+            3600,
+            15,
+        );
+        manager.register_file_token(&ft2).unwrap();
+
+        let found = manager
+            .find_active_file_token_by_session("session-multi-ft")
+            .unwrap();
+        assert_eq!(found.scope, "src/db/**");
+    }
+
+    #[test]
+    fn test_is_file_locked_for_write_true_with_write_lock() {
+        let (manager, _temp) = create_test_manager();
+
+        let system_token = SystemToken::new(
+            "agent".to_string(),
+            "session-w".to_string(),
+            manager.project_root.to_string_lossy().to_string(),
+            3600,
+            30,
+        );
+        manager.register_system_token(&system_token).unwrap();
+
+        let file_token = FileToken::new(
+            "agent".to_string(),
+            "session-w".to_string(),
+            system_token.id.clone(),
+            "**".to_string(),
+            FileMode::Write,
+            None,
+            "system".to_string(),
+            3600,
+            15,
+        );
+
+        assert!(!manager.is_file_locked_for_write("test.txt").unwrap());
+
+        manager.acquire_lock(&file_token, "test.txt").unwrap();
+
+        assert!(manager.is_file_locked_for_write("test.txt").unwrap());
+    }
+
+    #[test]
+    fn test_is_file_locked_for_write_false_with_read_lock() {
+        let (manager, _temp) = create_test_manager();
+
+        let system_token = SystemToken::new(
+            "agent".to_string(),
+            "session-r".to_string(),
+            manager.project_root.to_string_lossy().to_string(),
+            3600,
+            30,
+        );
+        manager.register_system_token(&system_token).unwrap();
+
+        let file_token = FileToken::new(
+            "agent".to_string(),
+            "session-r".to_string(),
+            system_token.id.clone(),
+            "**".to_string(),
+            FileMode::Read,
+            None,
+            "system".to_string(),
+            3600,
+            15,
+        );
+
+        manager.acquire_lock(&file_token, "test.txt").unwrap();
+
+        // READ lock does NOT count as locked for write (or locked at all —
+        // is_file_locked also only checks WRITE locks to allow concurrent readers)
+        assert!(!manager.is_file_locked_for_write("test.txt").unwrap());
+        assert!(!manager.is_file_locked("test.txt").unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_notify_file_error_sends_to_waiters() {
+        let (manager, _temp) = create_test_manager();
+
+        let rx1 = manager.add_waiter("error_file.txt").await.unwrap();
+        let rx2 = manager.add_waiter("error_file.txt").await.unwrap();
+
+        manager
+            .notify_file_error("error_file.txt", "disk full")
+            .await
+            .unwrap();
+
+        let r1 = rx1.await.unwrap();
+        assert!(r1.is_err());
+        assert_eq!(r1.unwrap_err(), "disk full");
+
+        let r2 = rx2.await.unwrap();
+        assert!(r2.is_err());
+        assert_eq!(r2.unwrap_err(), "disk full");
+    }
+
+    #[tokio::test]
+    async fn test_notify_file_error_no_waiters_is_noop() {
+        let (manager, _temp) = create_test_manager();
+        manager
+            .notify_file_error("no_waiters.txt", "some error")
+            .await
+            .unwrap();
+    }
+
+    #[test]
+    fn test_get_tokens_by_session_returns_registered_token() {
+        let (manager, _temp) = create_test_manager();
+
+        let t1 = SystemToken::new(
+            "agent-1".to_string(),
+            "session-alpha".to_string(),
+            manager.project_root.to_string_lossy().to_string(),
+            3600,
+            30,
+        );
+        let t2 = SystemToken::new(
+            "agent-2".to_string(),
+            "session-beta".to_string(),
+            manager.project_root.to_string_lossy().to_string(),
+            3600,
+            30,
+        );
+        manager.register_system_token(&t1).unwrap();
+        manager.register_system_token(&t2).unwrap();
+
+        // Each session should see only its own token (session_id is UNIQUE)
+        let alpha_tokens = manager.get_tokens_by_session("session-alpha").unwrap();
+        assert_eq!(alpha_tokens.len(), 1);
+        assert_eq!(alpha_tokens[0].agent_id, "agent-1");
+
+        let beta_tokens = manager.get_tokens_by_session("session-beta").unwrap();
+        assert_eq!(beta_tokens.len(), 1);
+        assert_eq!(beta_tokens[0].agent_id, "agent-2");
+
+        // Unknown session returns empty
+        let empty = manager.get_tokens_by_session("no-such").unwrap();
+        assert!(empty.is_empty());
+    }
 }

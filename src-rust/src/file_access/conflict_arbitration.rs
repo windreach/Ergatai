@@ -233,4 +233,129 @@ mod tests {
             ArbitrationDecision::KeepWithCurrentHolder
         );
     }
+
+    #[test]
+    fn test_invalid_priority_defaults_to_medium() {
+        // Invalid priority strings default to medium (2)
+        // "unknown_invalid" (medium=2) vs "low" (1) → current holds (2 > 1)
+        let conflict = create_test_conflict(Some("unknown_invalid"), Some("low"));
+        assert_eq!(
+            arbitrate_conflict(&conflict),
+            ArbitrationDecision::KeepWithCurrentHolder
+        );
+    }
+
+    #[test]
+    fn test_both_invalid_priorities_treated_as_equal() {
+        // Both invalid → both default to medium (2) → same priority → first-come-first-served
+        let conflict = create_test_conflict(Some("garbage"), Some("nonsense"));
+        assert_eq!(
+            arbitrate_conflict(&conflict),
+            ArbitrationDecision::KeepWithCurrentHolder
+        );
+    }
+
+    #[test]
+    fn test_case_insensitive_priority() {
+        // "HIGH" and "high" should be treated the same (both = 3)
+        let conflict = create_test_conflict(Some("HIGH"), Some("high"));
+        assert_eq!(
+            arbitrate_conflict(&conflict),
+            ArbitrationDecision::KeepWithCurrentHolder
+        );
+
+        // Mixed case
+        let conflict2 = create_test_conflict(Some("High"), Some("Low"));
+        assert_eq!(
+            arbitrate_conflict(&conflict2),
+            ArbitrationDecision::KeepWithCurrentHolder
+        );
+    }
+
+    #[test]
+    fn test_medium_vs_low_priority() {
+        let conflict = create_test_conflict(Some("medium"), Some("low"));
+        assert_eq!(
+            arbitrate_conflict(&conflict),
+            ArbitrationDecision::KeepWithCurrentHolder
+        );
+
+        let conflict2 = create_test_conflict(Some("low"), Some("medium"));
+        assert_eq!(
+            arbitrate_conflict(&conflict2),
+            ArbitrationDecision::GrantToNewRequester
+        );
+    }
+
+    #[test]
+    fn test_priority_to_number_known_values() {
+        assert_eq!(priority_to_number(&Some("high".to_string())), Some(3));
+        assert_eq!(priority_to_number(&Some("medium".to_string())), Some(2));
+        assert_eq!(priority_to_number(&Some("low".to_string())), Some(1));
+        assert_eq!(priority_to_number(&None), None);
+    }
+
+    #[test]
+    fn test_priority_to_number_unknown_defaults_to_medium() {
+        assert_eq!(priority_to_number(&Some("unknown".to_string())), Some(2));
+        assert_eq!(priority_to_number(&Some("".to_string())), Some(2));
+        assert_eq!(priority_to_number(&Some("critical".to_string())), Some(2));
+    }
+
+    #[test]
+    fn test_generate_conflict_report_contains_key_fields() {
+        let conflict = create_test_conflict(Some("high"), Some("low"));
+        let decision = arbitrate_conflict(&conflict);
+        let report = generate_conflict_report(&conflict, decision);
+
+        assert!(report.contains("File Access Conflict Report"));
+        assert!(report.contains("test.rs"));
+        assert!(report.contains("agent-a"));
+        assert!(report.contains("agent-b"));
+        assert!(report.contains("session-a"));
+        assert!(report.contains("session-b"));
+        assert!(report.contains("2026-08-10T12:00:00Z"));
+        assert!(report.contains("KeepWithCurrentHolder"));
+    }
+
+    #[test]
+    fn test_generate_conflict_report_with_none_priority() {
+        let conflict = create_test_conflict(None, None);
+        let decision = arbitrate_conflict(&conflict);
+        let report = generate_conflict_report(&conflict, decision);
+
+        assert!(report.contains("None"));
+        assert!(report.contains("Current task"));
+        assert!(report.contains("New task"));
+    }
+
+    #[test]
+    fn test_conflict_info_serialization_roundtrip() {
+        let conflict = create_test_conflict(Some("high"), Some("low"));
+        let json = serde_json::to_string(&conflict).unwrap();
+        let deserialized: ConflictInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.file_path, conflict.file_path);
+        assert_eq!(
+            deserialized.current_holder.agent_id,
+            conflict.current_holder.agent_id
+        );
+        assert_eq!(
+            deserialized.new_requester.priority,
+            conflict.new_requester.priority
+        );
+    }
+
+    #[test]
+    fn test_arbitration_decision_serialization_roundtrip() {
+        let decisions = vec![
+            ArbitrationDecision::GrantToNewRequester,
+            ArbitrationDecision::KeepWithCurrentHolder,
+            ArbitrationDecision::RejectBoth,
+        ];
+        for decision in decisions {
+            let json = serde_json::to_string(&decision).unwrap();
+            let deserialized: ArbitrationDecision = serde_json::from_str(&json).unwrap();
+            assert_eq!(deserialized, decision);
+        }
+    }
 }

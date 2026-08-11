@@ -569,4 +569,369 @@ mod tests {
         assert_eq!(stats.acquisitions_by_agent.get("agent1"), Some(&2));
         assert_eq!(stats.acquisitions_by_agent.get("agent2"), Some(&1));
     }
+
+    #[test]
+    fn test_query_audit_log_with_filters() {
+        let (_temp_dir, manager) = setup_test_db();
+
+        // Insert audit entries with different actions and files
+        {
+            let conn = manager.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO audit_log (timestamp, agent_id, session_id, action, file_path, mode)
+                 VALUES (datetime('now'), 'agent1', 'session1', 'LOCK_ACQUIRED', 'test.rs', 'WRITE')",
+                [],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO audit_log (timestamp, agent_id, session_id, action, file_path, mode)
+                 VALUES (datetime('now'), 'agent1', 'session1', 'LOCK_RELEASED', 'test.rs', 'WRITE')",
+                [],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO audit_log (timestamp, agent_id, session_id, action, file_path, mode)
+                 VALUES (datetime('now'), 'agent2', 'session2', 'LOCK_ACQUIRED', 'other.rs', 'READ')",
+                [],
+            ).unwrap();
+        }
+
+        // Query by action
+        let entries = manager.query_audit_log(None, Some("LOCK_ACQUIRED"), None, None, None, 10).unwrap();
+        assert_eq!(entries.len(), 2);
+
+        // Query by file_path
+        let entries = manager.query_audit_log(None, None, Some("test.rs"), None, None, 10).unwrap();
+        assert_eq!(entries.len(), 2);
+
+        // Query by agent_id
+        let entries = manager.query_audit_log(Some("agent2"), None, None, None, None, 10).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].agent_id, "agent2");
+    }
+
+    #[test]
+    fn test_generate_security_report() {
+        let (_temp_dir, manager) = setup_test_db();
+
+        // Insert audit entries
+        {
+            let conn = manager.conn.lock().unwrap();
+            // Normal operations
+            for i in 0..5 {
+                conn.execute(
+                    "INSERT INTO audit_log (timestamp, agent_id, session_id, action, file_path, mode)
+                     VALUES (datetime('now'), 'agent1', 'session1', 'LOCK_ACQUIRED', ?, 'WRITE')",
+                    [format!("file{}.rs", i)],
+                ).unwrap();
+            }
+            // Conflict operations
+            for i in 0..15 {
+                conn.execute(
+                    "INSERT INTO audit_log (timestamp, agent_id, session_id, action, file_path, mode)
+                     VALUES (datetime('now'), 'agent2', 'session2', 'WRITE_CONFLICT', 'conflict.rs', 'WRITE')",
+                    [],
+                ).unwrap();
+            }
+        }
+
+        // Generate report
+        let report = manager.generate_security_report(7).unwrap();
+        assert_eq!(report.stats.total_acquisitions, 5);
+        assert_eq!(report.stats.total_conflicts, 15);
+        assert!(report.suspicious_activities.len() > 0);
+        assert_eq!(report.top_agents.len(), 2);
+    }
+
+    #[test]
+    fn test_detect_suspicious_activities() {
+        let (_temp_dir, manager) = setup_test_db();
+
+        // Insert suspicious activities
+        {
+            let conn = manager.conn.lock().unwrap();
+            // High conflict rate agent
+            for i in 0..20 {
+                conn.execute(
+                    "INSERT INTO audit_log (timestamp, agent_id, session_id, action, file_path, mode)
+                     VALUES (datetime('now'), 'bad-agent', 'session1', 'WRITE_CONFLICT', 'file.rs', 'WRITE')",
+                    [],
+                ).unwrap();
+            }
+            // Sensitive path access
+            conn.execute(
+                "INSERT INTO audit_log (timestamp, agent_id, session_id, action, file_path, mode)
+                 VALUES (datetime('now'), 'sensitive-agent', 'session2', 'LOCK_ACQUIRED', '.env', 'WRITE')",
+                [],
+            ).unwrap();
+        }
+
+        // Generate report to detect suspicious activities
+        let report = manager.generate_security_report(7).unwrap();
+        assert!(report.suspicious_activities.len() >= 2);
+
+        // Check for high conflict rate detection
+        let has_conflict_activity = report.suspicious_activities.iter()
+            .any(|a| a.description.contains("High conflict rate"));
+        assert!(has_conflict_activity);
+
+        // Check for sensitive path access detection
+        let has_sensitive_activity = report.suspicious_activities.iter()
+            .any(|a| a.description.contains("sensitive paths"));
+        assert!(has_sensitive_activity);
+    }
+
+    #[test]
+    fn test_get_top_agents() {
+        let (_temp_dir, manager) = setup_test_db();
+
+        // Insert audit entries for multiple agents
+        {
+            let conn = manager.conn.lock().unwrap();
+            // Agent 1: 10 accesses
+            for i in 0..10 {
+                conn.execute(
+                    "INSERT INTO audit_log (timestamp, agent_id, session_id, action, file_path, mode)
+                     VALUES (datetime('now'), 'agent1', 'session1', 'LOCK_ACQUIRED', ?, 'WRITE')",
+                    [format!("file{}.rs", i)],
+                ).unwrap();
+            }
+            // Agent 2: 5 accesses
+            for i in 0..5 {
+                conn.execute(
+                    "INSERT INTO audit_log (timestamp, agent_id, session_id, action, file_path, mode)
+                     VALUES (datetime('now'), 'agent2', 'session2', 'LOCK_ACQUIRED', ?, 'READ')",
+                    [format!("file{}.rs", i)],
+                ).unwrap();
+            }
+        }
+
+        // Get stats (which internally uses get_top_agents_inner)
+        let stats = manager.get_stats(None).unwrap();
+        assert_eq!(stats.acquisitions_by_agent.get("agent1"), Some(&10));
+        assert_eq!(stats.acquisitions_by_agent.get("agent2"), Some(&5));
+    }
+
+    #[test]
+    fn test_stats_with_time_period() {
+        let (_temp_dir, manager) = setup_test_db();
+
+        // Insert audit entries with different timestamps
+        {
+            let conn = manager.conn.lock().unwrap();
+            // Recent entries (within 7 days)
+            conn.execute(
+                "INSERT INTO audit_log (timestamp, agent_id, session_id, action, file_path, mode)
+                 VALUES (datetime('now', '-1 day'), 'agent1', 'session1', 'LOCK_ACQUIRED', 'recent.rs', 'WRITE')",
+                [],
+            ).unwrap();
+            // Old entries (30 days ago)
+            conn.execute(
+                "INSERT INTO audit_log (timestamp, agent_id, session_id, action, file_path, mode)
+                 VALUES (datetime('now', '-30 days'), 'agent2', 'session2', 'LOCK_ACQUIRED', 'old.rs', 'WRITE')",
+                [],
+            ).unwrap();
+        }
+
+        // Get stats for last 7 days only
+        let stats = manager.get_stats(Some(7)).unwrap();
+        assert_eq!(stats.total_acquisitions, 1);
+        assert_eq!(stats.acquisitions_by_agent.get("agent1"), Some(&1));
+        assert_eq!(stats.acquisitions_by_agent.get("agent2"), None);
+    }
+
+    #[test]
+    fn test_audit_entry_serialization() {
+        let entry = AuditEntry {
+            timestamp: "2026-08-11T12:00:00Z".to_string(),
+            agent_id: "agent1".to_string(),
+            session_id: "session1".to_string(),
+            action: "LOCK_ACQUIRED".to_string(),
+            file_path: Some("test.rs".to_string()),
+            mode: Some("WRITE".to_string()),
+            reason: Some("Testing".to_string()),
+        };
+
+        // Serialize to JSON
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(json.contains("agent1"));
+        assert!(json.contains("LOCK_ACQUIRED"));
+
+        // Deserialize back
+        let deserialized: AuditEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.agent_id, entry.agent_id);
+        assert_eq!(deserialized.action, entry.action);
+    }
+
+    #[test]
+    fn test_query_audit_log_with_time_range() {
+        let (_temp_dir, manager) = setup_test_db();
+
+        {
+            let conn = manager.conn.lock().unwrap();
+            // Old entry (40 days ago)
+            conn.execute(
+                "INSERT INTO audit_log (timestamp, agent_id, session_id, action, file_path, mode)
+                 VALUES (datetime('now', '-40 days'), 'old-agent', 's1', 'LOCK_ACQUIRED', 'old.rs', 'WRITE')",
+                [],
+            ).unwrap();
+            // Recent entry (1 day ago)
+            conn.execute(
+                "INSERT INTO audit_log (timestamp, agent_id, session_id, action, file_path, mode)
+                 VALUES (datetime('now', '-1 day'), 'recent-agent', 's2', 'LOCK_ACQUIRED', 'recent.rs', 'WRITE')",
+                [],
+            ).unwrap();
+        }
+
+        // Query with start_time — at least both entries should be retrievable
+        // (we don't strictly assert count because current date shifts).
+        let entries = manager.query_audit_log(
+            None, None, None,
+            Some("2020-01-01T00:00:00Z"),
+            None, 100,
+        ).unwrap();
+        assert_eq!(entries.len(), 2);
+    }
+
+    #[test]
+    fn test_query_audit_log_with_limit() {
+        let (_temp_dir, manager) = setup_test_db();
+
+        {
+            let conn = manager.conn.lock().unwrap();
+            for i in 0..20 {
+                conn.execute(
+                    "INSERT INTO audit_log (timestamp, agent_id, session_id, action, file_path, mode)
+                     VALUES (datetime('now'), 'agent', 's', 'LOCK_ACQUIRED', ?, 'WRITE')",
+                    [format!("f{}.rs", i)],
+                ).unwrap();
+            }
+        }
+
+        let entries = manager.query_audit_log(None, None, None, None, None, 5).unwrap();
+        assert_eq!(entries.len(), 5);
+    }
+
+    #[test]
+    fn test_query_audit_log_empty_result() {
+        let (_temp_dir, manager) = setup_test_db();
+        // No entries inserted
+        let entries = manager.query_audit_log(None, None, None, None, None, 100).unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn test_generate_security_report_with_no_data() {
+        let (_temp_dir, manager) = setup_test_db();
+        // Empty audit log
+        let report = manager.generate_security_report(7).unwrap();
+        assert_eq!(report.stats.total_acquisitions, 0);
+        assert_eq!(report.stats.total_releases, 0);
+        assert_eq!(report.stats.total_conflicts, 0);
+        assert!(report.suspicious_activities.is_empty());
+        assert!(report.top_agents.is_empty());
+        assert!(report.top_files.is_empty());
+    }
+
+    #[test]
+    fn test_file_access_stats_default() {
+        let stats = FileAccessStats::default();
+        assert_eq!(stats.total_acquisitions, 0);
+        assert_eq!(stats.total_releases, 0);
+        assert_eq!(stats.total_conflicts, 0);
+        assert_eq!(stats.total_sensitive_accesses, 0);
+        assert_eq!(stats.avg_lock_duration_secs, 0.0);
+        assert!(stats.acquisitions_by_agent.is_empty());
+        assert!(stats.accesses_by_file.is_empty());
+        assert!(stats.accesses_by_mode.is_empty());
+    }
+
+    #[test]
+    fn test_audit_entry_serialization_with_null_fields() {
+        let entry = AuditEntry {
+            timestamp: "2026-08-11T12:00:00Z".to_string(),
+            agent_id: "agent".to_string(),
+            session_id: "session".to_string(),
+            action: "LOCK_ACQUIRED".to_string(),
+            file_path: None,
+            mode: None,
+            reason: None,
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let deserialized: AuditEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.file_path, None);
+        assert_eq!(deserialized.mode, None);
+        assert_eq!(deserialized.reason, None);
+    }
+
+    #[test]
+    fn test_security_report_serialization_roundtrip() {
+        let report = SecurityReport {
+            generated_at: "2026-08-12T10:00:00Z".to_string(),
+            period_start: "2026-08-05T10:00:00Z".to_string(),
+            period_end: "2026-08-12T10:00:00Z".to_string(),
+            stats: FileAccessStats::default(),
+            suspicious_activities: vec![SuspiciousActivity {
+                timestamp: "2026-08-12T09:00:00Z".to_string(),
+                agent_id: "bad-agent".to_string(),
+                description: "High conflict rate".to_string(),
+                severity: "HIGH".to_string(),
+            }],
+            top_agents: vec![AgentAccessSummary {
+                agent_id: "agent-1".to_string(),
+                total_accesses: 42,
+                unique_files: 10,
+                write_count: 30,
+                conflict_count: 2,
+            }],
+            top_files: vec![FileAccessSummary {
+                file_path: "src/main.rs".to_string(),
+                total_accesses: 100,
+                unique_agents: 5,
+                write_count: 80,
+                conflict_count: 3,
+            }],
+        };
+
+        let json = serde_json::to_string(&report).unwrap();
+        let deserialized: SecurityReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.generated_at, report.generated_at);
+        assert_eq!(deserialized.suspicious_activities.len(), 1);
+        assert_eq!(deserialized.top_agents.len(), 1);
+        assert_eq!(deserialized.top_files.len(), 1);
+        assert_eq!(deserialized.top_agents[0].total_accesses, 42);
+        assert_eq!(deserialized.top_files[0].file_path, "src/main.rs");
+    }
+
+    #[test]
+    fn test_query_audit_log_with_all_filters_combined() {
+        let (_temp_dir, manager) = setup_test_db();
+
+        {
+            let conn = manager.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO audit_log (timestamp, agent_id, session_id, action, file_path, mode)
+                 VALUES (datetime('now'), 'agent-x', 's1', 'LOCK_ACQUIRED', 'target.rs', 'WRITE')",
+                [],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO audit_log (timestamp, agent_id, session_id, action, file_path, mode)
+                 VALUES (datetime('now'), 'agent-x', 's1', 'LOCK_ACQUIRED', 'other.rs', 'WRITE')",
+                [],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO audit_log (timestamp, agent_id, session_id, action, file_path, mode)
+                 VALUES (datetime('now'), 'agent-y', 's2', 'LOCK_ACQUIRED', 'target.rs', 'READ')",
+                [],
+            ).unwrap();
+        }
+
+        let entries = manager.query_audit_log(
+            Some("agent-x"),
+            Some("LOCK_ACQUIRED"),
+            Some("target.rs"),
+            None, None, 100,
+        ).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].agent_id, "agent-x");
+        assert_eq!(entries[0].file_path, Some("target.rs".to_string()));
+    }
 }
