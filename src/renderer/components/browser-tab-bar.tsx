@@ -53,7 +53,7 @@ export function BrowserTabBar() {
   }
 
   return (
-    <div className="h-10 flex-shrink-0 flex items-end gap-0.5 px-2 pt-1 bg-muted/50 border-b border-border overflow-x-auto scrollbar-thin">
+    <div className="h-10 flex-shrink-0 flex items-end gap-0.5 px-2 pt-1 bg-muted/50 border-b border-border overflow-x-auto scrollbar-hide">
       {/* Tabs */}
       {openSubChatIds.map((subChatId: string) => {
         const subChat = subChatMap.get(subChatId)
