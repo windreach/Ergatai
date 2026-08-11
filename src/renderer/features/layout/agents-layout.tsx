@@ -14,7 +14,6 @@ import {
   claudeLoginModalConfigAtom,
   codexOnboardingCompletedAtom,
   isDesktopAtom,
-  isFullscreenAtom,
   anthropicOnboardingCompletedAtom,
   customHotkeysAtom,
   betaKanbanEnabledAtom,
@@ -30,7 +29,8 @@ import { ResizableSidebar } from "../../components/ui/resizable-sidebar"
 import { AgentsSidebar } from "../sidebar/agents-sidebar"
 import { AgentsContent } from "../agents/ui/agents-content"
 import { UpdateBanner } from "../../components/update-banner"
-import { WindowsTitleBar } from "../../components/windows-title-bar"
+import { CustomTitleBar } from "../../components/custom-title-bar"
+import { isFullscreenAtom, isFocusedAtom, isMaximizedAtom } from "../../lib/atoms/window"
 import { useUpdateChecker } from "../../lib/hooks/use-update-checker"
 import { useAgentSubChatStore } from "../agents/stores/sub-chat-store"
 import { QueueProcessor } from "../agents/components/queue-processor"
@@ -56,37 +56,31 @@ export function AgentsLayout() {
   // Global desktop/fullscreen state - initialized here at root level
   const [isDesktop, setIsDesktop] = useAtom(isDesktopAtom)
   const [isFullscreen, setIsFullscreen] = useAtom(isFullscreenAtom)
+  const setIsFocused = useSetAtom(isFocusedAtom)
+  const setIsMaximized = useSetAtom(isMaximizedAtom)
 
   // Initialize isDesktop on mount
   useEffect(() => {
     setIsDesktop(isDesktopApp())
   }, [setIsDesktop])
 
-  // Subscribe to fullscreen changes from Electron
+  // Listen to window state changes (fullscreen, focus, maximized)
   useEffect(() => {
-    if (
-      !isDesktop ||
-      typeof window === "undefined" ||
-      !window.desktopApi?.windowIsFullscreen
-    )
-      return
+    const unsubFullscreen = window.desktopApi?.onFullscreenChange(setIsFullscreen)
+    const unsubFocus = window.desktopApi?.onFocusChange(setIsFocused)
+    const unsubMaximized = window.desktopApi?.onMaximizedChange(setIsMaximized)
 
-    // Get initial fullscreen state
-    window.desktopApi.windowIsFullscreen().then(setIsFullscreen)
+    // Initial state sync
+    window.desktopApi?.isFullscreen().then(setIsFullscreen)
+    window.desktopApi?.isFocused().then(setIsFocused)
+    window.desktopApi?.windowIsMaximized().then(setIsMaximized)
 
-    // In dev mode, HMR breaks IPC event subscriptions, so we poll instead
-    const isDev = import.meta.env.DEV
-    if (isDev) {
-      const interval = setInterval(() => {
-        window.desktopApi?.windowIsFullscreen?.().then(setIsFullscreen)
-      }, 300)
-      return () => clearInterval(interval)
+    return () => {
+      unsubFullscreen?.()
+      unsubFocus?.()
+      unsubMaximized?.()
     }
-
-    // In production, use events (more efficient)
-    const unsubscribe = window.desktopApi.onFullscreenChange?.(setIsFullscreen)
-    return unsubscribe
-  }, [isDesktop, setIsFullscreen])
+  }, [setIsFullscreen, setIsFocused, setIsMaximized])
 
   // Check for updates on mount and periodically
   useUpdateChecker()
@@ -304,8 +298,8 @@ export function AgentsLayout() {
       />
       <CodexLoginModal />
       <div className="flex flex-col w-full h-full relative overflow-hidden bg-background select-none">
-        {/* Windows Title Bar (only shown on Windows with frameless window) */}
-        <WindowsTitleBar />
+        {/* Custom Title Bar - handles platform detection internally */}
+        <CustomTitleBar />
         <div className="flex flex-1 overflow-hidden">
           {/* Left Sidebar - switches between chat list and settings nav */}
           <ResizableSidebar
