@@ -51,35 +51,6 @@ function registerIpcHandlers(): void {
   ipcMain.handle("app:version", () => app.getVersion())
   ipcMain.handle("app:isPackaged", () => app.isPackaged)
 
-  // Windows: Frame preference persistence
-  ipcMain.handle("window:set-frame-preference", (_event, useNativeFrame: boolean) => {
-    try {
-      const settingsPath = join(app.getPath("userData"), "window-settings.json")
-      const settingsDir = app.getPath("userData")
-      mkdirSync(settingsDir, { recursive: true })
-      writeFileSync(settingsPath, JSON.stringify({ useNativeFrame }, null, 2))
-      return true
-    } catch (error) {
-      console.error("[Main] Failed to save frame preference:", error)
-      return false
-    }
-  })
-
-  // Windows: Get current window frame state
-  ipcMain.handle("window:get-frame-state", () => {
-    if (process.platform !== "win32") return false
-    try {
-      const settingsPath = join(app.getPath("userData"), "window-settings.json")
-      if (existsSync(settingsPath)) {
-        const settings = JSON.parse(readFileSync(settingsPath, "utf-8"))
-        return settings.useNativeFrame === true
-      }
-      return false // Default: frameless
-    } catch {
-      return false
-    }
-  })
-
   // Note: Update checking is now handled by auto-updater module (lib/auto-updater.ts)
   ipcMain.handle("app:set-badge", (event, count: number | null) => {
     const win = getWindowFromEvent(event)
