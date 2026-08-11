@@ -53,7 +53,7 @@ export function BrowserTabBar() {
   }
 
   return (
-    <div className="h-9 flex-shrink-0 flex items-end gap-0.5 px-2 bg-background border-b border-border overflow-x-auto scrollbar-thin">
+    <div className="h-10 flex-shrink-0 flex items-end gap-0.5 px-2 pt-1 bg-muted/50 border-b border-border overflow-x-auto scrollbar-thin">
       {/* Tabs */}
       {openSubChatIds.map((subChatId: string) => {
         const subChat = subChatMap.get(subChatId)
@@ -65,7 +65,12 @@ export function BrowserTabBar() {
           <div
             key={subChatId}
             onClick={() => handleTabClick(subChatId)}
-            className="group relative flex items-center gap-1.5 px-3 py-1.5 min-w-[120px] max-w-[200px] cursor-pointer rounded-t-md transition-colors hover:bg-muted/50"
+            className={cn(
+              "group relative flex items-center gap-1.5 px-3 py-1.5 min-w-[140px] max-w-[220px] cursor-pointer rounded-t-md transition-colors",
+              isActive
+                ? "bg-background border-t border-x border-border -mb-px"
+                : "bg-muted/70 hover:bg-muted/90"
+            )}
           >
             {/* Icon */}
             <div className="flex-shrink-0 text-muted-foreground">
@@ -74,9 +79,10 @@ export function BrowserTabBar() {
 
             {/* Name */}
             <span
-              className={`text-xs truncate flex-1 ${
+              className={cn(
+                "text-xs truncate flex-1",
                 isActive ? "text-foreground font-medium" : "text-muted-foreground"
-              }`}
+              )}
             >
               {subChat.name || "New Chat"}
             </span>
@@ -84,7 +90,11 @@ export function BrowserTabBar() {
             {/* Close button */}
             <button
               onClick={(e) => handleTabClose(e, subChatId)}
-              className="flex-shrink-0 w-4 h-4 flex items-center justify-center rounded opacity-0 group-hover:opacity-100 transition-opacity hover:bg-muted-foreground/20 hover:text-foreground"
+              className={cn(
+                "flex-shrink-0 w-4 h-4 flex items-center justify-center rounded",
+                "opacity-0 group-hover:opacity-100 transition-opacity",
+                "hover:bg-muted-foreground/20 hover:text-foreground"
+              )}
               aria-label={`Close ${subChat.name || "tab"}`}
             >
               <X className="w-3 h-3" />
