@@ -30,6 +30,7 @@ import { AgentsSidebar } from "../sidebar/agents-sidebar"
 import { AgentsContent } from "../agents/ui/agents-content"
 import { UpdateBanner } from "../../components/update-banner"
 import { CustomTitleBar } from "../../components/custom-title-bar"
+import { BrowserTabBar } from "../../components/browser-tab-bar"
 import { isFullscreenAtom, isFocusedAtom, isMaximizedAtom } from "../../lib/atoms/window"
 import { useUpdateChecker } from "../../lib/hooks/use-update-checker"
 import { useAgentSubChatStore } from "../agents/stores/sub-chat-store"
@@ -300,6 +301,8 @@ export function AgentsLayout() {
       <div className="flex flex-col w-full h-full relative overflow-hidden bg-background select-none">
         {/* Custom Title Bar - handles platform detection internally */}
         <CustomTitleBar />
+        {/* Browser-style Tab Bar for Agent Sessions */}
+        <BrowserTabBar />
         <div className="flex flex-1 overflow-hidden">
           {/* Left Sidebar - switches between chat list and settings nav */}
           <ResizableSidebar
