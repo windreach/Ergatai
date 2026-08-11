@@ -186,6 +186,11 @@ function registerIpcHandlers(): void {
     return getWindowFromEvent(event)?.isFullScreen() ?? false
   })
 
+  ipcMain.handle('window:is-focused', (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    return win ? win.isFocused() : false
+  })
+
   // Traffic light visibility control (for hybrid native/custom approach)
   ipcMain.handle(
     "window:set-traffic-light-visibility",

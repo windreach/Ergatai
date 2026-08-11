@@ -101,6 +101,17 @@ contextBridge.exposeInMainWorld("desktopApi", {
     return () => ipcRenderer.removeListener("window:focus-change", handler)
   },
 
+  // Window state event listeners
+  onMaximizedChange: (callback: (isMaximized: boolean) => void) => {
+    const listener = (_event: any, isMaximized: boolean) => callback(isMaximized)
+    ipcRenderer.on('window:maximized-change', listener)
+    return () => ipcRenderer.removeListener('window:maximized-change', listener)
+  },
+
+  // Initial state queries
+  isFocused: () => ipcRenderer.invoke('window:is-focused'),
+  isFullscreen: () => ipcRenderer.invoke('window:is-fullscreen'),
+
   // Zoom controls
   zoomIn: () => ipcRenderer.invoke("window:zoom-in"),
   zoomOut: () => ipcRenderer.invoke("window:zoom-out"),
@@ -317,6 +328,9 @@ export interface DesktopApi {
   getWindowFrameState: () => Promise<boolean>
   onFullscreenChange: (callback: (isFullscreen: boolean) => void) => () => void
   onFocusChange: (callback: (isFocused: boolean) => void) => () => void
+  onMaximizedChange: (callback: (isMaximized: boolean) => void) => () => void
+  isFocused: () => Promise<boolean>
+  isFullscreen: () => Promise<boolean>
   zoomIn: () => Promise<void>
   zoomOut: () => Promise<void>
   zoomReset: () => Promise<void>
