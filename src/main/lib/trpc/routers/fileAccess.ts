@@ -1,6 +1,26 @@
 import { z } from "zod"
 import { router, publicProcedure } from "../index"
-import {
+import { join } from "path"
+import { app } from "electron"
+
+// Load native binding — resolve from app root
+function loadNativeBinding(): any {
+  const appRoot = app.getAppPath()
+  const candidates = [
+    join(appRoot, "src/native-binding"),
+    join(appRoot, "out/main/native-binding"),
+    join(appRoot, "native-binding"),
+  ]
+  for (const p of candidates) {
+    try {
+      return require(p)
+    } catch {}
+  }
+  throw new Error("Cannot find native-binding module")
+}
+
+const nativeBinding = loadNativeBinding()
+const {
   fileAccessRespondApproval,
   fileAccessInit,
   fileAccessRegisterSystemToken,
@@ -17,7 +37,7 @@ import {
   fileAccessIsSensitivePath,
   fileAccessIsForbiddenPath,
   fileAccessReloadConfig,
-} from "@/file-access-napi"
+} = nativeBinding
 
 // 待审批请求（从 Rust 端接收）
 export interface PendingApprovalRequest {

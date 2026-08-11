@@ -100,7 +100,6 @@ import { ApprovalBottomPanel } from "@/components/file-access/ApprovalBottomPane
 import { AgentStatusDashboard } from "../ui/agent-status-dashboard"
 import { agentStatusPanelOpenAtom } from "../hooks/use-agent-status"
 import { X } from "lucide-react"
-import { Button } from "@/components/ui/button"
 
 /**
  * Agent Status Panel wrapper with close button
