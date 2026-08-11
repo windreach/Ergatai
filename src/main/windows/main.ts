@@ -704,6 +704,14 @@ export function createWindow(options?: { chatId?: string; subChatId?: string }):
     window.webContents.send("window:focus-change", false)
   })
 
+  // Emit maximized state changes to renderer
+  window.on("maximize", () => {
+    window.webContents.send("window:maximized-change", true)
+  })
+  window.on("unmaximize", () => {
+    window.webContents.send("window:maximized-change", false)
+  })
+
   // Disable Cmd+R / Ctrl+R to prevent accidental page refresh
   // Cmd+Shift+R / Ctrl+Shift+R is allowed but warns if there are active streams
   window.webContents.on("before-input-event", (event, input) => {
