@@ -46,6 +46,8 @@ use tracing::{debug, info};
 pub struct SnapshotManager {
     /// Git repository path
     repo_path: PathBuf,
+    /// Cached canonical repo path (avoids repeated I/O on every snapshot)
+    canonical_repo_path: PathBuf,
     /// Git repository instance (wrapped in Mutex for thread safety)
     repo: Mutex<Repository>,
 }
@@ -60,8 +62,13 @@ impl SnapshotManager {
             ))
         })?;
 
+        let canonical_repo_path = repo_path.canonicalize().map_err(|e| {
+            ErgataiError::internal(format!("Failed to canonicalize repo path: {}", e))
+        })?;
+
         Ok(Self {
             repo_path: repo_path.to_path_buf(),
+            canonical_repo_path,
             repo: Mutex::new(repo),
         })
     }
@@ -83,27 +90,32 @@ impl SnapshotManager {
     pub fn create_snapshot(&self, file_path: &str, agent_id: &str) -> Result<String, ErgataiError> {
         let full_path = self.repo_path.join(file_path);
 
-        // Prevent path traversal: verify the resolved path is within repo_path
-        // canonicalize requires the path to exist, which we check next
-        if full_path.exists() {
-            let canonical_root = self.repo_path.canonicalize().map_err(|e| {
-                ErgataiError::internal(format!("Failed to canonicalize repo path: {}", e))
-            })?;
-            let canonical_file = full_path.canonicalize().map_err(|e| {
-                ErgataiError::internal(format!("Failed to canonicalize file path: {}", e))
-            })?;
-            if !canonical_file.starts_with(&canonical_root) {
+        // M4 fix: Reject symlinks explicitly to prevent symlink-based path traversal
+        if let Ok(metadata) = std::fs::symlink_metadata(&full_path) {
+            if metadata.file_type().is_symlink() {
                 return Err(ErgataiError::InvalidArgument(format!(
-                    "Path traversal detected: {:?} resolves outside project root",
+                    "Symlink not allowed in snapshot path: {:?}",
                     file_path
                 )));
             }
         }
 
-        // Check if file exists
-        if !full_path.exists() {
-            debug!(file_path = file_path, "File does not exist, skipping snapshot");
-            return Ok(String::new()); // Empty hash for non-existent files
+        // M4 fix: Canonicalize first (resolves any remaining traversal), then check existence
+        let canonical_file = match full_path.canonicalize() {
+            Ok(p) => p,
+            Err(_) => {
+                // File doesn't exist or is inaccessible
+                debug!(file_path = file_path, "File does not exist, skipping snapshot");
+                return Ok(String::new());
+            }
+        };
+
+        // Path traversal check using cached canonical repo path
+        if !canonical_file.starts_with(&self.canonical_repo_path) {
+            return Err(ErgataiError::InvalidArgument(format!(
+                "Path traversal detected: {:?} resolves outside project root",
+                file_path
+            )));
         }
 
         // Check file size (limit: 100MB) to prevent OOM
@@ -263,6 +275,13 @@ impl SnapshotManager {
         conn: &rusqlite::Connection,
         days_to_keep: u32,
     ) -> Result<usize, ErgataiError> {
+        // L7 fix: prevent accidental deletion of all snapshots
+        if days_to_keep == 0 {
+            return Err(ErgataiError::InvalidArgument(
+                "days_to_keep must be > 0 to prevent accidental deletion of all snapshots".to_string()
+            ));
+        }
+
         let cutoff = Utc::now() - chrono::Duration::days(days_to_keep as i64);
 
         let deleted = conn

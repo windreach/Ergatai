@@ -494,6 +494,15 @@ impl Watchdog {
     }
 }
 
+// L8 fix: Ensure background task is stopped on drop
+impl Drop for Watchdog {
+    fn drop(&mut self) {
+        if let Err(e) = self.stop() {
+            tracing::warn!(error = %e, "Failed to stop watchdog on drop");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

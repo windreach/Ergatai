@@ -5,14 +5,16 @@
 
 use glob::Pattern;
 use std::path::Path;
-use tracing::warn;
+use std::sync::LazyLock;
 
 /// System default sensitive path patterns
 /// These always require ADMIN permission
 const SYSTEM_SENSITIVE_PATTERNS: &[&str] = &[
     // Environment files (may contain secrets)
     ".env*",
+    "**/.env*",
     ".env.*",
+    "**/.env.*",
     // Git internal files
     ".git/**",
     ".gitignore",
@@ -47,6 +49,20 @@ const SYSTEM_SENSITIVE_PATTERNS: &[&str] = &[
     "*secret*",
 ];
 
+/// Pre-compiled sensitive path patterns (compiled once at first access)
+static COMPILED_PATTERNS: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
+    SYSTEM_SENSITIVE_PATTERNS
+        .iter()
+        .filter_map(|p| {
+            Pattern::new(p)
+                .map_err(|e| {
+                    tracing::warn!(pattern = p, error = %e, "Failed to parse sensitive path pattern")
+                })
+                .ok()
+        })
+        .collect()
+});
+
 /// Check if a file path is sensitive and requires ADMIN permission
 ///
 /// # Arguments
@@ -58,29 +74,8 @@ pub fn is_sensitive_path(file_path: &str) -> bool {
     // Normalize path separators for cross-platform compatibility
     let normalized_path = file_path.replace('\\', "/");
 
-    for pattern_str in SYSTEM_SENSITIVE_PATTERNS {
-        match Pattern::new(pattern_str) {
-            Ok(pattern) => {
-                if pattern.matches(&normalized_path) {
-                    warn!(
-                        file_path = file_path,
-                        pattern = pattern_str,
-                        "Sensitive path detected, ADMIN permission required"
-                    );
-                    return true;
-                }
-            }
-            Err(e) => {
-                warn!(
-                    pattern = pattern_str,
-                    error = %e,
-                    "Failed to parse sensitive path pattern"
-                );
-            }
-        }
-    }
-
-    false
+    // Use pre-compiled patterns (LazyLock ensures single compilation)
+    COMPILED_PATTERNS.iter().any(|pattern| pattern.matches(&normalized_path))
 }
 
 /// Check if a file path is within a sensitive directory

@@ -478,6 +478,7 @@ impl TaskScheduler {
                 files_to_read: vec![],
                 task_type: super::task_coordinator::TaskType::CreateNew,
                 depends_on: vec![],
+                priority: None,
             }],
             merge_strategy: "none".to_string(),
             plan_file,

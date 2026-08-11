@@ -533,10 +533,11 @@ impl AuditManager {
         let cutoff = (Utc::now() - Duration::days(months_to_keep as i64 * 30)).to_rfc3339();
 
         // Query logs to archive
+        // L5 fix: added map_err for consistent error handling
         let mut stmt = conn.prepare(
             "SELECT timestamp, agent_id, session_id, action, file_path, mode, reason
              FROM audit_log WHERE timestamp < ?1 ORDER BY timestamp ASC"
-        )?;
+        ).map_err(|e| ErgataiError::internal(format!("Failed to prepare archive query: {}", e)))?;
 
         let entries: Vec<AuditEntry> = stmt
             .query_map(params![cutoff], |row| {

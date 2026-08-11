@@ -162,6 +162,8 @@ pub struct FileToken {
     pub heartbeat_at: DateTime<Utc>,
     /// Token status.
     pub status: TokenStatus,
+    /// Task priority (1=low, 2=medium, 3=high). Used for conflict arbitration.
+    pub priority: Option<u8>,
 }
 
 impl FileToken {
@@ -176,6 +178,25 @@ impl FileToken {
         approved_by: String,
         ttl_secs: u64,
         heartbeat_interval_secs: u64,
+    ) -> Self {
+        Self::with_priority(
+            agent_id, session_id, system_token_id, scope, mode,
+            reason, approved_by, ttl_secs, heartbeat_interval_secs, None,
+        )
+    }
+
+    /// Create a new file token with explicit priority.
+    pub fn with_priority(
+        agent_id: String,
+        session_id: String,
+        system_token_id: TokenId,
+        scope: String,
+        mode: FileMode,
+        reason: Option<String>,
+        approved_by: String,
+        ttl_secs: u64,
+        heartbeat_interval_secs: u64,
+        priority: Option<u8>,
     ) -> Self {
         let now = Utc::now();
         Self {
@@ -192,6 +213,7 @@ impl FileToken {
             heartbeat_interval_secs,
             heartbeat_at: now,
             status: TokenStatus::Active,
+            priority,
         }
     }
 
@@ -222,13 +244,18 @@ impl FileToken {
         };
 
         // Parse glob pattern (case-insensitive on Windows)
-        let pattern_str = if cfg!(windows) {
-            self.scope.to_lowercase()
-        } else {
-            self.scope.clone()
-        };
+        // M8 fix: avoid unnecessary allocation on non-Windows
+        #[cfg(windows)]
+        let pattern_str = self.scope.to_lowercase();
+        #[cfg(not(windows))]
+        let pattern_str = &self.scope;
 
-        let pattern = match glob::Pattern::new(&pattern_str) {
+        #[cfg(windows)]
+        let pattern_ref: &str = &pattern_str;
+        #[cfg(not(windows))]
+        let pattern_ref: &str = pattern_str;
+
+        let pattern = match glob::Pattern::new(pattern_ref) {
             Ok(p) => p,
             Err(_) => return false,
         };

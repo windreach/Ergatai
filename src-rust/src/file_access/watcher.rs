@@ -105,9 +105,18 @@ impl FileSystemWatcher {
             loop {
                 tokio::select! {
                     // Process file system events
-                    Some(event) = event_rx.recv() => {
-                        if let Err(e) = Self::handle_event(&lock_manager, &project_root, event).await {
-                            error!("Failed to handle file system event: {}", e);
+                    event = event_rx.recv() => {
+                        match event {
+                            Some(event) => {
+                                if let Err(e) = Self::handle_event(&lock_manager, &project_root, event).await {
+                                    error!("Failed to handle file system event: {}", e);
+                                }
+                            }
+                            None => {
+                                // Event channel closed (notify watcher dropped), shut down
+                                info!("FileSystemWatcher event channel closed, shutting down");
+                                break;
+                            }
                         }
                     }
                     // Shutdown signal

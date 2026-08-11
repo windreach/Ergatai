@@ -35,8 +35,8 @@ pub struct LockHolderInfo {
     pub session_id: String,
     /// Token ID
     pub token_id: String,
-    /// Task priority (if available)
-    pub priority: Option<String>,
+    /// Task priority (1=low, 2=medium, 3=high; None=unknown)
+    pub priority: Option<u8>,
     /// Request reason
     pub reason: Option<String>,
 }
@@ -68,8 +68,8 @@ pub fn arbitrate_conflict(conflict: &ConflictInfo) -> ArbitrationDecision {
     );
 
     // Priority comparison (if both have priorities)
-    let current_priority = priority_to_number(&conflict.current_holder.priority);
-    let new_priority = priority_to_number(&conflict.new_requester.priority);
+    let current_priority = conflict.current_holder.priority;
+    let new_priority = conflict.new_requester.priority;
 
     match (current_priority, new_priority) {
         (Some(curr), Some(new)) => {
@@ -118,7 +118,7 @@ pub fn arbitrate_conflict(conflict: &ConflictInfo) -> ArbitrationDecision {
 /// Convert priority string to number for comparison
 ///
 /// Priority levels: "high" = 3, "medium" = 2, "low" = 1
-fn priority_to_number(priority: &Option<String>) -> Option<u8> {
+pub fn priority_to_number(priority: &Option<String>) -> Option<u8> {
     priority.as_ref().map(|p| match p.to_lowercase().as_str() {
         "high" => 3,
         "medium" => 2,
@@ -196,8 +196,8 @@ pub fn arbitrate_with_boost(
     current_retry_count: u32,
     new_retry_count: u32,
 ) -> ArbitrationDecision {
-    let curr_base = priority_to_number(&conflict.current_holder.priority);
-    let new_base = priority_to_number(&conflict.new_requester.priority);
+    let curr_base = conflict.current_holder.priority;
+    let new_base = conflict.new_requester.priority;
 
     let curr_eff = effective_priority(curr_base, current_retry_count);
     let new_eff = effective_priority(new_base, new_retry_count);
@@ -262,20 +262,23 @@ mod tests {
         current_priority: Option<&str>,
         new_priority: Option<&str>,
     ) -> ConflictInfo {
+        let str_to_priority = |s: &str| -> Option<u8> {
+            priority_to_number(&Some(s.to_string()))
+        };
         ConflictInfo {
             file_path: "test.rs".to_string(),
             current_holder: LockHolderInfo {
                 agent_id: "agent-a".to_string(),
                 session_id: "session-a".to_string(),
                 token_id: "token-a".to_string(),
-                priority: current_priority.map(|s| s.to_string()),
+                priority: current_priority.and_then(str_to_priority),
                 reason: Some("Current task".to_string()),
             },
             new_requester: LockHolderInfo {
                 agent_id: "agent-b".to_string(),
                 session_id: "session-b".to_string(),
                 token_id: "token-b".to_string(),
-                priority: new_priority.map(|s| s.to_string()),
+                priority: new_priority.and_then(str_to_priority),
                 reason: Some("New task".to_string()),
             },
             timestamp: "2026-08-10T12:00:00Z".to_string(),

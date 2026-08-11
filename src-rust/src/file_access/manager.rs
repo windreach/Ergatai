@@ -4,7 +4,7 @@
 //! Similar to NatsManager, this provides a central point for file access control.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::OnceLock;
 
@@ -42,7 +42,19 @@ fn file_access_manager() -> &'static RwLock<FileAccessManagerState> {
 /// Creates lock database, snapshot manager, and watchdog.
 /// Idempotent - calling multiple times is safe.
 /// If NATS is initialized, enables multi-agent approval flow.
-pub async fn init_file_access(project_id: &str, project_root: &PathBuf) -> ErgataiResult<()> {
+///
+/// M11 fix: NATS connection is fetched BEFORE acquiring the write lock
+/// to avoid blocking all file access operations during NATS init.
+pub async fn init_file_access(project_id: &str, project_root: &Path) -> ErgataiResult<()> {
+    // M11 fix: Fetch NATS connection BEFORE acquiring write lock
+    let nats_client = if let Some(conn) = get_nats_connection().await {
+        info!(project_id = project_id, "NATS available, enabling multi-agent approval flow");
+        Some(Arc::new(conn.client().clone()))
+    } else {
+        warn!(project_id = project_id, "NATS not available, running in degraded mode (no multi-agent approval)");
+        None
+    };
+
     let manager = file_access_manager();
     let mut manager = manager.write().await;
 
@@ -63,17 +75,8 @@ pub async fn init_file_access(project_id: &str, project_root: &PathBuf) -> Ergat
     })?;
     tokio::fs::create_dir_all(lock_db_parent).await?;
 
-    // Try to get NATS client (optional, None = degraded mode)
-    let nats_client = if let Some(conn) = get_nats_connection().await {
-        info!(project_id = project_id, "NATS available, enabling multi-agent approval flow");
-        Some(Arc::new(conn.client().clone()))
-    } else {
-        warn!(project_id = project_id, "NATS not available, running in degraded mode (no multi-agent approval)");
-        None
-    };
-
     // Create FileLockManager with optional NATS client
-    let lock_manager = FileLockManager::new(&lock_db_path, project_root.clone(), nats_client)?;
+    let lock_manager = FileLockManager::new(&lock_db_path, project_root.to_path_buf(), nats_client)?;
 
     // If NATS is available, subscribe to approval responses
     if let Err(e) = lock_manager.subscribe_to_nats().await {

@@ -25,9 +25,20 @@ use crate::nats::events::{FileAccessEscalatePayload, FileAccessApprovePayload, F
 /// connect/disconnect in quick succession.
 const SINGLE_AGENT_STABILIZE_SECS: u64 = 5;
 
-/// Approval response from main agent via NATS
+/// How long a disconnected session is considered "temporarily disconnected".
+///
+/// When a session disconnects, it is marked as temporarily_disconnected for
+/// this duration. If it reconnects within this window, the single-agent mode
+/// detection does not treat the disconnection as a real departure. This prevents
+/// the main agent's temporary disconnect from triggering single-agent bypass.
+const SESSION_STICKINESS_SECS: u64 = 30;
+
+/// Approval response from main agent via NATS (for WRITE conflict escalation)
+/// M5 fix: Renamed from `WriteConflictApproval` to distinguish from `acp::WriteConflictApproval`
+/// which handles ACP permission flow (human approval). This struct is specifically
+/// for the NATS-based WRITE conflict arbitration flow.
 #[derive(Debug, Clone)]
-pub struct ApprovalResponse {
+pub struct WriteConflictApproval {
     pub approved: bool,
     pub approved_by: String,
     pub reason: Option<String>,
@@ -36,6 +47,21 @@ pub struct ApprovalResponse {
 /// File lock manager backed by SQLite.
 ///
 /// Thread-safe via internal Mutex. All operations use BEGIN IMMEDIATE for atomicity.
+///
+/// # SAFETY: std::sync::Mutex in async context (M13)
+/// This struct uses `std::sync::Mutex` (not `tokio::sync::Mutex`) for `conn`,
+/// `waiters`, `retry_tracker`, etc. This is intentional because:
+/// - All critical sections are short and contain NO `.await` points
+/// - `std::sync::Mutex` has lower overhead than `tokio::sync::Mutex`
+/// - No guard is ever held across an `.await` boundary
+///
+/// **INVARIANT**: Never extend a MutexGuard to include an `.await`. If you need
+/// to call an async function while holding data from a guard, clone the data first,
+/// drop the guard, then await.
+// L1 fix: type aliases for complex nested types
+type FileWaiters = HashMap<String, Vec<oneshot::Sender<Result<(), String>>>>;
+type RetryTracker = HashMap<(String, String), u32>;
+
 pub struct FileLockManager {
     /// SQLite connection (wrapped in Mutex for thread safety).
     conn: Arc<Mutex<Connection>>,
@@ -44,7 +70,7 @@ pub struct FileLockManager {
     /// Cached canonical project root (M2 fix: avoid repeated I/O).
     project_root_canonical: PathBuf,
     /// Waiters for READ_LATEST (file_path → list of notification channels).
-    waiters: Arc<Mutex<HashMap<String, Vec<oneshot::Sender<Result<(), String>>>>>>,
+    waiters: Arc<Mutex<FileWaiters>>,
     /// Number of currently active ACP sessions (sessions holding system tokens).
     ///
     /// Updated by `register_session` / `unregister_session` from the ACP session
@@ -62,7 +88,7 @@ pub struct FileLockManager {
     /// - Computing exponential backoff duration
     /// - Priority boost during arbitration (waiting agents get higher effective priority)
     /// - Giving up after MAX_RETRIES (5) to prevent infinite loops
-    retry_tracker: Arc<Mutex<HashMap<(String, String), u32>>>,
+    retry_tracker: Arc<Mutex<RetryTracker>>,
 
     // ===== NATS Approval Integration =====
     /// NATS client for approval flow communication (optional, None = degraded mode)
@@ -70,7 +96,21 @@ pub struct FileLockManager {
     /// Background task for processing NATS approval responses
     subscription_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     /// Pending approval requests (request_id → responder channel)
-    pending_approvals: Arc<Mutex<HashMap<String, oneshot::Sender<ApprovalResponse>>>>,
+    pending_approvals: Arc<Mutex<HashMap<String, oneshot::Sender<WriteConflictApproval>>>>,
+
+    /// Recently disconnected sessions (session_id → disconnect time).
+    ///
+    /// When a session unregisters, it is recorded here for `SESSION_STICKINESS_SECS`.
+    /// If it reconnects within that window, the disconnection is treated as transient
+    /// and does not affect single-agent mode detection. This prevents the main agent's
+    /// temporary disconnect from triggering the single-agent approval bypass.
+    disconnected_sessions: Arc<Mutex<HashMap<String, Instant>>>,
+
+    /// Idempotency cache for approval requests (idempotency_key → (request_id, timestamp)).
+    ///
+    /// Key: `"{agent_id}:{file_path}:{mode}"` — prevents duplicate NATS messages
+    /// when the same agent retries the same file access request within the timeout window.
+    pending_request_keys: Arc<Mutex<HashMap<String, (String, Instant)>>>,
 }
 
 impl FileLockManager {
@@ -100,6 +140,18 @@ impl FileLockManager {
         )
         .map_err(|e| ErgataiError::internal(format!("Failed to set pragmas: {}", e)))?;
 
+        // Verify WAL mode was actually enabled (PRAGMA may silently fail on some filesystems)
+        let journal_mode: String = conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .map_err(|e| ErgataiError::internal(format!("Failed to query journal mode: {}", e)))?;
+        if journal_mode.to_lowercase() != "wal" {
+            return Err(ErgataiError::internal(format!(
+                "Failed to enable WAL journal mode (current: {}). \
+                 Concurrent read/write performance may be degraded.",
+                journal_mode
+            )));
+        }
+
         // Create tables
         Self::create_tables(&conn)?;
 
@@ -122,6 +174,8 @@ impl FileLockManager {
             nats_client,
             subscription_task: Arc::new(Mutex::new(None)),
             pending_approvals: Arc::new(Mutex::new(HashMap::new())),
+            disconnected_sessions: Arc::new(Mutex::new(HashMap::new())),
+            pending_request_keys: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -161,7 +215,8 @@ impl FileLockManager {
                 heartbeat_interval_secs INTEGER NOT NULL,
                 heartbeat_at TEXT NOT NULL,
                 status TEXT NOT NULL,
-                updated_at TEXT
+                updated_at TEXT,
+                priority INTEGER
             );
 
             -- Unique constraint: only one WRITE per file (enforced at DB level)
@@ -221,6 +276,7 @@ impl FileLockManager {
                 heartbeat_interval_secs INTEGER NOT NULL,
                 heartbeat_at TEXT NOT NULL,
                 status TEXT NOT NULL,
+                priority INTEGER,
                 FOREIGN KEY (system_token_id) REFERENCES system_tokens(id)
             );
 
@@ -331,13 +387,14 @@ impl FileLockManager {
         }
 
         // Check if path is sensitive and requires ADMIN permission
-        if crate::file_access::sensitive_paths::is_sensitive_path(&normalized_path) {
-            if token.mode != FileMode::Admin {
-                return Err(ErgataiError::PermissionDenied(format!(
-                    "File {} is a sensitive path and requires ADMIN permission (current mode: {:?})",
-                    file_path, token.mode
-                )));
-            }
+        // L3 fix: collapsed nested if
+        if crate::file_access::sensitive_paths::is_sensitive_path(&normalized_path)
+            && token.mode != FileMode::Admin
+        {
+            return Err(ErgataiError::PermissionDenied(format!(
+                "File {} is a sensitive path and requires ADMIN permission (current mode: {:?})",
+                file_path, token.mode
+            )));
         }
 
         // Check for WRITE conflict and get conflict info if any
@@ -358,7 +415,7 @@ impl FileLockManager {
                 // Get conflict information for arbitration
                 match conn
                     .query_row(
-                        "SELECT agent_id, session_id, token_id, reason FROM file_locks
+                        "SELECT agent_id, session_id, token_id, reason, priority FROM file_locks
                          WHERE file_path = ?1 AND mode = 'WRITE' AND status = 'ACTIVE'
                          LIMIT 1",
                         params![normalized_path],
@@ -369,14 +426,14 @@ impl FileLockManager {
                                     agent_id: row.get(0)?,
                                     session_id: row.get(1)?,
                                     token_id: row.get(2)?,
-                                    priority: None, // TODO: Get from task metadata
+                                    priority: row.get(4)?,
                                     reason: row.get(3)?,
                                 },
                                 new_requester: crate::file_access::conflict_arbitration::LockHolderInfo {
                                     agent_id: token.agent_id.clone(),
                                     session_id: token.session_id.clone(),
                                     token_id: token.id.as_str().to_string(),
-                                    priority: None, // TODO: Get from task metadata
+                                    priority: token.priority,
                                     reason: token.reason.clone(),
                                 },
                                 timestamp: chrono::Utc::now().to_rfc3339(),
@@ -496,8 +553,8 @@ impl FileLockManager {
             "INSERT INTO file_locks (
                 id, file_path, agent_id, session_id, mode, scope, token_id,
                 reason, approved_by, created_at, expires_at,
-                heartbeat_interval_secs, heartbeat_at, status
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                heartbeat_interval_secs, heartbeat_at, status, priority
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 uuid::Uuid::new_v4().to_string(),
                 normalized_path,
@@ -513,6 +570,7 @@ impl FileLockManager {
                 token.heartbeat_interval_secs as i64,
                 now.to_rfc3339(),
                 TokenStatus::Active.to_string(),
+                token.priority.map(|p| p as i64),
             ],
         )
         .map_err(|e| {
@@ -577,7 +635,10 @@ impl FileLockManager {
                 "UPDATE file_locks SET status = 'EXPIRED'
                  WHERE file_path = ?1 AND mode = 'WRITE' AND status = 'ACTIVE'",
                 params![normalized_path],
-            ).ok();
+            ).map_err(|e| {
+                conn.execute_batch("ROLLBACK").ok();
+                ErgataiError::internal(format!("Failed to expire existing WRITE lock on {}: {}", normalized_path, e))
+            })?;
         }
 
         // Insert lock record
@@ -586,8 +647,8 @@ impl FileLockManager {
             "INSERT INTO file_locks (
                 id, file_path, agent_id, session_id, mode, scope, token_id,
                 reason, approved_by, created_at, expires_at,
-                heartbeat_interval_secs, heartbeat_at, status
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                heartbeat_interval_secs, heartbeat_at, status, priority
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 uuid::Uuid::new_v4().to_string(),
                 normalized_path,
@@ -603,6 +664,7 @@ impl FileLockManager {
                 token.heartbeat_interval_secs as i64,
                 now.to_rfc3339(),
                 TokenStatus::Active.to_string(),
+                token.priority.map(|p| p as i64),
             ],
         )
         .map_err(|e| {
@@ -731,7 +793,10 @@ impl FileLockManager {
                     "UPDATE file_locks SET status = 'EXPIRED'
                      WHERE file_path = ?1 AND mode = 'WRITE' AND status = 'ACTIVE'",
                     params![normalized_path],
-                ).ok();
+                ).map_err(|e| {
+                    conn.execute_batch("ROLLBACK").ok();
+                    ErgataiError::internal(format!("Failed to expire WRITE lock during arbitration on {}: {}", normalized_path, e))
+                })?;
 
                 if let Ok(mut tracker) = self.retry_tracker.lock() {
                     tracker.remove(&key_new);
@@ -904,10 +969,12 @@ impl FileLockManager {
 
     /// Validate and normalize a file path (H2 fix).
     ///
-    /// - Canonicalizes the path
+    /// - Canonicalizes the path (resolves symlinks, .., etc.)
     /// - Ensures it's within project root
     /// - Returns relative path from project root
     /// - M2 fix: Uses cached project_root_canonical to avoid repeated I/O
+    ///
+    /// Use this for WRITE operations where symlink safety is critical.
     fn validate_and_normalize_path(&self, file_path: &str) -> Result<String, ErgataiError> {
         let full_path = self.project_root.join(file_path);
 
@@ -935,13 +1002,63 @@ impl FileLockManager {
             })?;
 
         // Convert to string (use forward slashes even on Windows)
+        // L10 fix: use fold to avoid intermediate Vec allocation
         let path_str = relative
             .components()
             .map(|c| c.as_os_str().to_string_lossy())
-            .collect::<Vec<_>>()
-            .join("/");
+            .fold(String::new(), |mut acc, part| {
+                if !acc.is_empty() {
+                    acc.push('/');
+                }
+                acc.push_str(&part);
+                acc
+            });
 
         Ok(path_str)
+    }
+
+    /// Validate that a scope pattern does not match more than `max_scope_size` files.
+    ///
+    /// Walks the project root and counts files matching the glob pattern. If the
+    /// count exceeds the configured limit (default 1000), returns an error.
+    /// This prevents overly broad scopes (e.g., `**`) from granting implicit
+    /// access to the entire project.
+    ///
+    /// Optimization: for scopes that are a specific file path (no glob characters),
+    /// the count is trivially 1, so we skip the filesystem walk.
+    fn validate_scope_size(&self, scope: &str) -> Result<(), ErgataiError> {
+        // Fast path: if the scope has no glob characters, it's a single file
+        if !scope.contains('*') && !scope.contains('?') && !scope.contains('[') {
+            return Ok(());
+        }
+
+        // Default limit (if no config manager is available)
+        let max_files: u64 = 1000;
+
+        // Validate pattern syntax first (glob::glob below re-parses, but we want
+        // to catch invalid patterns here with a clear error message)
+        let _validated_pattern = glob::Pattern::new(scope).map_err(|e| {
+            ErgataiError::InvalidArgument(format!("Invalid scope glob pattern '{}': {}", scope, e))
+        })?;
+
+        let mut count: u64 = 0;
+        let walker = glob::glob(self.project_root.join(scope).to_string_lossy().as_ref())
+            .map_err(|e| ErgataiError::internal(format!("Failed to read glob pattern: {}", e)))?;
+
+        for entry in walker {
+            if entry.is_ok() {
+                count += 1;
+                if count > max_files {
+                    return Err(ErgataiError::PermissionDenied(format!(
+                        "Scope '{}' matches more than {} files (limit exceeded). Use a narrower scope.",
+                        scope, max_files
+                    )));
+                }
+            }
+        }
+
+        debug!(scope = scope, file_count = count, "Scope size validated");
+        Ok(())
     }
 
     /// Log an action to the audit log.
@@ -1184,7 +1301,7 @@ impl FileLockManager {
             .prepare(
                 "SELECT id, agent_id, session_id, system_token_id, scope, mode, reason,
                         approved_by, issued_at, expires_at, heartbeat_interval_secs,
-                        heartbeat_at, status
+                        heartbeat_at, status, priority
                  FROM file_tokens
                  WHERE session_id = ?1 AND status = 'ACTIVE'
                  ORDER BY issued_at DESC
@@ -1208,6 +1325,7 @@ impl FileLockManager {
                     heartbeat_interval_secs: row.get::<_, u64>(10)?,
                     heartbeat_at: parse_datetime(&row.get::<_, String>(11)?),
                     status: parse_token_status(&row.get::<_, String>(12)?),
+                    priority: row.get::<_, Option<i64>>(13)?.map(|p| p as u8),
                 })
             })
             .map_err(|e| ErgataiError::NotFound(format!("FileToken not found: {}", e)))?;
@@ -1258,6 +1376,9 @@ impl FileLockManager {
 
     /// Register a FileToken in the database.
     pub fn register_file_token(&self, token: &FileToken) -> Result<(), ErgataiError> {
+        // Validate scope size (M9 fix): count matching files and reject if over limit
+        self.validate_scope_size(&token.scope)?;
+
         let conn = self.conn.lock().map_err(|e| {
             ErgataiError::internal(format!("Failed to acquire lock: {}", e))
         })?;
@@ -1266,8 +1387,8 @@ impl FileLockManager {
             "INSERT INTO file_tokens (
                 id, agent_id, session_id, system_token_id, scope, mode, reason,
                 approved_by, issued_at, expires_at, heartbeat_interval_secs,
-                heartbeat_at, status
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                heartbeat_at, status, priority
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 token.id.to_string(),
                 token.agent_id,
@@ -1282,6 +1403,7 @@ impl FileLockManager {
                 token.heartbeat_interval_secs,
                 token.heartbeat_at.to_rfc3339(),
                 token.status.to_string(),
+                token.priority.map(|p| p as i64),
             ],
         )
         .map_err(|e| ErgataiError::internal(format!("Failed to register file token: {}", e)))?;
@@ -1303,7 +1425,7 @@ impl FileLockManager {
             .prepare(
                 "SELECT id, agent_id, session_id, system_token_id, scope, mode, reason,
                         approved_by, issued_at, expires_at, heartbeat_interval_secs,
-                        heartbeat_at, status
+                        heartbeat_at, status, priority
                  FROM file_tokens
                  WHERE id = ?1 AND status = 'ACTIVE'",
             )
@@ -1325,6 +1447,7 @@ impl FileLockManager {
                     heartbeat_interval_secs: row.get::<_, u64>(10)?,
                     heartbeat_at: parse_datetime(&row.get::<_, String>(11)?),
                     status: parse_token_status(&row.get::<_, String>(12)?),
+                    priority: row.get::<_, Option<i64>>(13)?.map(|p| p as u8),
                 })
             })
             .map_err(|e| ErgataiError::NotFound(format!("FileToken not found: {}", e)))?;
@@ -1415,12 +1538,26 @@ impl FileLockManager {
     ///
     /// Waits for any pending WRITE to complete or fail before reading.
     /// Returns the file content as bytes.
+    ///
+    /// Read the latest content of a file, waiting for any pending WRITE to complete.
+    ///
+    /// Waits for any pending WRITE to complete or fail before reading.
+    /// Returns the file content as bytes.
+    ///
+    /// # Safety Note
+    /// This method does NOT hold the waiters lock while checking the lock state,
+    /// because `is_file_locked_for_write` acquires `conn` lock. Holding `waiters`
+    /// while acquiring `conn` would create a lock ordering inversion with
+    /// `release_lock` (which does `conn` → `waiters`), causing deadlock.
+    ///
+    /// There is a minor TOCTOU race: if WRITE completes between the check and
+    /// waiter registration, the waiter blocks up to 30s timeout. This is safe
+    /// (not a deadlock) and rare in practice.
     pub async fn read_latest(&self, file_path: &str) -> Result<Vec<u8>, ErgataiError> {
-        // Check if file is locked for WRITE
+        // Check if file is locked for WRITE (acquires/releases conn lock)
         if self.is_file_locked_for_write(file_path)? {
-            // Wait for file to become ready
+            // Register waiter (acquires waiters lock — no conn lock held, avoids deadlock)
             let rx = self.add_waiter(file_path).await?;
-
             // Wait for notification or timeout (30 seconds)
             match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
                 Ok(Ok(Ok(()))) => {
@@ -1464,12 +1601,18 @@ impl FileLockManager {
     ///
     /// Called when an ACP session is created (system token issued). Updates the
     /// active session count and resets the single-agent stabilization timer.
+    /// If the session was recently disconnected (within SESSION_STICKINESS_SECS),
+    /// the disconnect is treated as transient and cleared.
     pub fn register_session(&self) {
         let prev = self.active_session_count.fetch_add(1, Ordering::Relaxed);
         // Reset hysteresis timer — count changed
         if let Ok(mut guard) = self.single_agent_since.lock() {
             *guard = None;
         }
+        // Note: we don't know the session_id here, so we clear all expired
+        // disconnected sessions. The reconnect logic in is_single_agent_mode
+        // handles the actual session-aware stickiness.
+        self.cleanup_disconnected_sessions();
         info!(
             prev_count = prev,
             new_count = prev + 1,
@@ -1477,14 +1620,32 @@ impl FileLockManager {
         );
     }
 
+    /// Register a specific session by ID, clearing its disconnected status.
+    ///
+    /// Call this when you know the session_id that is reconnecting. If the session
+    /// was marked as temporarily_disconnected, the mark is cleared.
+    pub fn register_session_with_id(&self, session_id: &str) {
+        // Clear disconnected mark for this specific session
+        if let Ok(mut guard) = self.disconnected_sessions.lock() {
+            let was_disconnected = guard.remove(session_id).is_some();
+            if was_disconnected {
+                info!(session_id = session_id, "Session reconnected within stickiness window");
+            }
+        }
+        self.register_session();
+    }
+
     /// Unregister an active ACP session.
     ///
     /// Called when an ACP session ends (system token revoked or expired).
     /// Updates the active session count and resets the single-agent stabilization timer.
+    /// The session is marked as temporarily_disconnected for SESSION_STICKINESS_SECS.
     pub fn unregister_session(&self) {
-        let prev = self.active_session_count.load(Ordering::Relaxed);
+        // Use fetch_update for atomic saturating subtract (prevents lost-update race with fetch_add)
+        let prev = self.active_session_count
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |val| Some(val.saturating_sub(1)))
+            .unwrap_or(0);
         let new = prev.saturating_sub(1);
-        self.active_session_count.store(new, Ordering::Relaxed);
         // Reset hysteresis timer — count changed
         if let Ok(mut guard) = self.single_agent_since.lock() {
             *guard = None;
@@ -1496,20 +1657,60 @@ impl FileLockManager {
         );
     }
 
+    /// Unregister a specific session by ID, marking it as temporarily disconnected.
+    ///
+    /// The session will be considered "temporarily disconnected" for
+    /// `SESSION_STICKINESS_SECS` seconds. If it reconnects within that window,
+    /// single-agent mode detection treats the disconnect as transient.
+    pub fn unregister_session_with_id(&self, session_id: &str) {
+        // Mark as temporarily disconnected
+        if let Ok(mut guard) = self.disconnected_sessions.lock() {
+            guard.insert(session_id.to_string(), Instant::now());
+        }
+        self.unregister_session();
+    }
+
+    /// Clean up expired disconnected sessions (older than SESSION_STICKINESS_SECS).
+    fn cleanup_disconnected_sessions(&self) {
+        if let Ok(mut guard) = self.disconnected_sessions.lock() {
+            guard.retain(|_, instant| instant.elapsed().as_secs() < SESSION_STICKINESS_SECS);
+        }
+    }
+
+    /// Count how many sessions are currently in the temporarily_disconnected state.
+    fn recently_disconnected_count(&self) -> usize {
+        self.cleanup_disconnected_sessions();
+        self.disconnected_sessions
+            .lock()
+            .map(|g| g.len())
+            .unwrap_or(0)
+    }
+
     /// Check whether the system is in single-agent mode.
     ///
     /// Returns `true` only when:
     /// 1. Exactly one ACP session is currently active, AND
-    /// 2. The count has remained at 1 for at least `SINGLE_AGENT_STABILIZE_SECS`
+    /// 2. No sessions are in the "temporarily disconnected" state (session stickiness), AND
+    /// 3. The count has remained at 1 for at least `SINGLE_AGENT_STABILIZE_SECS`
     ///    consecutive seconds (hysteresis).
     ///
     /// This prevents rapid toggling when agents connect/disconnect in quick
     /// succession. The approval flow is bypassed in single-agent mode because
     /// there is no contention risk.
+    ///
+    /// **Session stickiness**: If a session disconnected within the last
+    /// `SESSION_STICKINESS_SECS` seconds, the system does NOT enter single-agent
+    /// mode, because the disconnected session may reconnect. This prevents the
+    /// main agent's temporary disconnect from triggering approval bypass.
     pub fn is_single_agent_mode(&self) -> bool {
         let count = self.active_session_count.load(Ordering::Relaxed);
 
-        if count != 1 {
+        // If there are recently disconnected sessions, we are NOT in single-agent
+        // mode — the disconnected session(s) may reconnect at any time.
+        let disconnected = self.recently_disconnected_count();
+        let effective_count = count + disconnected;
+
+        if effective_count != 1 {
             // Not single-agent — ensure timer is reset
             if let Ok(mut guard) = self.single_agent_since.lock() {
                 if guard.is_some() {
@@ -1519,7 +1720,7 @@ impl FileLockManager {
             return false;
         }
 
-        // Count is 1 — check or start the stabilization timer
+        // Count is 1 (and no disconnected sessions) — check or start the stabilization timer
         let mut guard = match self.single_agent_since.lock() {
             Ok(g) => g,
             Err(_) => return false, // Poisoned lock — fail safe (don't bypass)
@@ -1826,53 +2027,51 @@ impl FileLockManager {
     /// Handle an approval or rejection response from the main agent.
     async fn handle_approval_response(
         msg: async_nats::Message,
-        pending: Arc<Mutex<HashMap<String, oneshot::Sender<ApprovalResponse>>>>,
+        pending: Arc<Mutex<HashMap<String, oneshot::Sender<WriteConflictApproval>>>>,
         is_approval: bool,
     ) {
-        let subject = msg.subject.as_str();
-        debug!("Received NATS message on subject: {}", subject);
+        debug!("Received NATS message on subject: {}", msg.subject.as_str());
 
         // Parse the payload and extract both response and request_id in one pass
         let (response, request_id) = if is_approval {
-            match serde_json::from_slice::<FileAccessApprovePayload>(&msg.payload) {
-                Ok(payload) => {
-                    let response = ApprovalResponse {
-                        approved: true,
-                        approved_by: payload.approver_id,
-                        reason: payload.custom_scope.map(|s| format!("Custom scope: {}", s)),
-                    };
-                    (response, Some(payload.request_id))
-                }
-                Err(e) => {
-                    error!("Failed to parse FileAccessApprovePayload: {}", e);
-                    return;
-                }
-            }
+            let Ok(payload) = serde_json::from_slice::<FileAccessApprovePayload>(&msg.payload) else {
+                error!("Failed to parse FileAccessApprovePayload");
+                return;
+            };
+            let response = WriteConflictApproval {
+                approved: true,
+                approved_by: payload.approver_id,
+                reason: payload.custom_scope.map(|s| format!("Custom scope: {}", s)),
+            };
+            (response, payload.request_id)
         } else {
-            match serde_json::from_slice::<FileAccessRejectPayload>(&msg.payload) {
-                Ok(payload) => {
-                    let response = ApprovalResponse {
-                        approved: false,
-                        approved_by: payload.rejecter_id,
-                        reason: Some(payload.reason),
-                    };
-                    (response, Some(payload.request_id))
-                }
-                Err(e) => {
-                    error!("Failed to parse FileAccessRejectPayload: {}", e);
-                    return;
-                }
-            }
+            let Ok(payload) = serde_json::from_slice::<FileAccessRejectPayload>(&msg.payload) else {
+                error!("Failed to parse FileAccessRejectPayload");
+                return;
+            };
+            let response = WriteConflictApproval {
+                approved: false,
+                approved_by: payload.rejecter_id,
+                reason: Some(payload.reason),
+            };
+            (response, payload.request_id)
         };
 
-        if let Some(req_id) = request_id {
-            let mut waiters = pending.lock().unwrap();
-            if let Some(tx) = waiters.remove(&req_id) {
-                info!(request_id = %req_id, approved = %response.approved, "Waking up approval waiter");
-                let _ = tx.send(response);
-            } else {
-                warn!(request_id = %req_id, "No waiter found for request_id (may have timed out)");
-            }
+        // Minimize Mutex critical section: extract sender first, then release lock before logging/sending
+        let sender = {
+            // Poison-safe Mutex handling: recover data even if a previous holder panicked
+            let mut waiters = pending.lock().unwrap_or_else(|e| {
+                error!("Mutex poisoned, recovering: {}", e);
+                e.into_inner()
+            });
+            waiters.remove(&request_id)
+        }; // lock released here
+
+        if let Some(tx) = sender {
+            info!(request_id = %request_id, approved = %response.approved, "Waking up approval waiter");
+            let _ = tx.send(response);
+        } else {
+            warn!(request_id = %request_id, "No waiter found for request_id (may have timed out)");
         }
     }
 
@@ -1888,6 +2087,9 @@ impl FileLockManager {
     /// Request approval from main agent via NATS.
     ///
     /// Sends an escalation request and returns a request_id for tracking.
+    /// **Idempotent**: if the same (agent_id, file_path, mode) request was already
+    /// sent within the last 30 seconds and is still pending, the existing request_id
+    /// is returned without sending a duplicate NATS message.
     pub async fn request_approval_from_main_agent(
         &self,
         token: &FileToken,
@@ -1895,6 +2097,29 @@ impl FileLockManager {
         conflict_with: Option<&str>,
         reason: &str,
     ) -> Result<String, ErgataiError> {
+        // Idempotency check: reuse existing pending request if available
+        let idempotency_key = format!("{}:{}:{}", token.agent_id, file_path, token.mode);
+
+        // Clean up stale entries and check for existing request
+        {
+            let mut guard = self.pending_request_keys.lock().map_err(|e| {
+                ErgataiError::internal(format!("Failed to lock pending_request_keys: {}", e))
+            })?;
+            // Remove entries older than 60s
+            guard.retain(|_, (_, instant)| instant.elapsed().as_secs() < 60);
+
+            if let Some((existing_id, instant)) = guard.get(&idempotency_key) {
+                if instant.elapsed().as_secs() < 30 {
+                    debug!(
+                        idempotency_key = %idempotency_key,
+                        existing_request_id = %existing_id,
+                        "Reusing existing pending approval request (idempotent)"
+                    );
+                    return Ok(existing_id.clone());
+                }
+            }
+        }
+
         let request_id = format!("approval-{}", uuid::Uuid::new_v4());
 
         let payload = FileAccessEscalatePayload {
@@ -1918,6 +2143,11 @@ impl FileLockManager {
                 .await
                 .map_err(|e| ErgataiError::internal(format!("Failed to publish escalation request: {}", e)))?;
 
+            // Record the request for idempotency
+            if let Ok(mut guard) = self.pending_request_keys.lock() {
+                guard.insert(idempotency_key, (request_id.clone(), Instant::now()));
+            }
+
             info!(
                 request_id = %request_id,
                 agent_id = %token.agent_id,
@@ -1939,7 +2169,7 @@ impl FileLockManager {
         &self,
         request_id: &str,
         timeout_duration: Duration,
-    ) -> Result<ApprovalResponse, ErgataiError> {
+    ) -> Result<WriteConflictApproval, ErgataiError> {
         let (tx, rx) = oneshot::channel();
 
         // Register the waiter
@@ -1995,34 +2225,42 @@ impl FileLockManager {
 // Helper functions for parsing database values
 
 fn parse_file_mode(s: &str) -> FileMode {
-    match s.to_uppercase().as_str() {
-        "READ" => FileMode::Read,
-        "WRITE" => FileMode::Write,
-        "ADMIN" => FileMode::Admin,
-        other => {
-            tracing::warn!(mode = other, "Unknown file mode in DB, defaulting to Read (least privilege)");
-            FileMode::Read
-        }
+    // L9 fix: use eq_ignore_ascii_case to avoid allocation from to_uppercase()
+    if s.eq_ignore_ascii_case("READ") {
+        FileMode::Read
+    } else if s.eq_ignore_ascii_case("WRITE") {
+        FileMode::Write
+    } else if s.eq_ignore_ascii_case("ADMIN") {
+        FileMode::Admin
+    } else {
+        tracing::warn!(mode = s, "Unknown file mode in DB, defaulting to Read (least privilege)");
+        FileMode::Read
     }
 }
 
 fn parse_token_status(s: &str) -> TokenStatus {
-    match s.to_uppercase().as_str() {
-        "ACTIVE" => TokenStatus::Active,
-        "UPGRADING" => TokenStatus::Upgrading,
-        "EXPIRED" => TokenStatus::Expired,
-        "REVOKED" => TokenStatus::Revoked,
-        other => {
-            tracing::warn!(status = other, "Unknown token status in DB, defaulting to Expired (fail-safe)");
-            TokenStatus::Expired
-        }
+    if s.eq_ignore_ascii_case("ACTIVE") {
+        TokenStatus::Active
+    } else if s.eq_ignore_ascii_case("UPGRADING") {
+        TokenStatus::Upgrading
+    } else if s.eq_ignore_ascii_case("EXPIRED") {
+        TokenStatus::Expired
+    } else if s.eq_ignore_ascii_case("REVOKED") {
+        TokenStatus::Revoked
+    } else {
+        tracing::warn!(status = s, "Unknown token status in DB, defaulting to Expired (fail-safe)");
+        TokenStatus::Expired
     }
 }
 
 fn parse_datetime(s: &str) -> DateTime<Utc> {
-    DateTime::parse_from_rfc3339(s)
-        .map(|dt| dt.with_timezone(&Utc))
-        .unwrap_or_else(|_| Utc::now())
+    match DateTime::parse_from_rfc3339(s) {
+        Ok(dt) => dt.with_timezone(&Utc),
+        Err(e) => {
+            tracing::error!(raw = s, error = %e, "Invalid datetime in DB, using UNIX_EPOCH (fail-safe: expired)");
+            DateTime::UNIX_EPOCH
+        }
+    }
 }
 
 #[cfg(test)]

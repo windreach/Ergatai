@@ -198,6 +198,7 @@ pub async fn file_access_request_token(
     reason: Option<String>,
     ttl_secs: u32,
     heartbeat_interval_secs: u32,
+    priority: Option<String>,
 ) -> napi::Result<String> {
     crate::napi::guard();
 
@@ -218,7 +219,8 @@ pub async fn file_access_request_token(
         .map_err(to_napi)?;
 
     // Create FileToken
-    let file_token = FileToken::new(
+    let priority_num = crate::file_access::conflict_arbitration::priority_to_number(&priority);
+    let file_token = FileToken::with_priority(
         agent_id,
         session_id,
         system_token.id.clone(),
@@ -228,6 +230,7 @@ pub async fn file_access_request_token(
         "system".to_string(), // TODO: Implement approval flow
         ttl_secs as u64,
         heartbeat_interval_secs as u64,
+        priority_num,
     );
 
     // Register FileToken
@@ -415,7 +418,17 @@ pub async fn file_access_create_snapshot(
 
     let project_state = get_project_state(&project_id).await.map_err(to_napi)?;
 
-    let git_hash = project_state.snapshot_manager.create_snapshot(&file_path, &agent_id).map_err(to_napi)?;
+    // M3 fix: Wrap blocking snapshot creation in spawn_blocking to avoid
+    // blocking the tokio runtime (fs::read + git blob creation are I/O-heavy)
+    let snapshot_manager = project_state.snapshot_manager.clone();
+    let fp = file_path.clone();
+    let aid = agent_id.clone();
+    let git_hash = tokio::task::spawn_blocking(move || {
+        snapshot_manager.create_snapshot(&fp, &aid)
+    })
+    .await
+    .map_err(|e| napi::Error::from_reason(format!("spawn_blocking join error: {}", e)))?
+    .map_err(to_napi)?;
 
     info!(
         project_id = project_id,
@@ -483,6 +496,9 @@ pub async fn file_access_shutdown(project_id: String) -> napi::Result<()> {
     let mut state = state.write().await;
 
     if let Some(project_state) = state.projects.remove(&project_id) {
+        // Stop NATS subscription first (prevents Arc<FileLockManager> leak)
+        project_state.lock_manager.shutdown_nats_subscription();
+
         // Stop watchdog
         let mut watchdog = project_state.watchdog.write().await;
         watchdog.stop().map_err(to_napi)?;

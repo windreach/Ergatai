@@ -39,6 +39,14 @@ pub struct FileAccessConfig {
     /// Maximum audit log rows (default: 1_000_000)
     #[serde(default = "default_max_audit_rows")]
     pub max_audit_rows: u64,
+
+    /// Maximum number of files a single scope pattern can match (default: 1000).
+    ///
+    /// Prevents overly broad scopes like `**` from granting implicit access to
+    /// the entire project. If a scope matches more files than this limit, the
+    /// lock request is rejected and the agent must request a narrower scope.
+    #[serde(default = "default_max_scope_size")]
+    pub max_scope_size: u64,
 }
 
 impl Default for FileAccessConfig {
@@ -50,6 +58,7 @@ impl Default for FileAccessConfig {
             snapshot_retention_days: default_snapshot_retention_days(),
             audit_retention_months: default_audit_retention_months(),
             max_audit_rows: default_max_audit_rows(),
+            max_scope_size: default_max_scope_size(),
         }
     }
 }
@@ -70,6 +79,10 @@ fn default_max_audit_rows() -> u64 {
     1_000_000
 }
 
+fn default_max_scope_size() -> u64 {
+    1000
+}
+
 /// Configuration manager with hot reload support
 pub struct ConfigManager {
     /// Project root directory
@@ -78,8 +91,8 @@ pub struct ConfigManager {
     /// Current configuration (thread-safe)
     config: Arc<RwLock<FileAccessConfig>>,
 
-    /// Last modification time of the config file
-    last_modified: Arc<RwLock<Option<Instant>>>,
+    /// Last modification time of the config file (SystemTime for mtime comparison)
+    last_modified: Arc<RwLock<Option<std::time::SystemTime>>>,
 
     /// Hot reload interval (None = disabled)
     reload_interval: Option<Duration>,
@@ -97,11 +110,14 @@ impl ConfigManager {
     pub fn new(project_root: &Path, reload_interval: Option<Duration>) -> Result<Self, ErgataiError> {
         let config_path = project_root.join(".ergatai").join("config.json");
 
-        let config = if config_path.exists() {
-            Self::load_config(&config_path)?
+        let (config, initial_mtime) = if config_path.exists() {
+            let mtime = fs::metadata(&config_path)
+                .and_then(|m| m.modified())
+                .ok();
+            (Self::load_config(&config_path)?, mtime)
         } else {
             debug!("No project config found at {:?}, using defaults", config_path);
-            FileAccessConfig::default()
+            (FileAccessConfig::default(), None)
         };
 
         let now = Instant::now();
@@ -109,7 +125,7 @@ impl ConfigManager {
         Ok(Self {
             project_root: project_root.to_path_buf(),
             config: Arc::new(RwLock::new(config)),
-            last_modified: Arc::new(RwLock::new(None)),
+            last_modified: Arc::new(RwLock::new(initial_mtime)),
             reload_interval,
             last_check: Arc::new(RwLock::new(now)),
         })
@@ -140,7 +156,10 @@ impl ConfigManager {
         // Check if we should reload
         if let Some(interval) = self.reload_interval {
             let should_reload = {
-                let mut last_check = self.last_check.write().unwrap();
+                let mut last_check = self.last_check.write().unwrap_or_else(|e| {
+                    tracing::error!("last_check RwLock poisoned, recovering: {}", e);
+                    e.into_inner()
+                });
                 let now = Instant::now();
                 if now.duration_since(*last_check) >= interval {
                     *last_check = now;
@@ -157,7 +176,10 @@ impl ConfigManager {
             }
         }
 
-        self.config.read().unwrap().clone()
+        self.config.read().unwrap_or_else(|e| {
+            tracing::error!("config RwLock poisoned, recovering: {}", e);
+            e.into_inner()
+        }).clone()
     }
 
     /// Reload configuration if the file has changed
@@ -172,38 +194,36 @@ impl ConfigManager {
             ErgataiError::internal(format!("Failed to get config metadata: {}", e))
         })?;
 
-        let _modified = metadata.modified().map_err(|e| {
+        let modified = metadata.modified().map_err(|e| {
             ErgataiError::internal(format!("Failed to get modification time: {}", e))
         })?;
 
-        // Compare with last known modification time
-        let last_modified = self.last_modified.read().unwrap();
+        // Compare with last known modification time (SystemTime vs SystemTime)
+        let last_modified = self.last_modified.read().map_err(|e| {
+            ErgataiError::internal(format!("Config last_modified lock poisoned: {}", e))
+        })?;
 
         if let Some(last) = *last_modified {
-            // Simple comparison: if modification time is newer than last check
-            // Note: This is a simplified check. In production, you'd store the actual
-            // SystemTime and compare it.
-            let elapsed = last.elapsed();
-            if elapsed.as_secs() > 0 {
-                // File might have changed, reload
-                drop(last_modified);
-                let new_config = Self::load_config(&config_path)?;
-                let mut config = self.config.write().unwrap();
-                *config = new_config;
-                let mut last_modified = self.last_modified.write().unwrap();
-                *last_modified = Some(Instant::now());
-
-                info!("Configuration reloaded");
-                return Ok(true);
+            // Only reload if file mtime is actually newer than what we have
+            if modified <= last {
+                return Ok(false);
             }
-        } else {
-            // First time, set the modification time
-            drop(last_modified);
-            let mut last_modified = self.last_modified.write().unwrap();
-            *last_modified = Some(Instant::now());
         }
+        drop(last_modified);
 
-        Ok(false)
+        // File has changed, reload
+        let new_config = Self::load_config(&config_path)?;
+        let mut config = self.config.write().map_err(|e| {
+            ErgataiError::internal(format!("Config lock poisoned: {}", e))
+        })?;
+        *config = new_config;
+        let mut last_modified = self.last_modified.write().map_err(|e| {
+            ErgataiError::internal(format!("Config last_modified write lock poisoned: {}", e))
+        })?;
+        *last_modified = Some(modified);
+
+        info!("Configuration reloaded");
+        Ok(true)
     }
 
     /// Check if a path is sensitive (system defaults + project config)
@@ -255,7 +275,9 @@ impl ConfigManager {
         let config_path = self.project_root.join(".ergatai").join("config.json");
         if config_path.exists() {
             let new_config = Self::load_config(&config_path)?;
-            let mut config = self.config.write().unwrap();
+            let mut config = self.config.write().map_err(|e| {
+                ErgataiError::internal(format!("Config lock poisoned: {}", e))
+            })?;
             *config = new_config;
             info!("Configuration manually reloaded");
         }
