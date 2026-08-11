@@ -275,7 +275,7 @@ pub async fn file_access_release_lock(
 
     let project_state = get_project_state(&project_id).await.map_err(to_napi)?;
 
-    project_state.lock_manager.release_lock(&token_id, &file_path).map_err(to_napi)?;
+    project_state.lock_manager.release_lock(&token_id, &file_path).await.map_err(to_napi)?;
 
     info!(
         project_id = project_id,

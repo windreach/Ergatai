@@ -430,14 +430,18 @@ impl FileLockManager {
     }
 
     /// Release a file lock.
-    pub fn release_lock(&self, token_id: &str, file_path: &str) -> Result<(), ErgataiError> {
+    ///
+    /// Automatically notifies waiters (READ_LATEST) after releasing the lock.
+    pub async fn release_lock(&self, token_id: &str, file_path: &str) -> Result<(), ErgataiError> {
         let normalized_path = self.validate_and_normalize_path(file_path)?;
 
-        let conn = self.conn.lock().map_err(|e| {
-            ErgataiError::internal(format!("Failed to acquire lock: {}", e))
-        })?;
+        // Use a block to ensure conn is dropped before async call
+        let release_result = {
+            let conn = self.conn.lock().map_err(|e| {
+                ErgataiError::internal(format!("Failed to acquire lock: {}", e))
+            })?;
 
-        conn.execute_batch("BEGIN IMMEDIATE")
+            conn.execute_batch("BEGIN IMMEDIATE")
             .map_err(|e| ErgataiError::internal(format!("Failed to begin transaction: {}", e)))?;
 
         // Get lock info for audit
@@ -492,6 +496,13 @@ impl FileLockManager {
                 token_id, file_path
             )))
         }
+        }; // conn is dropped here
+
+        // Notify waiters after releasing the mutex
+        release_result?;
+        self.notify_file_ready(&normalized_path).await?;
+
+        Ok(())
     }
 
     /// Check if a file is locked for writing.
@@ -1209,8 +1220,8 @@ mod tests {
         assert_eq!(journal_mode, "wal");
     }
 
-    #[test]
-    fn test_acquire_and_release_lock() {
+    #[tokio::test]
+    async fn test_acquire_and_release_lock() {
         let (manager, _temp) = create_test_manager();
 
         let system_token = SystemToken::new(
@@ -1242,7 +1253,7 @@ mod tests {
         assert!(manager.is_file_locked("test.txt").unwrap());
 
         // Release lock
-        manager.release_lock(file_token.id.as_str(), "test.txt").unwrap();
+        manager.release_lock(file_token.id.as_str(), "test.txt").await.unwrap();
 
         // Check lock released
         assert!(!manager.is_file_locked("test.txt").unwrap());

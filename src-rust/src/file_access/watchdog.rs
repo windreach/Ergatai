@@ -388,7 +388,7 @@ impl Watchdog {
             let file_path = &lock.file_path;
 
             // Release the lock
-            if let Err(e) = lock_manager.release_lock(token_id, file_path) {
+            if let Err(e) = lock_manager.release_lock(token_id, file_path).await {
                 error!(
                     token_id = token_id,
                     file_path = file_path,
@@ -472,7 +472,7 @@ impl Watchdog {
 
         // Release each lock using its own token_id (FileToken ID, not SystemToken ID)
         for lock in &locks {
-            if let Err(e) = self.lock_manager.release_lock(lock.token_id.as_str(), &lock.file_path) {
+            if let Err(e) = self.lock_manager.release_lock(lock.token_id.as_str(), &lock.file_path).await {
                 error!(
                     session_id = session_id,
                     file_path = %lock.file_path,
