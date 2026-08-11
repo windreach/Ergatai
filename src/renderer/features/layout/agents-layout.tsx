@@ -301,8 +301,6 @@ export function AgentsLayout() {
       <div className="flex flex-col w-full h-full relative overflow-hidden bg-background select-none">
         {/* Custom Title Bar - handles platform detection internally */}
         <CustomTitleBar />
-        {/* Browser-style Tab Bar for Agent Sessions */}
-        <BrowserTabBar />
         <div className="flex flex-1 overflow-hidden">
           {/* Left Sidebar - switches between chat list and settings nav */}
           <ResizableSidebar
