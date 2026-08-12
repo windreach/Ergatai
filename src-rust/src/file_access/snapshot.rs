@@ -105,7 +105,10 @@ impl SnapshotManager {
             Ok(p) => p,
             Err(_) => {
                 // File doesn't exist or is inaccessible
-                debug!(file_path = file_path, "File does not exist, skipping snapshot");
+                debug!(
+                    file_path = file_path,
+                    "File does not exist, skipping snapshot"
+                );
                 return Ok(String::new());
             }
         };
@@ -119,9 +122,8 @@ impl SnapshotManager {
         }
 
         // Check file size (limit: 100MB) to prevent OOM
-        let metadata = fs::metadata(&full_path).map_err(|e| {
-            ErgataiError::internal(format!("Failed to read file metadata: {}", e))
-        })?;
+        let metadata = fs::metadata(&full_path)
+            .map_err(|e| ErgataiError::internal(format!("Failed to read file metadata: {}", e)))?;
 
         const MAX_SNAPSHOT_SIZE: u64 = 100 * 1024 * 1024; // 100MB
         if metadata.len() > MAX_SNAPSHOT_SIZE {
@@ -138,11 +140,15 @@ impl SnapshotManager {
         })?;
 
         // Create blob in git object store (lock repository for thread safety)
-        let repo = self.repo.lock().map_err(|e| {
-            ErgataiError::internal(format!("Failed to lock git repository: {}", e))
-        })?;
+        let repo = self
+            .repo
+            .lock()
+            .map_err(|e| ErgataiError::internal(format!("Failed to lock git repository: {}", e)))?;
         let oid = repo.blob(&content).map_err(|e| {
-            ErgataiError::internal(format!("Failed to create git blob for {}: {}", file_path, e))
+            ErgataiError::internal(format!(
+                "Failed to create git blob for {}: {}",
+                file_path, e
+            ))
         })?;
 
         let git_hash = oid.to_string();
@@ -180,14 +186,12 @@ impl SnapshotManager {
         })?;
 
         // Read blob from git object store (lock repository for thread safety)
-        let repo = self.repo.lock().map_err(|e| {
-            ErgataiError::internal(format!("Failed to lock git repository: {}", e))
-        })?;
+        let repo = self
+            .repo
+            .lock()
+            .map_err(|e| ErgataiError::internal(format!("Failed to lock git repository: {}", e)))?;
         let blob = repo.find_blob(oid).map_err(|e| {
-            ErgataiError::NotFound(format!(
-                "Failed to find git blob {}: {}",
-                git_hash, e
-            ))
+            ErgataiError::NotFound(format!("Failed to find git blob {}: {}", git_hash, e))
         })?;
 
         Ok(blob.content().to_vec())
@@ -207,23 +211,23 @@ impl SnapshotManager {
         conn: &rusqlite::Connection,
         file_path: &str,
     ) -> Result<Option<String>, ErgataiError> {
-        let git_hash: Option<String> = match conn
-            .query_row(
-                "SELECT git_hash FROM snapshots
+        let git_hash: Option<String> = match conn.query_row(
+            "SELECT git_hash FROM snapshots
                  WHERE file_path = ?1
                  ORDER BY created_at DESC
                  LIMIT 1",
-                rusqlite::params![file_path],
-                |row| row.get(0),
-            ) {
-                Ok(hash) => Some(hash),
-                Err(rusqlite::Error::QueryReturnedNoRows) => None,
-                Err(e) => {
-                    return Err(ErgataiError::internal(format!(
-                        "Failed to query latest snapshot: {}", e
-                    )));
-                }
-            };
+            rusqlite::params![file_path],
+            |row| row.get(0),
+        ) {
+            Ok(hash) => Some(hash),
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(e) => {
+                return Err(ErgataiError::internal(format!(
+                    "Failed to query latest snapshot: {}",
+                    e
+                )));
+            }
+        };
 
         Ok(git_hash)
     }
@@ -278,7 +282,8 @@ impl SnapshotManager {
         // L7 fix: prevent accidental deletion of all snapshots
         if days_to_keep == 0 {
             return Err(ErgataiError::InvalidArgument(
-                "days_to_keep must be > 0 to prevent accidental deletion of all snapshots".to_string()
+                "days_to_keep must be > 0 to prevent accidental deletion of all snapshots"
+                    .to_string(),
             ));
         }
 
@@ -318,13 +323,12 @@ impl SnapshotManager {
         max_bytes: u64,
     ) -> Result<usize, ErgataiError> {
         // Get all snapshots ordered by creation date (oldest first)
-        let mut stmt = conn.prepare(
-            "SELECT id, file_path, created_at FROM snapshots ORDER BY created_at ASC"
-        )?;
+        let mut stmt = conn
+            .prepare("SELECT id, file_path, created_at FROM snapshots ORDER BY created_at ASC")?;
 
-        let snapshots: Vec<(String, String, String)> = stmt.query_map([], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-        })?.collect::<Result<Vec<_>, _>>()?;
+        let snapshots: Vec<(String, String, String)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
 
         // Estimate total size (approximate: 10KB per snapshot average)
         // In production, this could be enhanced to query git object sizes
@@ -350,17 +354,16 @@ impl SnapshotManager {
         }
 
         // Delete oldest snapshots
-        let ids_to_delete: Vec<String> = snapshots.iter()
+        let ids_to_delete: Vec<String> = snapshots
+            .iter()
             .take(to_delete)
             .map(|(id, _, _)| id.clone())
             .collect();
 
         let mut deleted = 0;
         for id in &ids_to_delete {
-            let count = conn.execute(
-                "DELETE FROM snapshots WHERE id = ?1",
-                rusqlite::params![id],
-            )?;
+            let count =
+                conn.execute("DELETE FROM snapshots WHERE id = ?1", rusqlite::params![id])?;
             deleted += count;
         }
 
@@ -381,7 +384,9 @@ impl SnapshotManager {
     pub fn run_git_gc(repo: &Repository) -> Result<(), ErgataiError> {
         use std::process::Command;
 
-        let repo_path = repo.path().parent()
+        let repo_path = repo
+            .path()
+            .parent()
             .ok_or_else(|| ErgataiError::internal("Failed to get repo path"))?;
 
         // Run git gc --auto
@@ -390,15 +395,11 @@ impl SnapshotManager {
             .arg("--auto")
             .current_dir(repo_path)
             .output()
-            .map_err(|e| {
-                ErgataiError::internal(format!("Failed to run git gc: {}", e))
-            })?;
+            .map_err(|e| ErgataiError::internal(format!("Failed to run git gc: {}", e)))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(ErgataiError::internal(format!(
-                "git gc failed: {}", stderr
-            )));
+            return Err(ErgataiError::internal(format!("git gc failed: {}", stderr)));
         }
 
         info!("Git garbage collection completed");
@@ -437,9 +438,7 @@ mod tests {
         fs::write(&test_file, "test content").unwrap();
 
         let manager = SnapshotManager::new(temp_dir.path()).unwrap();
-        let git_hash = manager
-            .create_snapshot("test.txt", "test-agent")
-            .unwrap();
+        let git_hash = manager.create_snapshot("test.txt", "test-agent").unwrap();
 
         // Git hash should be non-empty
         assert!(!git_hash.is_empty());
@@ -455,9 +454,7 @@ mod tests {
         fs::write(&test_file, "test content").unwrap();
 
         let manager = SnapshotManager::new(temp_dir.path()).unwrap();
-        let git_hash = manager
-            .create_snapshot("test.txt", "test-agent")
-            .unwrap();
+        let git_hash = manager.create_snapshot("test.txt", "test-agent").unwrap();
 
         // Read snapshot
         let content = manager.read_snapshot(&git_hash).unwrap();
@@ -488,17 +485,13 @@ mod tests {
         let manager = SnapshotManager::new(temp_dir.path()).unwrap();
 
         // Create snapshot of version 1
-        let hash1 = manager
-            .create_snapshot("test.txt", "test-agent")
-            .unwrap();
+        let hash1 = manager.create_snapshot("test.txt", "test-agent").unwrap();
 
         // Modify file
         fs::write(&test_file, "version 2").unwrap();
 
         // Create snapshot of version 2
-        let hash2 = manager
-            .create_snapshot("test.txt", "test-agent")
-            .unwrap();
+        let hash2 = manager.create_snapshot("test.txt", "test-agent").unwrap();
 
         // Hashes should be different
         assert_ne!(hash1, hash2);

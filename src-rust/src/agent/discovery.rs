@@ -53,7 +53,7 @@ pub struct AcpRuntimeCatalogEntry {
     pub binary_path: Option<String>,
     pub install_hint: String,
     pub install_instructions_url: String,
-    pub has_install_command: bool,  // Whether this runtime has a predefined install command
+    pub has_install_command: bool, // Whether this runtime has a predefined install command
     pub auth_status: AuthStatus,
     pub login_hint: Option<String>,
     pub source: String, // "builtin" | "custom"
@@ -163,7 +163,10 @@ fn resolve_command_uncached(command: &str) -> Option<PathBuf> {
     #[cfg(unix)]
     {
         // Validate command name to prevent shell injection
-        if !command.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.') {
+        if !command
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.')
+        {
             return None;
         }
 
@@ -379,7 +382,7 @@ pub fn discover_acp_runtimes() -> Vec<AcpRuntimeCatalogEntry> {
                 binary_path: binary_path.map(|p| p.display().to_string()),
                 install_hint: harness.install_hint,
                 install_instructions_url: harness.install_instructions_url,
-                has_install_command: false,  // Custom harnesses don't have predefined install commands
+                has_install_command: false, // Custom harnesses don't have predefined install commands
                 auth_status: AuthStatus::NotApplicable, // Custom harnesses don't have auth probes
                 login_hint: None,
                 source: "custom".to_string(),

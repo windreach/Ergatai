@@ -6,9 +6,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures_util::StreamExt;
 use async_nats::jetstream::consumer::{pull, AckPolicy, DeliverPolicy, PullConsumer};
-use tracing::{info, debug, warn, error};
+use futures_util::StreamExt;
+use tracing::{debug, error, info, warn};
 
 use crate::error::{ErgataiError, ErgataiResult};
 use crate::file_access::lock_manager::FileLockManager;
@@ -62,8 +62,17 @@ impl FileEventsConsumer {
 
             // Create consumer and messages stream ONCE (not per iteration)
             let messages_result = async {
-                let stream = self.connection.jetstream().get_stream(&self.stream_name).await
-                    .map_err(|e| ErgataiError::NatsError(format!("Stream {} not found: {}", self.stream_name, e)))?;
+                let stream = self
+                    .connection
+                    .jetstream()
+                    .get_stream(&self.stream_name)
+                    .await
+                    .map_err(|e| {
+                        ErgataiError::NatsError(format!(
+                            "Stream {} not found: {}",
+                            self.stream_name, e
+                        ))
+                    })?;
 
                 let consumer_config = pull::Config {
                     durable_name: Some(self.consumer_name.clone()),
@@ -74,14 +83,20 @@ impl FileEventsConsumer {
                     ..Default::default()
                 };
 
-                let consumer = stream.get_or_create_consumer(&self.consumer_name, consumer_config).await
-                    .map_err(|e| ErgataiError::NatsError(format!("Failed to create consumer: {}", e)))?;
+                let consumer = stream
+                    .get_or_create_consumer(&self.consumer_name, consumer_config)
+                    .await
+                    .map_err(|e| {
+                        ErgataiError::NatsError(format!("Failed to create consumer: {}", e))
+                    })?;
 
-                let messages = consumer.messages().await
-                    .map_err(|e| ErgataiError::NatsError(format!("Failed to get messages: {}", e)))?;
+                let messages = consumer.messages().await.map_err(|e| {
+                    ErgataiError::NatsError(format!("Failed to get messages: {}", e))
+                })?;
 
                 Ok::<_, ErgataiError>(messages)
-            }.await;
+            }
+            .await;
 
             let mut messages = match messages_result {
                 Ok(m) => m,
@@ -93,10 +108,7 @@ impl FileEventsConsumer {
 
             loop {
                 // Use timeout to allow periodic error recovery
-                let message = tokio::time::timeout(
-                    Duration::from_secs(5),
-                    messages.next()
-                ).await;
+                let message = tokio::time::timeout(Duration::from_secs(5), messages.next()).await;
 
                 match message {
                     Ok(Some(Ok(msg))) => {
@@ -126,7 +138,11 @@ impl FileEventsConsumer {
                                     agent_id = payload.agent_id,
                                     "File ready event received"
                                 );
-                                if let Err(e) = self.lock_manager.notify_file_ready(&payload.file_path).await {
+                                if let Err(e) = self
+                                    .lock_manager
+                                    .notify_file_ready(&payload.file_path)
+                                    .await
+                                {
                                     error!(
                                         file_path = payload.file_path,
                                         error = %e,
@@ -141,7 +157,11 @@ impl FileEventsConsumer {
                                     reason = payload.reason,
                                     "File error event received"
                                 );
-                                if let Err(e) = self.lock_manager.notify_file_error(&payload.file_path, &payload.reason).await {
+                                if let Err(e) = self
+                                    .lock_manager
+                                    .notify_file_error(&payload.file_path, &payload.reason)
+                                    .await
+                                {
                                     error!(
                                         file_path = payload.file_path,
                                         error = %e,
@@ -181,8 +201,14 @@ impl FileEventsConsumer {
     /// need to call `ack()` separately. Malformed payloads are ACKed before returning
     /// Err because they cannot succeed on retry.
     pub async fn consume_next(&self) -> ErgataiResult<Option<FileEvent>> {
-        let stream = self.connection.jetstream().get_stream(&self.stream_name).await
-            .map_err(|e| ErgataiError::NatsError(format!("Stream {} not found: {}", self.stream_name, e)))?;
+        let stream = self
+            .connection
+            .jetstream()
+            .get_stream(&self.stream_name)
+            .await
+            .map_err(|e| {
+                ErgataiError::NatsError(format!("Stream {} not found: {}", self.stream_name, e))
+            })?;
 
         // Create or get consumer
         let consumer_config = pull::Config {
@@ -194,18 +220,19 @@ impl FileEventsConsumer {
             ..Default::default()
         };
 
-        let consumer: PullConsumer = stream.get_or_create_consumer(&self.consumer_name, consumer_config).await
+        let consumer: PullConsumer = stream
+            .get_or_create_consumer(&self.consumer_name, consumer_config)
+            .await
             .map_err(|e| ErgataiError::NatsError(format!("Failed to create consumer: {}", e)))?;
 
         // Fetch one message
-        let mut messages = consumer.messages().await
+        let mut messages = consumer
+            .messages()
+            .await
             .map_err(|e| ErgataiError::NatsError(format!("Failed to get messages: {}", e)))?;
 
         // Try to get a message with timeout
-        let message = tokio::time::timeout(
-            Duration::from_millis(100),
-            messages.next()
-        ).await;
+        let message = tokio::time::timeout(Duration::from_millis(100), messages.next()).await;
 
         match message {
             Ok(Some(Ok(msg))) => {
@@ -240,7 +267,10 @@ impl FileEventsConsumer {
             }
             Ok(Some(Err(e))) => {
                 warn!(error = %e, "Error receiving message");
-                Err(ErgataiError::NatsError(format!("Message receive error: {}", e)))
+                Err(ErgataiError::NatsError(format!(
+                    "Message receive error: {}",
+                    e
+                )))
             }
             Ok(None) | Err(_) => {
                 // No messages available or timeout
@@ -401,7 +431,9 @@ mod tests {
         assert!(parse_file_event("ergatai.file.errorfoo", &payload)
             .unwrap()
             .is_none());
-        assert!(parse_file_event("ergatai.file", &payload).unwrap().is_none());
+        assert!(parse_file_event("ergatai.file", &payload)
+            .unwrap()
+            .is_none());
         assert!(parse_file_event("ergatai.", &payload).unwrap().is_none());
         assert!(parse_file_event("", &payload).unwrap().is_none());
     }

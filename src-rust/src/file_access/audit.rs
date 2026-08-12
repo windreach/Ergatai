@@ -134,9 +134,10 @@ impl AuditManager {
         end_time: Option<&str>,
         limit: usize,
     ) -> Result<Vec<AuditEntry>, ErgataiError> {
-        let conn = self.conn.lock().map_err(|e| {
-            ErgataiError::internal(format!("Failed to acquire lock: {}", e))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
 
         let mut query = String::from(
             "SELECT timestamp, agent_id, session_id, action, file_path, mode, reason
@@ -172,11 +173,12 @@ impl AuditManager {
         query.push_str(" ORDER BY timestamp DESC LIMIT ?");
         params_vec.push(Box::new(limit as i64));
 
-        let mut stmt = conn.prepare(&query).map_err(|e| {
-            ErgataiError::internal(format!("Failed to prepare query: {}", e))
-        })?;
+        let mut stmt = conn
+            .prepare(&query)
+            .map_err(|e| ErgataiError::internal(format!("Failed to prepare query: {}", e)))?;
 
-        let params_refs: Vec<&dyn rusqlite::types::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+        let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params_vec.iter().map(|p| p.as_ref()).collect();
         let entries = stmt
             .query_map(params_refs.as_slice(), |row| {
                 Ok(AuditEntry {
@@ -198,22 +200,24 @@ impl AuditManager {
 
     /// Get file access statistics (public API — acquires lock)
     pub fn get_stats(&self, period_days: Option<u32>) -> Result<FileAccessStats, ErgataiError> {
-        let conn = self.conn.lock().map_err(|e| {
-            ErgataiError::internal(format!("Failed to acquire lock: {}", e))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
         self.get_stats_inner(&conn, period_days)
     }
 
     /// Internal stats computation (accepts Connection reference — no lock acquisition)
-    fn get_stats_inner(&self, conn: &Connection, period_days: Option<u32>) -> Result<FileAccessStats, ErgataiError> {
+    fn get_stats_inner(
+        &self,
+        conn: &Connection,
+        period_days: Option<u32>,
+    ) -> Result<FileAccessStats, ErgataiError> {
         let mut stats = FileAccessStats::default();
 
         // Calculate cutoff time
-        let cutoff = if let Some(days) = period_days {
-            Some((Utc::now() - Duration::days(days as i64)).to_rfc3339())
-        } else {
-            None
-        };
+        let cutoff =
+            period_days.map(|days| (Utc::now() - Duration::days(days as i64)).to_rfc3339());
 
         // Use a single aggregated query instead of N+1 queries (🔴-13 fix)
         let query = if cutoff.is_some() {
@@ -227,12 +231,16 @@ impl AuditManager {
              GROUP BY action, agent_id, mode"
         };
 
-        let mut stmt = conn.prepare(query).map_err(|e| {
-            ErgataiError::internal(format!("Failed to prepare stats query: {}", e))
-        })?;
+        let mut stmt = conn
+            .prepare(query)
+            .map_err(|e| ErgataiError::internal(format!("Failed to prepare stats query: {}", e)))?;
 
         // Process rows — handle cutoff as optional param
-        let row_iter: Box<dyn Iterator<Item = Result<(String, Option<String>, Option<String>, u64), rusqlite::Error>>> = if let Some(ref cutoff) = cutoff {
+        let row_iter: Box<
+            dyn Iterator<
+                Item = Result<(String, Option<String>, Option<String>, u64), rusqlite::Error>,
+            >,
+        > = if let Some(ref cutoff) = cutoff {
             Box::new(stmt.query_map(params![cutoff], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -253,15 +261,17 @@ impl AuditManager {
         };
 
         for row in row_iter {
-            let (action, agent_id, mode, cnt) = row.map_err(|e| {
-                ErgataiError::internal(format!("Failed to read stats row: {}", e))
-            })?;
+            let (action, agent_id, mode, cnt) = row
+                .map_err(|e| ErgataiError::internal(format!("Failed to read stats row: {}", e)))?;
 
             match action.as_str() {
                 "LOCK_ACQUIRED" => {
                     stats.total_acquisitions += cnt;
                     if let Some(ref agent) = agent_id {
-                        *stats.acquisitions_by_agent.entry(agent.clone()).or_insert(0) += cnt;
+                        *stats
+                            .acquisitions_by_agent
+                            .entry(agent.clone())
+                            .or_insert(0) += cnt;
                     }
                     if let Some(ref m) = mode {
                         *stats.accesses_by_mode.entry(m.clone()).or_insert(0) += cnt;
@@ -277,12 +287,16 @@ impl AuditManager {
     }
 
     /// Generate a security report
-    pub fn generate_security_report(&self, period_days: u32) -> Result<SecurityReport, ErgataiError> {
+    pub fn generate_security_report(
+        &self,
+        period_days: u32,
+    ) -> Result<SecurityReport, ErgataiError> {
         info!(period_days = period_days, "Generating security report");
 
-        let conn = self.conn.lock().map_err(|e| {
-            ErgataiError::internal(format!("Failed to acquire lock: {}", e))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
 
         let now = Utc::now();
         let period_start = now - Duration::days(period_days as i64);
@@ -291,7 +305,8 @@ impl AuditManager {
         let stats = self.get_stats_inner(&conn, Some(period_days))?;
 
         // Detect suspicious activities
-        let suspicious_activities = self.detect_suspicious_activities_inner(&conn, &period_start)?;
+        let suspicious_activities =
+            self.detect_suspicious_activities_inner(&conn, &period_start)?;
 
         // Get top agents
         let top_agents = self.get_top_agents_inner(&conn, &period_start)?;
@@ -328,13 +343,15 @@ impl AuditManager {
         let period_str = period_start.to_rfc3339();
 
         // 1. Agents with high conflict rates (use params![] — 🔴-8 fix)
-        let mut stmt = conn.prepare(
-            "SELECT agent_id, COUNT(*) as conflict_count
+        let mut stmt = conn
+            .prepare(
+                "SELECT agent_id, COUNT(*) as conflict_count
              FROM audit_log
              WHERE action LIKE '%CONFLICT%' AND timestamp >= ?1
              GROUP BY agent_id
              HAVING conflict_count > 10",
-        ).map_err(|e| ErgataiError::internal(format!("Failed to prepare query: {}", e)))?;
+            )
+            .map_err(|e| ErgataiError::internal(format!("Failed to prepare query: {}", e)))?;
 
         let rows = stmt
             .query_map(params![period_str], |row| {
@@ -343,9 +360,8 @@ impl AuditManager {
             .map_err(|e| ErgataiError::internal(format!("Failed to query: {}", e)))?;
 
         for row in rows {
-            let (agent_id, conflict_count) = row.map_err(|e| {
-                ErgataiError::internal(format!("Failed to read row: {}", e))
-            })?;
+            let (agent_id, conflict_count) =
+                row.map_err(|e| ErgataiError::internal(format!("Failed to read row: {}", e)))?;
             activities.push(SuspiciousActivity {
                 timestamp: period_str.clone(),
                 agent_id: agent_id.clone(),
@@ -364,14 +380,16 @@ impl AuditManager {
         // 2. Agents accessing sensitive paths
         // 🔴-7 fix: Added parentheses around OR clauses for correct AND/OR precedence
         // 🔴-8 fix: Use params![] instead of format!()
-        let mut stmt = conn.prepare(
-            "SELECT agent_id, COUNT(*) as sensitive_count
+        let mut stmt = conn
+            .prepare(
+                "SELECT agent_id, COUNT(*) as sensitive_count
              FROM audit_log
              WHERE (file_path LIKE '%.env%' OR file_path LIKE '%.git/%'
                OR file_path LIKE '%credentials%' OR file_path LIKE '%.key')
                AND timestamp >= ?1
              GROUP BY agent_id",
-        ).map_err(|e| ErgataiError::internal(format!("Failed to prepare query: {}", e)))?;
+            )
+            .map_err(|e| ErgataiError::internal(format!("Failed to prepare query: {}", e)))?;
 
         let rows = stmt
             .query_map(params![period_str], |row| {
@@ -380,16 +398,12 @@ impl AuditManager {
             .map_err(|e| ErgataiError::internal(format!("Failed to query: {}", e)))?;
 
         for row in rows {
-            let (agent_id, sensitive_count) = row.map_err(|e| {
-                ErgataiError::internal(format!("Failed to read row: {}", e))
-            })?;
+            let (agent_id, sensitive_count) =
+                row.map_err(|e| ErgataiError::internal(format!("Failed to read row: {}", e)))?;
             activities.push(SuspiciousActivity {
                 timestamp: period_str.clone(),
                 agent_id: agent_id.clone(),
-                description: format!(
-                    "Accessed sensitive paths {} times",
-                    sensitive_count
-                ),
+                description: format!("Accessed sensitive paths {} times", sensitive_count),
                 severity: if sensitive_count > 20 {
                     "HIGH".to_string()
                 } else {
@@ -408,8 +422,9 @@ impl AuditManager {
         period_start: &DateTime<Utc>,
     ) -> Result<Vec<AgentAccessSummary>, ErgataiError> {
         let period_str = period_start.to_rfc3339();
-        let mut stmt = conn.prepare(
-            "SELECT
+        let mut stmt = conn
+            .prepare(
+                "SELECT
                 agent_id,
                 COUNT(*) as total_accesses,
                 COUNT(DISTINCT file_path) as unique_files,
@@ -420,9 +435,8 @@ impl AuditManager {
              GROUP BY agent_id
              ORDER BY total_accesses DESC
              LIMIT 10",
-        ).map_err(|e| {
-            ErgataiError::internal(format!("Failed to prepare query: {}", e))
-        })?;
+            )
+            .map_err(|e| ErgataiError::internal(format!("Failed to prepare query: {}", e)))?;
 
         let summaries = stmt
             .query_map(params![period_str], |row| {
@@ -448,8 +462,9 @@ impl AuditManager {
         period_start: &DateTime<Utc>,
     ) -> Result<Vec<FileAccessSummary>, ErgataiError> {
         let period_str = period_start.to_rfc3339();
-        let mut stmt = conn.prepare(
-            "SELECT
+        let mut stmt = conn
+            .prepare(
+                "SELECT
                 file_path,
                 COUNT(*) as total_accesses,
                 COUNT(DISTINCT agent_id) as unique_agents,
@@ -460,9 +475,8 @@ impl AuditManager {
              GROUP BY file_path
              ORDER BY total_accesses DESC
              LIMIT 10",
-        ).map_err(|e| {
-            ErgataiError::internal(format!("Failed to prepare query: {}", e))
-        })?;
+            )
+            .map_err(|e| ErgataiError::internal(format!("Failed to prepare query: {}", e)))?;
 
         let summaries = stmt
             .query_map(params![period_str], |row| {
@@ -489,14 +503,18 @@ impl AuditManager {
     /// # Returns
     /// Number of entries deleted
     pub fn cleanup_old_audit_logs(&self, days_to_keep: u32) -> Result<usize, ErgataiError> {
-        let conn = self.conn.lock().map_err(|e| {
-            ErgataiError::internal(format!("Failed to acquire lock: {}", e))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
 
         let cutoff = (Utc::now() - Duration::days(days_to_keep as i64)).to_rfc3339();
 
         let deleted = conn
-            .execute("DELETE FROM audit_log WHERE timestamp < ?1", params![cutoff])
+            .execute(
+                "DELETE FROM audit_log WHERE timestamp < ?1",
+                params![cutoff],
+            )
             .map_err(|e| {
                 ErgataiError::internal(format!("Failed to cleanup old audit logs: {}", e))
             })?;
@@ -526,18 +544,23 @@ impl AuditManager {
         months_to_keep: u32,
         export_path: &str,
     ) -> Result<usize, ErgataiError> {
-        let conn = self.conn.lock().map_err(|e| {
-            ErgataiError::internal(format!("Failed to acquire lock: {}", e))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
 
         let cutoff = (Utc::now() - Duration::days(months_to_keep as i64 * 30)).to_rfc3339();
 
         // Query logs to archive
         // L5 fix: added map_err for consistent error handling
-        let mut stmt = conn.prepare(
-            "SELECT timestamp, agent_id, session_id, action, file_path, mode, reason
-             FROM audit_log WHERE timestamp < ?1 ORDER BY timestamp ASC"
-        ).map_err(|e| ErgataiError::internal(format!("Failed to prepare archive query: {}", e)))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT timestamp, agent_id, session_id, action, file_path, mode, reason
+             FROM audit_log WHERE timestamp < ?1 ORDER BY timestamp ASC",
+            )
+            .map_err(|e| {
+                ErgataiError::internal(format!("Failed to prepare archive query: {}", e))
+            })?;
 
         let entries: Vec<AuditEntry> = stmt
             .query_map(params![cutoff], |row| {
@@ -561,17 +584,19 @@ impl AuditManager {
         }
 
         // Export to file
-        let json = serde_json::to_string_pretty(&entries)
-            .map_err(|e| ErgataiError::internal(format!("Failed to serialize audit logs: {}", e)))?;
+        let json = serde_json::to_string_pretty(&entries).map_err(|e| {
+            ErgataiError::internal(format!("Failed to serialize audit logs: {}", e))
+        })?;
 
         std::fs::write(export_path, json)
             .map_err(|e| ErgataiError::internal(format!("Failed to write archive file: {}", e)))?;
 
         // Delete archived logs
-        conn.execute("DELETE FROM audit_log WHERE timestamp < ?1", params![cutoff])
-            .map_err(|e| {
-                ErgataiError::internal(format!("Failed to delete archived logs: {}", e))
-            })?;
+        conn.execute(
+            "DELETE FROM audit_log WHERE timestamp < ?1",
+            params![cutoff],
+        )
+        .map_err(|e| ErgataiError::internal(format!("Failed to delete archived logs: {}", e)))?;
 
         info!(
             archived = count,
@@ -593,16 +618,13 @@ impl AuditManager {
     /// # Returns
     /// Number of entries deleted
     pub fn enforce_row_limit(&self, max_rows: u64) -> Result<usize, ErgataiError> {
-        let conn = self.conn.lock().map_err(|e| {
-            ErgataiError::internal(format!("Failed to acquire lock: {}", e))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
 
         // Count current rows
-        let count: u64 = conn.query_row(
-            "SELECT COUNT(*) FROM audit_log",
-            [],
-            |row| row.get(0),
-        )?;
+        let count: u64 = conn.query_row("SELECT COUNT(*) FROM audit_log", [], |row| row.get(0))?;
 
         if count <= max_rows {
             return Ok(0);
@@ -678,7 +700,9 @@ mod tests {
         }
 
         // Query
-        let entries = manager.query_audit_log(Some("agent1"), None, None, None, None, 10).unwrap();
+        let entries = manager
+            .query_audit_log(Some("agent1"), None, None, None, None, 10)
+            .unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].agent_id, "agent1");
         assert_eq!(entries[0].action, "LOCK_ACQUIRED");
@@ -743,15 +767,21 @@ mod tests {
         }
 
         // Query by action
-        let entries = manager.query_audit_log(None, Some("LOCK_ACQUIRED"), None, None, None, 10).unwrap();
+        let entries = manager
+            .query_audit_log(None, Some("LOCK_ACQUIRED"), None, None, None, 10)
+            .unwrap();
         assert_eq!(entries.len(), 2);
 
         // Query by file_path
-        let entries = manager.query_audit_log(None, None, Some("test.rs"), None, None, 10).unwrap();
+        let entries = manager
+            .query_audit_log(None, None, Some("test.rs"), None, None, 10)
+            .unwrap();
         assert_eq!(entries.len(), 2);
 
         // Query by agent_id
-        let entries = manager.query_audit_log(Some("agent2"), None, None, None, None, 10).unwrap();
+        let entries = manager
+            .query_audit_log(Some("agent2"), None, None, None, None, 10)
+            .unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].agent_id, "agent2");
     }
@@ -817,12 +847,16 @@ mod tests {
         assert!(report.suspicious_activities.len() >= 2);
 
         // Check for high conflict rate detection
-        let has_conflict_activity = report.suspicious_activities.iter()
+        let has_conflict_activity = report
+            .suspicious_activities
+            .iter()
             .any(|a| a.description.contains("High conflict rate"));
         assert!(has_conflict_activity);
 
         // Check for sensitive path access detection
-        let has_sensitive_activity = report.suspicious_activities.iter()
+        let has_sensitive_activity = report
+            .suspicious_activities
+            .iter()
             .any(|a| a.description.contains("sensitive paths"));
         assert!(has_sensitive_activity);
     }
@@ -931,11 +965,9 @@ mod tests {
 
         // Query with start_time — at least both entries should be retrievable
         // (we don't strictly assert count because current date shifts).
-        let entries = manager.query_audit_log(
-            None, None, None,
-            Some("2020-01-01T00:00:00Z"),
-            None, 100,
-        ).unwrap();
+        let entries = manager
+            .query_audit_log(None, None, None, Some("2020-01-01T00:00:00Z"), None, 100)
+            .unwrap();
         assert_eq!(entries.len(), 2);
     }
 
@@ -954,7 +986,9 @@ mod tests {
             }
         }
 
-        let entries = manager.query_audit_log(None, None, None, None, None, 5).unwrap();
+        let entries = manager
+            .query_audit_log(None, None, None, None, None, 5)
+            .unwrap();
         assert_eq!(entries.len(), 5);
     }
 
@@ -962,7 +996,9 @@ mod tests {
     fn test_query_audit_log_empty_result() {
         let (_temp_dir, manager) = setup_test_db();
         // No entries inserted
-        let entries = manager.query_audit_log(None, None, None, None, None, 100).unwrap();
+        let entries = manager
+            .query_audit_log(None, None, None, None, None, 100)
+            .unwrap();
         assert!(entries.is_empty());
     }
 
@@ -1059,25 +1095,32 @@ mod tests {
                 "INSERT INTO audit_log (timestamp, agent_id, session_id, action, file_path, mode)
                  VALUES (datetime('now'), 'agent-x', 's1', 'LOCK_ACQUIRED', 'target.rs', 'WRITE')",
                 [],
-            ).unwrap();
+            )
+            .unwrap();
             conn.execute(
                 "INSERT INTO audit_log (timestamp, agent_id, session_id, action, file_path, mode)
                  VALUES (datetime('now'), 'agent-x', 's1', 'LOCK_ACQUIRED', 'other.rs', 'WRITE')",
                 [],
-            ).unwrap();
+            )
+            .unwrap();
             conn.execute(
                 "INSERT INTO audit_log (timestamp, agent_id, session_id, action, file_path, mode)
                  VALUES (datetime('now'), 'agent-y', 's2', 'LOCK_ACQUIRED', 'target.rs', 'READ')",
                 [],
-            ).unwrap();
+            )
+            .unwrap();
         }
 
-        let entries = manager.query_audit_log(
-            Some("agent-x"),
-            Some("LOCK_ACQUIRED"),
-            Some("target.rs"),
-            None, None, 100,
-        ).unwrap();
+        let entries = manager
+            .query_audit_log(
+                Some("agent-x"),
+                Some("LOCK_ACQUIRED"),
+                Some("target.rs"),
+                None,
+                None,
+                100,
+            )
+            .unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].agent_id, "agent-x");
         assert_eq!(entries[0].file_path, Some("target.rs".to_string()));

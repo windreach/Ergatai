@@ -9,7 +9,7 @@ use futures_util::StreamExt;
 use async_nats::jetstream::consumer::{pull, AckPolicy, DeliverPolicy, PullConsumer};
 use async_nats::jetstream::stream::{Config, RetentionPolicy, StorageType};
 use serde::{Deserialize, Serialize};
-use tracing::{info, debug, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::error::{ErgataiError, ErgataiResult};
@@ -135,8 +135,14 @@ impl<T: Serialize + for<'de> Deserialize<'de> + Send + Sync + 'static> NatsTaskQ
     /// Returns None if no tasks are available.
     /// The task must be acknowledged with `ack()` or it will be redelivered.
     pub async fn consume(&self) -> ErgataiResult<Option<(TaskMessage<T>, ConsumerAck)>> {
-        let stream = self.connection.jetstream().get_stream(&self.stream_name).await
-            .map_err(|e| ErgataiError::NatsError(format!("Stream {} not found: {}", self.stream_name, e)))?;
+        let stream = self
+            .connection
+            .jetstream()
+            .get_stream(&self.stream_name)
+            .await
+            .map_err(|e| {
+                ErgataiError::NatsError(format!("Stream {} not found: {}", self.stream_name, e))
+            })?;
 
         // Create or get consumer
         let consumer_config = pull::Config {
@@ -149,18 +155,19 @@ impl<T: Serialize + for<'de> Deserialize<'de> + Send + Sync + 'static> NatsTaskQ
             ..Default::default()
         };
 
-        let consumer: PullConsumer = stream.get_or_create_consumer(&self.consumer_name, consumer_config).await
+        let consumer: PullConsumer = stream
+            .get_or_create_consumer(&self.consumer_name, consumer_config)
+            .await
             .map_err(|e| ErgataiError::NatsError(format!("Failed to create consumer: {}", e)))?;
 
         // Fetch one message
-        let mut messages = consumer.messages().await
+        let mut messages = consumer
+            .messages()
+            .await
             .map_err(|e| ErgataiError::NatsError(format!("Failed to get messages: {}", e)))?;
 
         // Try to get a message with timeout
-        let message = tokio::time::timeout(
-            Duration::from_millis(100),
-            messages.next()
-        ).await;
+        let message = tokio::time::timeout(Duration::from_millis(100), messages.next()).await;
 
         match message {
             Ok(Some(Ok(msg))) => {
@@ -173,7 +180,10 @@ impl<T: Serialize + for<'de> Deserialize<'de> + Send + Sync + 'static> NatsTaskQ
             }
             Ok(Some(Err(e))) => {
                 warn!(error = %e, "Error receiving message");
-                Err(ErgataiError::NatsError(format!("Message receive error: {}", e)))
+                Err(ErgataiError::NatsError(format!(
+                    "Message receive error: {}",
+                    e
+                )))
             }
             Ok(None) | Err(_) => {
                 // No messages available or timeout
@@ -184,10 +194,18 @@ impl<T: Serialize + for<'de> Deserialize<'de> + Send + Sync + 'static> NatsTaskQ
 
     /// Get the number of pending messages in the queue
     pub async fn pending_count(&self) -> ErgataiResult<u64> {
-        let mut stream = self.connection.jetstream().get_stream(&self.stream_name).await
-            .map_err(|e| ErgataiError::NatsError(format!("Stream {} not found: {}", self.stream_name, e)))?;
+        let mut stream = self
+            .connection
+            .jetstream()
+            .get_stream(&self.stream_name)
+            .await
+            .map_err(|e| {
+                ErgataiError::NatsError(format!("Stream {} not found: {}", self.stream_name, e))
+            })?;
 
-        let info = stream.info().await
+        let info = stream
+            .info()
+            .await
             .map_err(|e| ErgataiError::NatsError(format!("Failed to get stream info: {}", e)))?;
 
         Ok(info.state.messages)
@@ -204,7 +222,9 @@ impl ConsumerAck {
     ///
     /// The message will be removed from the queue.
     pub async fn ack(self) -> ErgataiResult<()> {
-        self.message.ack().await
+        self.message
+            .ack()
+            .await
             .map_err(|e| ErgataiError::NatsError(format!("Failed to ack message: {}", e)))?;
 
         debug!(message_id = "unknown", "Task acknowledged");
@@ -215,7 +235,10 @@ impl ConsumerAck {
     pub async fn nack(self) -> ErgataiResult<()> {
         // For negative ack, we just don't acknowledge the message.
         // It will timeout after ack_wait and be redelivered.
-        debug!(message_id = "unknown", "Task nacked (will redeliver after timeout)");
+        debug!(
+            message_id = "unknown",
+            "Task nacked (will redeliver after timeout)"
+        );
         Ok(())
     }
 }
@@ -231,7 +254,12 @@ mod tests {
 
     #[test]
     fn test_task_message_creation() {
-        let msg = TaskMessage::new("corr123".to_string(), TestPayload { data: "test".to_string() });
+        let msg = TaskMessage::new(
+            "corr123".to_string(),
+            TestPayload {
+                data: "test".to_string(),
+            },
+        );
         assert_eq!(msg.correlation_id, "corr123");
         assert_eq!(msg.retry_count, 0);
         assert_eq!(msg.max_retries, 3);
@@ -241,7 +269,12 @@ mod tests {
 
     #[test]
     fn test_can_retry() {
-        let mut msg = TaskMessage::new("corr".to_string(), TestPayload { data: "test".to_string() });
+        let mut msg = TaskMessage::new(
+            "corr".to_string(),
+            TestPayload {
+                data: "test".to_string(),
+            },
+        );
         assert!(msg.can_retry());
 
         msg.retry_count = 2;
@@ -253,7 +286,12 @@ mod tests {
 
     #[test]
     fn test_message_serialization_roundtrip() {
-        let msg = TaskMessage::new("corr-123".to_string(), TestPayload { data: "hello".to_string() });
+        let msg = TaskMessage::new(
+            "corr-123".to_string(),
+            TestPayload {
+                data: "hello".to_string(),
+            },
+        );
         let json = serde_json::to_vec(&msg).unwrap();
         let deserialized: TaskMessage<TestPayload> = serde_json::from_slice(&json).unwrap();
 
@@ -276,7 +314,9 @@ mod tests {
             }
         };
 
-        let conn = crate::nats::NatsConnection::connect_to_server(&server).await.unwrap();
+        let conn = crate::nats::NatsConnection::connect_to_server(&server)
+            .await
+            .unwrap();
 
         // Create queue
         let queue: NatsTaskQueue<TestPayload> = NatsTaskQueue::new(
@@ -284,12 +324,20 @@ mod tests {
             format!("test_queue_{}", std::process::id()),
             "test_worker".to_string(),
             format!("ergatai.test.tasks.{}", std::process::id()),
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         // Submit 3 tasks
-        let payload1 = TestPayload { data: "task1".to_string() };
-        let payload2 = TestPayload { data: "task2".to_string() };
-        let payload3 = TestPayload { data: "task3".to_string() };
+        let payload1 = TestPayload {
+            data: "task1".to_string(),
+        };
+        let payload2 = TestPayload {
+            data: "task2".to_string(),
+        };
+        let payload3 = TestPayload {
+            data: "task3".to_string(),
+        };
 
         let id1 = queue.submit("corr-1".to_string(), payload1).await.unwrap();
         let id2 = queue.submit("corr-2".to_string(), payload2).await.unwrap();
@@ -322,7 +370,10 @@ mod tests {
         // After acking 2, pending should be 1 (task3 still there)
         tokio::time::sleep(Duration::from_millis(200)).await;
         let pending_after = queue.pending_count().await.unwrap();
-        assert!(pending_after <= 2, "Should have at most 2 pending tasks after acks");
+        assert!(
+            pending_after <= 2,
+            "Should have at most 2 pending tasks after acks"
+        );
     }
 
     /// Test empty queue returns None
@@ -336,14 +387,18 @@ mod tests {
             }
         };
 
-        let conn = crate::nats::NatsConnection::connect_to_server(&server).await.unwrap();
+        let conn = crate::nats::NatsConnection::connect_to_server(&server)
+            .await
+            .unwrap();
 
         let queue: NatsTaskQueue<TestPayload> = NatsTaskQueue::new(
             conn.clone(),
             format!("test_empty_{}", std::process::id()),
             "test_worker".to_string(),
             format!("ergatai.test.empty.{}", std::process::id()),
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         // Consume from empty queue should return None
         let result = queue.consume().await.unwrap();

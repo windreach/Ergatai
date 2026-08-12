@@ -31,17 +31,14 @@ pub struct FileSystemWatcher {
 
 impl FileSystemWatcher {
     /// Create a new file system watcher
-    pub fn new(
-        lock_manager: Arc<FileLockManager>,
-        project_root: PathBuf,
-    ) -> ErgataiResult<Self> {
+    pub fn new(lock_manager: Arc<FileLockManager>, project_root: PathBuf) -> ErgataiResult<Self> {
         // Create channel for file system events
         let (event_tx, event_rx) = mpsc::channel(1000);
 
         // Create watcher with config
         let config = Config::default()
-            .with_poll_interval(Duration::from_secs(2))  // Poll every 2 seconds
-            .with_compare_contents(true);  // Compare file contents to detect changes
+            .with_poll_interval(Duration::from_secs(2)) // Poll every 2 seconds
+            .with_compare_contents(true); // Compare file contents to detect changes
 
         let mut watcher = RecommendedWatcher::new(
             move |res: Result<Event, notify::Error>| {
@@ -60,9 +57,7 @@ impl FileSystemWatcher {
         // Watch the project root recursively
         watcher
             .watch(&project_root, RecursiveMode::Recursive)
-            .map_err(|e| {
-                ErgataiError::internal(format!("Failed to watch project root: {}", e))
-            })?;
+            .map_err(|e| ErgataiError::internal(format!("Failed to watch project root: {}", e)))?;
 
         info!(
             "FileSystemWatcher started for project root: {:?}",
@@ -177,7 +172,8 @@ impl FileSystemWatcher {
                 );
 
                 // Log to audit log
-                Self::log_violation(lock_manager, &relative_path, "unauthorized_modification").await?;
+                Self::log_violation(lock_manager, &relative_path, "unauthorized_modification")
+                    .await?;
             } else {
                 debug!(
                     file_path = relative_path,
@@ -371,7 +367,14 @@ mod tests {
         // Verify audit_log has an entry for the violation
         let entries = manager
             .audit_manager()
-            .query_audit_log(None, Some("unauthorized_modification"), None, None, None, 10)
+            .query_audit_log(
+                None,
+                Some("unauthorized_modification"),
+                None,
+                None,
+                None,
+                10,
+            )
             .unwrap();
         assert_eq!(entries.len(), 1, "expected one violation audit entry");
         assert_eq!(entries[0].file_path.as_deref(), Some("main.rs"));
@@ -383,13 +386,8 @@ mod tests {
         let (_temp, manager, root) = setup();
 
         // Create a token and acquire a lock on main.rs
-        let token = make_token_and_register(
-            &manager,
-            "agent-1",
-            "session-1",
-            "**",
-            FileMode::Write,
-        );
+        let token =
+            make_token_and_register(&manager, "agent-1", "session-1", "**", FileMode::Write);
         manager.acquire_lock(&token, "main.rs").await.unwrap();
 
         let event = make_event(

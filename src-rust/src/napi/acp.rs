@@ -12,8 +12,7 @@ use crate::error::ErgataiError;
 pub async fn acp_create_session(agent_name: String, cwd: String) -> Result<String> {
     guard();
 
-    let config = crate::agent::config::get_agent_config(&agent_name)
-        .map_err(super::to_napi)?;
+    let config = crate::agent::config::get_agent_config(&agent_name).map_err(super::to_napi)?;
 
     let (tx, rx) = tokio::sync::oneshot::channel();
 
@@ -36,9 +35,7 @@ pub async fn acp_send_prompt(session_id: String, prompt: String) -> Result<()> {
     let cmd_tx = crate::acp::manager::manager()
         .get_cmd_tx(&session_id)
         .await
-        .ok_or_else(|| {
-            super::to_napi(ErgataiError::SessionNotFound(session_id))
-        })?;
+        .ok_or_else(|| super::to_napi(ErgataiError::SessionNotFound(session_id)))?;
 
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     cmd_tx
@@ -67,9 +64,7 @@ pub async fn acp_close_session(session_id: String) -> Result<bool> {
     let cmd_tx = crate::acp::manager::manager()
         .get_cmd_tx(&session_id)
         .await
-        .ok_or_else(|| {
-            super::to_napi(ErgataiError::SessionNotFound(session_id))
-        })?;
+        .ok_or_else(|| super::to_napi(ErgataiError::SessionNotFound(session_id)))?;
 
     cmd_tx
         .send(crate::acp::manager::SessionCommand::Close)
@@ -108,13 +103,15 @@ pub async fn acp_list_agent_sessions(
     cwd: Option<String>,
 ) -> Result<Vec<crate::acp::manager::NapiSessionInfo>> {
     guard();
-    let config = crate::agent::config::get_agent_config(&agent_name)
-        .map_err(super::to_napi)?;
+    let config = crate::agent::config::get_agent_config(&agent_name).map_err(super::to_napi)?;
 
     let sessions = crate::acp::session_ops::list_sessions_from_agent(&config, cwd)
         .await
         .map_err(|e| {
-            super::to_napi(ErgataiError::internal(format!("ListSessions failed: {}", e)))
+            super::to_napi(ErgataiError::internal(format!(
+                "ListSessions failed: {}",
+                e
+            )))
         })?;
 
     Ok(sessions
@@ -138,8 +135,7 @@ pub async fn acp_load_session(
     cwd: String,
 ) -> Result<String> {
     guard();
-    let config = crate::agent::config::get_agent_config(&agent_name)
-        .map_err(super::to_napi)?;
+    let config = crate::agent::config::get_agent_config(&agent_name).map_err(super::to_napi)?;
 
     let (tx, rx) = tokio::sync::oneshot::channel();
     crate::acp::session_ops::load_session_task(config, session_id.clone(), cwd, tx);
@@ -164,8 +160,7 @@ pub async fn acp_resume_session(
     cwd: String,
 ) -> Result<String> {
     guard();
-    let config = crate::agent::config::get_agent_config(&agent_name)
-        .map_err(super::to_napi)?;
+    let config = crate::agent::config::get_agent_config(&agent_name).map_err(super::to_napi)?;
 
     let (tx, rx) = tokio::sync::oneshot::channel();
     crate::acp::session_ops::resume_session_task(config, session_id.clone(), cwd, tx);
@@ -193,9 +188,7 @@ pub async fn acp_respond_permission(
     let cmd_tx = crate::acp::manager::manager()
         .get_cmd_tx(&session_id)
         .await
-        .ok_or_else(|| {
-            super::to_napi(ErgataiError::SessionNotFound(session_id))
-        })?;
+        .ok_or_else(|| super::to_napi(ErgataiError::SessionNotFound(session_id)))?;
 
     cmd_tx
         .send(crate::acp::manager::SessionCommand::PermissionResponse {
@@ -214,16 +207,11 @@ pub async fn acp_set_session_mode(session_id: String, mode_id: String) -> Result
     let cmd_tx = crate::acp::manager::manager()
         .get_cmd_tx(&session_id)
         .await
-        .ok_or_else(|| {
-            super::to_napi(ErgataiError::SessionNotFound(session_id))
-        })?;
+        .ok_or_else(|| super::to_napi(ErgataiError::SessionNotFound(session_id)))?;
 
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     cmd_tx
-        .send(crate::acp::manager::SessionCommand::SetMode {
-            mode_id,
-            reply_tx,
-        })
+        .send(crate::acp::manager::SessionCommand::SetMode { mode_id, reply_tx })
         .map_err(|_| super::to_napi(ErgataiError::ChannelError("Session task is dead".into())))?;
 
     match reply_rx.await {
@@ -249,9 +237,7 @@ pub async fn acp_set_config_option(
     let cmd_tx = crate::acp::manager::manager()
         .get_cmd_tx(&session_id)
         .await
-        .ok_or_else(|| {
-            super::to_napi(ErgataiError::SessionNotFound(session_id))
-        })?;
+        .ok_or_else(|| super::to_napi(ErgataiError::SessionNotFound(session_id)))?;
 
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     cmd_tx
@@ -278,8 +264,7 @@ pub async fn acp_set_config_option(
 #[napi]
 pub async fn acp_delete_session(agent_name: String, session_id: String) -> Result<()> {
     guard();
-    let config = crate::agent::config::get_agent_config(&agent_name)
-        .map_err(super::to_napi)?;
+    let config = crate::agent::config::get_agent_config(&agent_name).map_err(super::to_napi)?;
 
     // 尝试从 agent 删除
     let _ = crate::acp::session_ops::delete_session_from_agent(&config, &session_id).await;
@@ -295,7 +280,10 @@ pub async fn acp_delete_session(agent_name: String, session_id: String) -> Resul
 pub fn acp_get_persisted_sessions() -> Result<Vec<crate::acp::persistence::PersistedSession>> {
     guard();
     crate::acp::persistence::load_all_sessions().map_err(|e| {
-        super::to_napi(ErgataiError::internal(format!("Failed to load sessions: {}", e)))
+        super::to_napi(ErgataiError::internal(format!(
+            "Failed to load sessions: {}",
+            e
+        )))
     })
 }
 
@@ -318,7 +306,10 @@ pub fn acp_save_session_meta(
         updated_at: now,
     };
     crate::acp::persistence::save_session(&session).map_err(|e| {
-        super::to_napi(ErgataiError::internal(format!("Failed to save session: {}", e)))
+        super::to_napi(ErgataiError::internal(format!(
+            "Failed to save session: {}",
+            e
+        )))
     })
 }
 
@@ -327,6 +318,9 @@ pub fn acp_save_session_meta(
 pub fn acp_update_session_title(session_id: String, title: String) -> Result<()> {
     guard();
     crate::acp::persistence::update_session_title(&session_id, &title).map_err(|e| {
-        super::to_napi(ErgataiError::internal(format!("Failed to update title: {}", e)))
+        super::to_napi(ErgataiError::internal(format!(
+            "Failed to update title: {}",
+            e
+        )))
     })
 }

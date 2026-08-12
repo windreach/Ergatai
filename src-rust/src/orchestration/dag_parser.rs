@@ -66,14 +66,19 @@ pub fn parse_dag_markdown(content: &str) -> ErgataiResult<TaskGraph> {
     }
 
     if temp_nodes.is_empty() {
-        return Err(ErgataiError::InvalidArgument("No tasks found in markdown".to_string()));
+        return Err(ErgataiError::InvalidArgument(
+            "No tasks found in markdown".to_string(),
+        ));
     }
 
     // Check for duplicate task names before building UUID mapping
     let mut seen_names = std::collections::HashSet::new();
     for node in &temp_nodes {
         if !seen_names.insert(&node.id) {
-            return Err(ErgataiError::InvalidArgument(format!("Duplicate task name: '{}'", node.id)));
+            return Err(ErgataiError::InvalidArgument(format!(
+                "Duplicate task name: '{}'",
+                node.id
+            )));
         }
     }
 
@@ -89,14 +94,22 @@ pub fn parse_dag_markdown(content: &str) -> ErgataiResult<TaskGraph> {
         .into_iter()
         .map(|mut node| {
             // Replace task name ID with UUID
-            let uuid = name_to_uuid.get(&node.id).cloned().unwrap_or_else(|| node.id.clone());
+            let uuid = name_to_uuid
+                .get(&node.id)
+                .cloned()
+                .unwrap_or_else(|| node.id.clone());
             node.id = uuid;
 
             // Update depends_on references to use UUIDs
             node.depends_on = node
                 .depends_on
                 .iter()
-                .map(|name| name_to_uuid.get(name).cloned().unwrap_or_else(|| name.clone()))
+                .map(|name| {
+                    name_to_uuid
+                        .get(name)
+                        .cloned()
+                        .unwrap_or_else(|| name.clone())
+                })
                 .collect();
 
             node
@@ -111,17 +124,17 @@ pub fn parse_dag_markdown(content: &str) -> ErgataiResult<TaskGraph> {
 
 /// Builder for TaskNode (collects properties before building)
 struct TaskNodeBuilder {
-    task: String,           // Task description from header
+    task: String, // Task description from header
     agent: Option<String>,
-    task_path: Option<String>,  // Path to task document
+    task_path: Option<String>, // Path to task document
     parent: Option<String>,
-    depends_on: Vec<String>,    // Task names (will be mapped to UUIDs later)
+    depends_on: Vec<String>, // Task names (will be mapped to UUIDs later)
     input: Option<String>,
     output: Option<String>,
     priority: Option<String>,
     timeout: Option<u64>,
     max_retries: Option<u32>,
-    scope: Option<String>,      // Phase 3: File access scope (glob pattern)
+    scope: Option<String>, // Phase 3: File access scope (glob pattern)
     metadata: HashMap<String, String>,
 }
 
@@ -164,7 +177,7 @@ impl TaskNodeBuilder {
 
         // Use task name as temporary ID (will be replaced with UUID later)
         Ok(TaskNode {
-            id: self.task.clone(),  // Task name as temp ID
+            id: self.task.clone(), // Task name as temp ID
             agent: self.agent.unwrap_or_else(|| "agent".to_string()),
             task: self.task,
             status: TaskStatus::Pending,
@@ -176,7 +189,7 @@ impl TaskNodeBuilder {
             retry_count: 0,
             priority: self.priority,
             timeout: self.timeout,
-            scope: self.scope,  // Phase 3: File access scope
+            scope: self.scope, // Phase 3: File access scope
             metadata,
         })
     }
@@ -193,7 +206,10 @@ fn parse_node_header(line: &str) -> ErgataiResult<TaskNodeBuilder> {
         .ok_or_else(|| ErgataiError::InvalidArgument(format!("Invalid header format: {}", line)))?;
 
     if task.is_empty() {
-        return Err(ErgataiError::InvalidArgument(format!("Empty task description in: {}", line)));
+        return Err(ErgataiError::InvalidArgument(format!(
+            "Empty task description in: {}",
+            line
+        )));
     }
 
     Ok(TaskNodeBuilder::new(task.to_string()))
@@ -202,26 +218,19 @@ fn parse_node_header(line: &str) -> ErgataiResult<TaskNodeBuilder> {
 /// Parse a property line: "- **key**: value"
 fn parse_property(builder: &mut TaskNodeBuilder, line: &str) -> ErgataiResult<()> {
     // Extract key and value
-    let key_start = line
-        .find("**")
-        .ok_or_else(|| ErgataiError::InvalidArgument(format!("Missing ** in property: {}", line)))?
-        + 2;
-    let key_end = line[key_start..]
-        .find("**")
-        .ok_or_else(|| {
-            ErgataiError::InvalidArgument(format!("Missing closing ** in property: {}", line))
-        })?
-        + key_start;
+    let key_start = line.find("**").ok_or_else(|| {
+        ErgataiError::InvalidArgument(format!("Missing ** in property: {}", line))
+    })? + 2;
+    let key_end = line[key_start..].find("**").ok_or_else(|| {
+        ErgataiError::InvalidArgument(format!("Missing closing ** in property: {}", line))
+    })? + key_start;
 
     let key = line[key_start..key_end].trim().to_string();
 
     // Find the value (after ": ")
-    let value_start = line[key_end + 2..]
-        .find(':')
-        .ok_or_else(|| {
-            ErgataiError::InvalidArgument(format!("Missing : in property '{}': {}", key, line))
-        })?
-        + key_end
+    let value_start = line[key_end + 2..].find(':').ok_or_else(|| {
+        ErgataiError::InvalidArgument(format!("Missing : in property '{}': {}", key, line))
+    })? + key_end
         + 3;
 
     let value = line[value_start..].trim().to_string();
@@ -259,14 +268,12 @@ fn parse_property(builder: &mut TaskNodeBuilder, line: &str) -> ErgataiResult<()
                 }
             }
         }
-        "retry" | "max_retries" => {
-            match value.parse::<u32>() {
-                Ok(v) => builder.max_retries = Some(v),
-                Err(_) => {
-                    tracing::warn!(value = %value, key = %key, "Invalid retry count in DAG markdown, ignoring");
-                }
+        "retry" | "max_retries" => match value.parse::<u32>() {
+            Ok(v) => builder.max_retries = Some(v),
+            Err(_) => {
+                tracing::warn!(value = %value, key = %key, "Invalid retry count in DAG markdown, ignoring");
             }
-        }
+        },
         "scope" => {
             // Phase 3: File access scope (glob pattern)
             // Validate the scope pattern
@@ -319,23 +326,24 @@ fn validate_scope_pattern(pattern: &str) -> ErgataiResult<()> {
     // Check for path traversal attempts
     if pattern.contains("..") {
         return Err(ErgataiError::InvalidPath(
-            "Scope pattern cannot contain '..' (path traversal)".to_string()
+            "Scope pattern cannot contain '..' (path traversal)".to_string(),
         ));
     }
 
     // Check for absolute paths
     if pattern.starts_with('/') || pattern.starts_with('\\') {
         return Err(ErgataiError::InvalidPath(
-            "Scope pattern must be relative, not absolute".to_string()
+            "Scope pattern must be relative, not absolute".to_string(),
         ));
     }
 
     // Validate glob pattern syntax (using glob crate)
     match glob::Pattern::new(pattern) {
         Ok(_) => Ok(()),
-        Err(e) => Err(ErgataiError::InvalidArgument(
-            format!("Invalid glob pattern '{}': {}", pattern, e)
-        )),
+        Err(e) => Err(ErgataiError::InvalidArgument(format!(
+            "Invalid glob pattern '{}': {}",
+            pattern, e
+        ))),
     }
 }
 
@@ -414,8 +422,14 @@ mod tests {
         let node = &graph.nodes[0];
         assert_eq!(node.agent, "worker");
         assert_eq!(node.input, Some("{{user_query}}".to_string()));
-        assert_eq!(node.metadata.get("task_path"), Some(&"path/to/task.md".to_string()));
-        assert_eq!(node.metadata.get("custom_field"), Some(&"custom_value".to_string()));
+        assert_eq!(
+            node.metadata.get("task_path"),
+            Some(&"path/to/task.md".to_string())
+        );
+        assert_eq!(
+            node.metadata.get("custom_field"),
+            Some(&"custom_value".to_string())
+        );
     }
 
     #[test]

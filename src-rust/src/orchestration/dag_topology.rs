@@ -21,8 +21,8 @@
 
 use std::collections::HashMap;
 
-use anyhow::Context;
 use crate::error::{ErgataiError, ErgataiResult};
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 
@@ -133,7 +133,10 @@ impl TaskGraph {
             .iter()
             .filter(|node| {
                 matches!(node.status, TaskStatus::Pending)
-                    && node.depends_on.iter().all(|dep| completed.contains(&dep.as_str()))
+                    && node
+                        .depends_on
+                        .iter()
+                        .all(|dep| completed.contains(&dep.as_str()))
             })
             .collect()
     }
@@ -220,7 +223,10 @@ impl TaskGraph {
         let mut seen_ids = std::collections::HashSet::new();
         for node in &self.nodes {
             if !seen_ids.insert(node.id.as_str()) {
-                return Err(ErgataiError::InvalidArgument(format!("Duplicate node ID: {}", node.id)));
+                return Err(ErgataiError::InvalidArgument(format!(
+                    "Duplicate node ID: {}",
+                    node.id
+                )));
             }
         }
 
@@ -232,8 +238,7 @@ impl TaskGraph {
                 if !all_ids.contains(dep.as_str()) {
                     return Err(ErgataiError::InvalidArgument(format!(
                         "Node {} depends on {}, which doesn't exist",
-                        node.id,
-                        dep
+                        node.id, dep
                     )));
                 }
             }
@@ -241,7 +246,9 @@ impl TaskGraph {
 
         // Check for cycles using topological sort
         if self.has_cycle() {
-            return Err(ErgataiError::InvalidArgument("Graph has cycles".to_string()));
+            return Err(ErgataiError::InvalidArgument(
+                "Graph has cycles".to_string(),
+            ));
         }
 
         Ok(())
@@ -310,7 +317,8 @@ impl TaskGraph {
             };
 
             // Show task path if available, otherwise show task description
-            let task_ref = node.metadata
+            let task_ref = node
+                .metadata
                 .get("task_path")
                 .map(|p| p.as_str())
                 .unwrap_or(&node.task);
@@ -330,7 +338,8 @@ impl TaskGraph {
         if !ready.is_empty() {
             output.push_str("Ready to execute:\n");
             for node in ready {
-                let task_ref = node.metadata
+                let task_ref = node
+                    .metadata
                     .get("task_path")
                     .map(|p| p.as_str())
                     .unwrap_or(&node.task);
@@ -372,7 +381,7 @@ impl TaskNode {
             retry_count: 0,
             priority: None,
             timeout: None,
-            scope: None,  // Phase 3: File access scope (default: None)
+            scope: None, // Phase 3: File access scope (default: None)
             metadata: HashMap::new(),
         }
     }
@@ -404,7 +413,8 @@ mod tests {
         TaskGraph::new(vec![
             TaskNode::new("n1", "agent-a", "Task A"),
             TaskNode::new("n2", "agent-b", "Task B"),
-            TaskNode::new("n3", "agent-c", "Task C").with_dependencies(vec!["n1".into(), "n2".into()]),
+            TaskNode::new("n3", "agent-c", "Task C")
+                .with_dependencies(vec!["n1".into(), "n2".into()]),
         ])
     }
 
@@ -458,14 +468,16 @@ mod tests {
 
     #[test]
     fn test_missing_dependency() {
-        let graph = TaskGraph::new(vec![TaskNode::new("n1", "agent", "Task").with_dependencies(vec!["missing".into()])]);
+        let graph = TaskGraph::new(vec![
+            TaskNode::new("n1", "agent", "Task").with_dependencies(vec!["missing".into()])
+        ]);
         assert!(graph.validate().is_err());
     }
 
     #[test]
     fn test_retry() {
         let mut graph = TaskGraph::new(vec![
-            TaskNode::new("n1", "agent", "Task").with_max_retries(3),
+            TaskNode::new("n1", "agent", "Task").with_max_retries(3)
         ]);
 
         graph.update_status("n1", TaskStatus::Failed).unwrap();

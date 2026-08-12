@@ -144,7 +144,8 @@ pub fn list_hosted_agents() -> ErgataiResult<Vec<String>> {
 
     let mut names = Vec::new();
 
-    let entries = std::fs::read_dir(&base_dir).map_err(|e| ConfigError::ReadFailed { source: e })?;
+    let entries =
+        std::fs::read_dir(&base_dir).map_err(|e| ConfigError::ReadFailed { source: e })?;
 
     for entry in entries {
         let entry = entry.map_err(|e| ConfigError::ReadFailed { source: e })?;
@@ -182,9 +183,8 @@ pub fn load_hosted_agent(name: &str) -> ErgataiResult<HostedAgentConfig> {
     }
 
     // Read and parse
-    let content = std::fs::read_to_string(&settings_path).map_err(|e| ConfigError::ReadFailed {
-        source: e,
-    })?;
+    let content = std::fs::read_to_string(&settings_path)
+        .map_err(|e| ConfigError::ReadFailed { source: e })?;
 
     let mut full_config: serde_json::Value =
         serde_json::from_str(&content).map_err(|e| ConfigError::ParseFailed { source: e })?;
@@ -192,19 +192,15 @@ pub fn load_hosted_agent(name: &str) -> ErgataiResult<HostedAgentConfig> {
     // Extract ergatai group
     let ergatai_value = full_config
         .as_object_mut()
-        .ok_or_else(|| {
-            ConfigError::ValidationFailed {
-                reason: "settings.json root must be a JSON object".to_string(),
-            }
+        .ok_or_else(|| ConfigError::ValidationFailed {
+            reason: "settings.json root must be a JSON object".to_string(),
         })?
         .remove("ergatai")
-        .ok_or_else(|| {
-            ConfigError::ValidationFailed {
-                reason: format!(
-                    "settings.json for agent '{}' missing required 'ergatai' group",
-                    name
-                ),
-            }
+        .ok_or_else(|| ConfigError::ValidationFailed {
+            reason: format!(
+                "settings.json for agent '{}' missing required 'ergatai' group",
+                name
+            ),
         })?;
 
     let meta: ErgataiAgentMeta = serde_json::from_value(ergatai_value)
@@ -268,9 +264,8 @@ pub fn create_hosted_agent(name: &str, settings: &serde_json::Value) -> ErgataiR
             reason: "Settings must contain 'ergatai' group".to_string(),
         })?;
 
-    let meta: ErgataiAgentMeta = serde_json::from_value(ergatai.clone()).map_err(|e| {
-        ConfigError::ParseFailed { source: e }
-    })?;
+    let meta: ErgataiAgentMeta = serde_json::from_value(ergatai.clone())
+        .map_err(|e| ConfigError::ParseFailed { source: e })?;
 
     if meta.agent_base.is_empty() {
         return Err(ConfigError::ValidationFailed {
@@ -344,14 +339,15 @@ pub fn update_hosted_agent(name: &str, settings: &serde_json::Value) -> ErgataiR
     }
 
     // Validate ergatai group exists in new settings
-    let ergatai = settings.get("ergatai").ok_or_else(|| ConfigError::ValidationFailed {
-        reason: "Settings must contain 'ergatai' group".to_string(),
-    })?;
+    let ergatai = settings
+        .get("ergatai")
+        .ok_or_else(|| ConfigError::ValidationFailed {
+            reason: "Settings must contain 'ergatai' group".to_string(),
+        })?;
 
     // Complete schema validation (consistent with create_hosted_agent)
-    let meta: ErgataiAgentMeta = serde_json::from_value(ergatai.clone()).map_err(|e| {
-        ConfigError::ParseFailed { source: e }
-    })?;
+    let meta: ErgataiAgentMeta = serde_json::from_value(ergatai.clone())
+        .map_err(|e| ConfigError::ParseFailed { source: e })?;
 
     if meta.agent_base.is_empty() {
         return Err(ConfigError::ValidationFailed {
@@ -361,7 +357,11 @@ pub fn update_hosted_agent(name: &str, settings: &serde_json::Value) -> ErgataiR
     }
 
     // Security: validate agent_base only contains safe characters
-    if !meta.agent_base.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+    if !meta
+        .agent_base
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
         return Err(ConfigError::ValidationFailed {
             reason: format!(
                 "agent_base '{}' contains invalid characters (only alphanumeric, '-', '_' allowed)",
@@ -414,7 +414,9 @@ pub fn avatar_path(config: &HostedAgentConfig) -> Option<PathBuf> {
     // Security: if file exists, validate it's within agent_dir
     // If file doesn't exist, skip validation (may be uploaded later)
     if resolved.exists() {
-        if let (Ok(canonical), Ok(base_canonical)) = (resolved.canonicalize(), config.dir_path.canonicalize()) {
+        if let (Ok(canonical), Ok(base_canonical)) =
+            (resolved.canonicalize(), config.dir_path.canonicalize())
+        {
             if !canonical.starts_with(&base_canonical) {
                 tracing::warn!(
                     avatar = %resolved.display(),
@@ -458,18 +460,26 @@ pub fn proxy_env(config: &HostedAgentConfig) -> HashMap<String, String> {
 ///
 /// Returns an error if `agent_base` contains invalid characters (only alphanumeric,
 /// '-', '_' are allowed).
-pub fn to_agent_config(config: &HostedAgentConfig) -> ErgataiResult<crate::agent::config::AgentConfig> {
+pub fn to_agent_config(
+    config: &HostedAgentConfig,
+) -> ErgataiResult<crate::agent::config::AgentConfig> {
     use crate::agent::config::AgentConfig;
 
     // Security: validate agent_base only contains safe characters
     // This prevents arbitrary command execution if config is loaded from untrusted source
-    if !config.meta.agent_base.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+    if !config
+        .meta
+        .agent_base
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
         return Err(ConfigError::ValidationFailed {
             reason: format!(
                 "agent_base '{}' contains invalid characters (only alphanumeric, '-', '_' allowed)",
                 config.meta.agent_base
             ),
-        }.into());
+        }
+        .into());
     }
 
     // Determine command from agent_base
@@ -536,19 +546,29 @@ pub fn to_agent_config(config: &HostedAgentConfig) -> ErgataiResult<crate::agent
     // Extract common fields from the native agent config
     // These are passed to `build_acp_agent_config` which converts them to
     // agent-specific environment variables (e.g. ANTHROPIC_AUTH_TOKEN, OPENAI_API_KEY, etc.)
-    let model = config.agent_config.get("model")
+    let model = config
+        .agent_config
+        .get("model")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
-    let provider = config.agent_config.get("provider")
+    let provider = config
+        .agent_config
+        .get("provider")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
-    let api_key = config.agent_config.get("api_key")
+    let api_key = config
+        .agent_config
+        .get("api_key")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
-    let base_url = config.agent_config.get("base_url")
+    let base_url = config
+        .agent_config
+        .get("base_url")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
-    let persona = config.agent_config.get("persona")
+    let persona = config
+        .agent_config
+        .get("persona")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 

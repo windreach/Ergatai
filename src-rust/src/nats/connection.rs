@@ -4,10 +4,10 @@
 
 use std::time::Duration;
 
-use async_nats::Client;
 use async_nats::jetstream;
 use async_nats::jetstream::stream::{self, Config};
-use tracing::{info, debug};
+use async_nats::Client;
+use tracing::{debug, info};
 
 use crate::error::{ErgataiError, ErgataiResult};
 use crate::nats::server::NatsServer;
@@ -35,9 +35,9 @@ impl NatsConnection {
     pub async fn connect(url: &str) -> ErgataiResult<Self> {
         info!(url = url, "Connecting to NATS");
 
-        let client = async_nats::connect(url)
-            .await
-            .map_err(|e| ErgataiError::NatsError(format!("Failed to connect to NATS at {}: {}", url, e)))?;
+        let client = async_nats::connect(url).await.map_err(|e| {
+            ErgataiError::NatsError(format!("Failed to connect to NATS at {}: {}", url, e))
+        })?;
 
         let jetstream = jetstream::new(client.clone());
 
@@ -66,7 +66,9 @@ impl NatsConnection {
         self.client
             .publish(subject.to_string(), payload.into())
             .await
-            .map_err(|e| ErgataiError::NatsError(format!("Failed to publish to {}: {}", subject, e)))?;
+            .map_err(|e| {
+                ErgataiError::NatsError(format!("Failed to publish to {}: {}", subject, e))
+            })?;
 
         debug!(subject = subject, "Published message");
         Ok(())
@@ -74,10 +76,13 @@ impl NatsConnection {
 
     /// Subscribe to a subject
     pub async fn subscribe(&self, subject: &str) -> ErgataiResult<async_nats::Subscriber> {
-        let subscriber = self.client
+        let subscriber = self
+            .client
             .subscribe(subject.to_string())
             .await
-            .map_err(|e| ErgataiError::NatsError(format!("Failed to subscribe to {}: {}", subject, e)))?;
+            .map_err(|e| {
+                ErgataiError::NatsError(format!("Failed to subscribe to {}: {}", subject, e))
+            })?;
 
         debug!(subject = subject, "Subscribed");
         Ok(subscriber)
@@ -85,12 +90,17 @@ impl NatsConnection {
 
     /// Create or get a JetStream stream
     pub async fn create_stream(&self, config: Config) -> ErgataiResult<stream::Stream> {
-        let mut stream = self.jetstream
+        let mut stream = self
+            .jetstream
             .get_or_create_stream(config)
             .await
             .map_err(|e| ErgataiError::NatsError(format!("Failed to create stream: {}", e)))?;
 
-        let stream_name = stream.info().await.map(|i| i.config.name.clone()).unwrap_or_default();
+        let stream_name = stream
+            .info()
+            .await
+            .map(|i| i.config.name.clone())
+            .unwrap_or_default();
         info!(stream = stream_name, "Stream created");
         Ok(stream)
     }
@@ -125,7 +135,9 @@ impl NatsConnection {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
 
-        Err(ErgataiError::NatsError("NATS connection not ready after 1 second".to_string()))
+        Err(ErgataiError::NatsError(
+            "NATS connection not ready after 1 second".to_string(),
+        ))
     }
 }
 
@@ -203,17 +215,32 @@ mod tests {
     fn test_subject_naming() {
         // Task subjects
         assert_eq!(subjects::task_submit("pool1"), "ergatai.task.submit.pool1");
-        assert_eq!(subjects::task_complete("task123"), "ergatai.task.complete.task123");
+        assert_eq!(
+            subjects::task_complete("task123"),
+            "ergatai.task.complete.task123"
+        );
         assert_eq!(subjects::task_fail("task456"), "ergatai.task.fail.task456");
 
         // DAG subjects
-        assert_eq!(subjects::dag_node_ready("dag1"), "ergatai.dag.node_ready.dag1");
-        assert_eq!(subjects::dag_node_complete("node1"), "ergatai.dag.node_complete.node1");
+        assert_eq!(
+            subjects::dag_node_ready("dag1"),
+            "ergatai.dag.node_ready.dag1"
+        );
+        assert_eq!(
+            subjects::dag_node_complete("node1"),
+            "ergatai.dag.node_complete.node1"
+        );
         assert_eq!(subjects::dag_complete("dag1"), "ergatai.dag.complete.dag1");
 
         // Agent subjects
-        assert_eq!(subjects::agent_spawned("agent1"), "ergatai.agent.spawned.agent1");
-        assert_eq!(subjects::agent_stopped("agent1"), "ergatai.agent.stopped.agent1");
+        assert_eq!(
+            subjects::agent_spawned("agent1"),
+            "ergatai.agent.spawned.agent1"
+        );
+        assert_eq!(
+            subjects::agent_stopped("agent1"),
+            "ergatai.agent.stopped.agent1"
+        );
 
         // Wildcards
         assert_eq!(subjects::all_tasks(), "ergatai.task.*");
@@ -241,14 +268,15 @@ mod tests {
         let mut sub = conn.subscribe("test.pubsub").await.unwrap();
 
         // Publish
-        conn.publish("test.pubsub", b"hello nats".to_vec()).await.unwrap();
+        conn.publish("test.pubsub", b"hello nats".to_vec())
+            .await
+            .unwrap();
 
         // Receive with timeout
-        let msg = tokio::time::timeout(
-            Duration::from_secs(2),
-            sub.next()
-        ).await.expect("Should receive message within timeout")
-         .expect("Stream should yield a message");
+        let msg = tokio::time::timeout(Duration::from_secs(2), sub.next())
+            .await
+            .expect("Should receive message within timeout")
+            .expect("Stream should yield a message");
 
         assert_eq!(&msg.payload[..], b"hello nats");
     }

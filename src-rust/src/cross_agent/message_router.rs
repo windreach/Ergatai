@@ -14,12 +14,11 @@ use std::sync::LazyLock;
 use tracing::{debug, info, warn};
 
 use crate::error::ErgataiResult;
-use crate::nats::{AgentMessagePayload, EventBus, is_nats_initialized, get_nats_connection};
+use crate::nats::{get_nats_connection, is_nats_initialized, AgentMessagePayload, EventBus};
 
 // Compile regex once at startup.
-static MENTION_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"@([a-zA-Z0-9_-]+)").expect("valid regex")
-});
+static MENTION_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"@([a-zA-Z0-9_-]+)").expect("valid regex"));
 
 /// Detect @agent mentions in text
 ///

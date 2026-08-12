@@ -4,12 +4,12 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use url::Url;
 
-use crate::error::{ConfigError, ErgataiError, ErgataiResult};
+use crate::agent::global_config::load_global_agent_config;
 use crate::agent::runtime_metadata::{
     default_agent_args as runtime_default_agent_args, known_acp_runtime,
     normalize_command_identity as runtime_normalize_command_identity,
 };
-use crate::agent::global_config::load_global_agent_config;
+use crate::error::{ConfigError, ErgataiError, ErgataiResult};
 
 /// Normalize agent command to canonical identity.
 ///
@@ -227,9 +227,7 @@ pub fn agent_config_to_env(config: &AgentConfig) -> Vec<(String, String)> {
     // API Key → agent-specific env var (from metadata, with fallback)
     if let Some(ref api_key) = config.api_key {
         if !api_key.is_empty() {
-            let env_key = runtime
-                .and_then(|r| r.api_key_env_var)
-                .unwrap_or("API_KEY");
+            let env_key = runtime.and_then(|r| r.api_key_env_var).unwrap_or("API_KEY");
             vars.push((env_key.to_string(), api_key.clone()));
         }
     }
@@ -419,16 +417,20 @@ pub fn get_agent_config(name: &str) -> ErgataiResult<AgentConfig> {
     // 2. Try hosted agent path
     match crate::agent::hosted_config::load_hosted_agent(name) {
         Ok(hosted_config) => {
-            let mut config = crate::agent::hosted_config::to_agent_config(&hosted_config)
-                .map_err(|e| ErgataiError::AgentNotFound(format!(
-                    "Failed to convert hosted agent config for '{}': {}", name, e
-                )))?;
+            let mut config =
+                crate::agent::hosted_config::to_agent_config(&hosted_config).map_err(|e| {
+                    ErgataiError::AgentNotFound(format!(
+                        "Failed to convert hosted agent config for '{}': {}",
+                        name, e
+                    ))
+                })?;
             normalize_agent_config(&mut config);
             Ok(config)
         }
-        Err(_) => {
-            Err(ErgataiError::AgentNotFound(format!("Agent config not found: {}", name)))
-        }
+        Err(_) => Err(ErgataiError::AgentNotFound(format!(
+            "Agent config not found: {}",
+            name
+        ))),
     }
 }
 
@@ -495,8 +497,7 @@ pub fn save_agent_config(config: &AgentConfig) -> ErgataiResult<()> {
 }
 
 fn get_config_dir() -> ErgataiResult<PathBuf> {
-    let config_dir = dirs::config_dir()
-        .ok_or(ConfigError::DirectoryNotFound)?;
+    let config_dir = dirs::config_dir().ok_or(ConfigError::DirectoryNotFound)?;
     Ok(config_dir.join("ergatai").join("agents"))
 }
 
@@ -509,7 +510,8 @@ pub fn get_config_path(name: &str) -> ErgataiResult<PathBuf> {
         || name == "."
     {
         return Err(ErgataiError::InvalidArgument(format!(
-            "Invalid agent config name (path traversal rejected): {:?}", name
+            "Invalid agent config name (path traversal rejected): {:?}",
+            name
         )));
     }
     Ok(get_config_dir()?.join(format!("{}.json", name)))
@@ -530,8 +532,14 @@ mod tests {
 
     #[test]
     fn test_normalize_command_identity_underscore_to_dash() {
-        assert_eq!(normalize_agent_command_identity("claude_code"), "claude-code");
-        assert_eq!(normalize_agent_command_identity("Claude_Code"), "claude-code");
+        assert_eq!(
+            normalize_agent_command_identity("claude_code"),
+            "claude-code"
+        );
+        assert_eq!(
+            normalize_agent_command_identity("Claude_Code"),
+            "claude-code"
+        );
     }
 
     #[test]
@@ -578,7 +586,10 @@ mod tests {
         // Known agent with empty args → apply defaults
         assert_eq!(normalize_agent_args("goose", vec![]), vec!["acp"]);
         assert_eq!(normalize_agent_args("codex", vec![]), vec![] as Vec<&str>);
-        assert_eq!(normalize_agent_args("claude-code", vec![]), vec![] as Vec<&str>);
+        assert_eq!(
+            normalize_agent_args("claude-code", vec![]),
+            vec![] as Vec<&str>
+        );
     }
 
     #[test]
@@ -588,7 +599,10 @@ mod tests {
             normalize_agent_args("custom-agent", vec!["--flag".to_string()]),
             vec!["--flag"]
         );
-        assert_eq!(normalize_agent_args("custom-agent", vec![]), vec![] as Vec<&str>);
+        assert_eq!(
+            normalize_agent_args("custom-agent", vec![]),
+            vec![] as Vec<&str>
+        );
     }
 
     #[test]
@@ -609,7 +623,10 @@ mod tests {
     fn test_normalize_agent_args_filters_empty() {
         // Empty strings should be filtered out
         assert_eq!(
-            normalize_agent_args("codex", vec!["".to_string(), "--flag".to_string(), "".to_string()]),
+            normalize_agent_args(
+                "codex",
+                vec!["".to_string(), "--flag".to_string(), "".to_string()]
+            ),
             vec!["--flag"]
         );
     }
@@ -627,10 +644,7 @@ mod tests {
     #[test]
     fn test_default_agent_env_hermes() {
         let env = default_agent_env("hermes");
-        assert_eq!(
-            env,
-            &[("HERMES_ACP_SKIP_CONFIGURED_MCP", "1")]
-        );
+        assert_eq!(env, &[("HERMES_ACP_SKIP_CONFIGURED_MCP", "1")]);
 
         let env = default_agent_env("hermes-agent");
         assert_eq!(env, &[("HERMES_ACP_SKIP_CONFIGURED_MCP", "1")]);
@@ -737,7 +751,10 @@ mod tests {
             None,
         );
         assert_eq!(vars.len(), 1);
-        assert_eq!(vars[0], ("GOOSE_MODEL".to_string(), "claude-3-opus".to_string()));
+        assert_eq!(
+            vars[0],
+            ("GOOSE_MODEL".to_string(), "claude-3-opus".to_string())
+        );
     }
 
     // ── agent_config_to_env ──
@@ -769,7 +786,10 @@ mod tests {
         let env = agent_config_to_env(&config);
         // Claude has api_key_env_var=ANTHROPIC_API_KEY, base_url_env_var=ANTHROPIC_BASE_URL
         assert!(env.contains(&("ANTHROPIC_API_KEY".to_string(), "sk-ant-test".to_string())));
-        assert!(env.contains(&("ANTHROPIC_BASE_URL".to_string(), "https://api.example.com".to_string())));
+        assert!(env.contains(&(
+            "ANTHROPIC_BASE_URL".to_string(),
+            "https://api.example.com".to_string()
+        )));
         // NOTE: model/provider injection moved to build_acp_agent_config via runtime_metadata_env_vars
     }
 
@@ -782,7 +802,10 @@ mod tests {
         let env = agent_config_to_env(&config);
         // Codex has api_key_env_var=OPENAI_API_KEY, base_url_env_var=OPENAI_BASE_URL
         assert!(env.contains(&("OPENAI_API_KEY".to_string(), "sk-openai-test".to_string())));
-        assert!(env.contains(&("OPENAI_BASE_URL".to_string(), "https://proxy.example.com".to_string())));
+        assert!(env.contains(&(
+            "OPENAI_BASE_URL".to_string(),
+            "https://proxy.example.com".to_string()
+        )));
     }
 
     #[test]
@@ -794,7 +817,10 @@ mod tests {
         let env = agent_config_to_env(&config);
         // Goose has api_key_env_var=OPENAI_API_KEY, base_url_env_var=GOOSE_API_BASE
         assert!(env.contains(&("OPENAI_API_KEY".to_string(), "key".to_string())));
-        assert!(env.contains(&("GOOSE_API_BASE".to_string(), "https://goose-api.example.com".to_string())));
+        assert!(env.contains(&(
+            "GOOSE_API_BASE".to_string(),
+            "https://goose-api.example.com".to_string()
+        )));
         // NOTE: model/provider injection moved to build_acp_agent_config via runtime_metadata_env_vars
     }
 
@@ -814,7 +840,10 @@ mod tests {
         config.persona = Some("You are an expert reviewer".to_string());
 
         let env = agent_config_to_env(&config);
-        assert!(env.contains(&("ERGATAI_PERSONA".to_string(), "You are an expert reviewer".to_string())));
+        assert!(env.contains(&(
+            "ERGATAI_PERSONA".to_string(),
+            "You are an expert reviewer".to_string()
+        )));
     }
 
     #[test]

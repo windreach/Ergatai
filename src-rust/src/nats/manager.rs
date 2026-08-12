@@ -7,8 +7,8 @@ use tokio::sync::RwLock;
 use tracing::{info, warn};
 
 use crate::error::ErgataiResult;
-use crate::nats::{NatsServer, NatsConnection};
 use crate::nats::file_access_streams::all_file_access_stream_configs;
+use crate::nats::{NatsConnection, NatsServer};
 
 /// Global NATS state
 struct NatsState {
@@ -19,10 +19,12 @@ struct NatsState {
 static NATS_STATE: OnceLock<RwLock<NatsState>> = OnceLock::new();
 
 fn nats_state() -> &'static RwLock<NatsState> {
-    NATS_STATE.get_or_init(|| RwLock::new(NatsState {
-        server: None,
-        connection: None,
-    }))
+    NATS_STATE.get_or_init(|| {
+        RwLock::new(NatsState {
+            server: None,
+            connection: None,
+        })
+    })
 }
 
 /// Initialize NATS (start server + connect + create JetStream streams)
@@ -55,7 +57,10 @@ pub async fn init_nats() -> ErgataiResult<NatsConnection> {
     // Initialize JetStream streams (Phase 6: M8 fix)
     info!("Initializing JetStream streams...");
     if let Err(e) = init_jetstream_streams(&connection).await {
-        warn!("Failed to initialize JetStream streams: {}. Continuing without streams.", e);
+        warn!(
+            "Failed to initialize JetStream streams: {}. Continuing without streams.",
+            e
+        );
     }
 
     state.server = Some(server);
@@ -110,7 +115,11 @@ pub async fn get_nats_connection() -> Option<NatsConnection> {
 pub async fn is_nats_initialized() -> bool {
     let state = nats_state();
     let state = state.read().await;
-    state.connection.as_ref().map(|c| c.is_connected()).unwrap_or(false)
+    state
+        .connection
+        .as_ref()
+        .map(|c| c.is_connected())
+        .unwrap_or(false)
 }
 
 /// Get the port the NATS server is listening on

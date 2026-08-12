@@ -17,11 +17,11 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
-use anyhow::Context;
 use crate::error::ErgataiResult;
 use crate::file_access::{FileMode, FileToken, SystemToken};
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::{oneshot, Mutex};
 use tracing::info;
 
 use super::task_coordinator::{AgentAssignment, TaskCoordinator, TaskPlan};
@@ -147,16 +147,18 @@ impl AgentLauncher {
         lock_manager.register_system_token(&system_token)?;
 
         // Determine file scope based on assignment
-        let scope = if assignment.files_to_modify.is_empty() && assignment.files_to_create.is_empty() {
-            "**".to_string() // Full project access
-        } else {
-            // Build scope from file list
-            // For now, use "**" but could be more sophisticated
-            "**".to_string()
-        };
+        let scope =
+            if assignment.files_to_modify.is_empty() && assignment.files_to_create.is_empty() {
+                "**".to_string() // Full project access
+            } else {
+                // Build scope from file list
+                // For now, use "**" but could be more sophisticated
+                "**".to_string()
+            };
 
         // Request File Token
-        let priority = crate::file_access::conflict_arbitration::priority_to_number(&assignment.priority);
+        let priority =
+            crate::file_access::conflict_arbitration::priority_to_number(&assignment.priority);
         let file_token = FileToken::with_priority(
             assignment.agent_name.clone(),
             session_id.clone(),
@@ -165,8 +167,8 @@ impl AgentLauncher {
             FileMode::Write, // Agents need write access
             Some(format!("Task: {}", assignment.objective)),
             "system".to_string(), // System auto-approves for now
-            3600, // 1 hour TTL
-            30,   // 30 second heartbeat
+            3600,                 // 1 hour TTL
+            30,                   // 30 second heartbeat
             priority,
         );
 
@@ -429,12 +431,16 @@ Write your results in markdown:
             session_mode: crate::acp::sdk_session::SessionMode::Sub,
             agent_id: Some(agent_id.to_string()),
             node_id: node_id.clone(),
-            dag_id: None, // Will be set by DagScheduler if available
+            dag_id: None,           // Will be set by DagScheduler if available
             available_agents: None, // Will use fallback list
         };
 
         crate::acp::sdk_session::spawn_session_task_with_mcp(
-            config, cwd, SessionKind::Dag, Some(mcp_config), session_id_tx,
+            config,
+            cwd,
+            SessionKind::Dag,
+            Some(mcp_config),
+            session_id_tx,
         );
 
         // Wait for session creation
@@ -595,7 +601,8 @@ Write your results in markdown:
                                 );
                             }
                         } else {
-                            let err_msg = format!("ACP session failed for agent {}", agent_id_owned);
+                            let err_msg =
+                                format!("ACP session failed for agent {}", agent_id_owned);
                             let payload = crate::nats::NodeFailedPayload {
                                 node_id: nid.clone(),
                                 task_id: nid.clone(),
@@ -1036,4 +1043,3 @@ mod tests {
         );
     }
 }
-

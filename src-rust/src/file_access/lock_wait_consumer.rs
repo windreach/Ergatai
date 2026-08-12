@@ -12,13 +12,15 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures_util::StreamExt;
 use async_nats::jetstream::consumer::{pull, AckPolicy, DeliverPolicy};
-use tracing::{info, debug, warn, error};
+use futures_util::StreamExt;
+use tracing::{debug, error, info, warn};
 
 use crate::error::{ErgataiError, ErgataiResult};
 use crate::file_access::lock_manager::FileLockManager;
-use crate::file_access::lock_waiter::{LockWaitRequest, LockReleaseNotification, LockGrantedNotification, LockCancelRequest};
+use crate::file_access::lock_waiter::{
+    LockCancelRequest, LockGrantedNotification, LockReleaseNotification, LockWaitRequest,
+};
 use crate::nats::connection::NatsConnection;
 
 /// Consumer for lock waiting queue
@@ -70,8 +72,17 @@ impl LockWaitConsumer {
 
             // Create consumer and messages stream
             let messages_result = async {
-                let stream = self.connection.jetstream().get_stream(&self.stream_name).await
-                    .map_err(|e| ErgataiError::NatsError(format!("Stream {} not found: {}", self.stream_name, e)))?;
+                let stream = self
+                    .connection
+                    .jetstream()
+                    .get_stream(&self.stream_name)
+                    .await
+                    .map_err(|e| {
+                        ErgataiError::NatsError(format!(
+                            "Stream {} not found: {}",
+                            self.stream_name, e
+                        ))
+                    })?;
 
                 let consumer_config = pull::Config {
                     durable_name: Some(self.consumer_name.clone()),
@@ -80,19 +91,25 @@ impl LockWaitConsumer {
                     // Exponential backoff via NATS redelivery:
                     // - ack_wait: time before redelivery (increases with each retry)
                     // - max_deliver: maximum number of delivery attempts
-                    ack_wait: Duration::from_secs(5),  // Initial wait before redelivery
-                    max_deliver: 10,  // Max 10 attempts
+                    ack_wait: Duration::from_secs(5), // Initial wait before redelivery
+                    max_deliver: 10,                  // Max 10 attempts
                     ..Default::default()
                 };
 
-                let consumer = stream.get_or_create_consumer(&self.consumer_name, consumer_config).await
-                    .map_err(|e| ErgataiError::NatsError(format!("Failed to create consumer: {}", e)))?;
+                let consumer = stream
+                    .get_or_create_consumer(&self.consumer_name, consumer_config)
+                    .await
+                    .map_err(|e| {
+                        ErgataiError::NatsError(format!("Failed to create consumer: {}", e))
+                    })?;
 
-                let messages = consumer.messages().await
-                    .map_err(|e| ErgataiError::NatsError(format!("Failed to get messages: {}", e)))?;
+                let messages = consumer.messages().await.map_err(|e| {
+                    ErgataiError::NatsError(format!("Failed to get messages: {}", e))
+                })?;
 
                 Ok::<_, ErgataiError>(messages)
-            }.await;
+            }
+            .await;
 
             let mut messages = match messages_result {
                 Ok(m) => m,
@@ -138,9 +155,10 @@ impl LockWaitConsumer {
             self.handle_lock_cancel(message).await?;
         } else {
             warn!("Unknown subject for lock wait message: {}", subject);
-            message.ack().await.map_err(|e| {
-                ErgataiError::NatsError(format!("Failed to ack message: {}", e))
-            })?;
+            message
+                .ack()
+                .await
+                .map_err(|e| ErgataiError::NatsError(format!("Failed to ack message: {}", e)))?;
         }
 
         Ok(())
@@ -152,9 +170,13 @@ impl LockWaitConsumer {
     /// - Try to acquire lock immediately
     /// - Success: ack message + send grant notification
     /// - Failure: don't ack, NATS will redeliver
-    async fn handle_lock_request(&self, message: async_nats::jetstream::Message) -> ErgataiResult<()> {
-        let request: LockWaitRequest = serde_json::from_slice(&message.payload)
-            .map_err(|e| ErgataiError::internal(format!("Failed to parse LockWaitRequest: {}", e)))?;
+    async fn handle_lock_request(
+        &self,
+        message: async_nats::jetstream::Message,
+    ) -> ErgataiResult<()> {
+        let request: LockWaitRequest = serde_json::from_slice(&message.payload).map_err(|e| {
+            ErgataiError::internal(format!("Failed to parse LockWaitRequest: {}", e))
+        })?;
 
         // Check delivery count for logging
         let delivery_count = message.info().map(|i| i.delivered).unwrap_or(1);
@@ -170,7 +192,10 @@ impl LockWaitConsumer {
         );
 
         // Validate token exists
-        let file_token = match self.lock_manager.find_active_file_token_by_id(&request.token_id) {
+        let file_token = match self
+            .lock_manager
+            .find_active_file_token_by_id(&request.token_id)
+        {
             Ok(token) => token,
             Err(_) => {
                 // Token not found, ack and discard (don't retry)
@@ -179,15 +204,20 @@ impl LockWaitConsumer {
                     token_id = %request.token_id,
                     "File token not found, discarding request"
                 );
-                message.ack().await.map_err(|e| {
-                    ErgataiError::internal(format!("Failed to ack message: {}", e))
-                })?;
+                message
+                    .ack()
+                    .await
+                    .map_err(|e| ErgataiError::internal(format!("Failed to ack message: {}", e)))?;
                 return Ok(());
             }
         };
 
         // Try to acquire the lock
-        match self.lock_manager.acquire_lock(&file_token, &request.file_path).await {
+        match self
+            .lock_manager
+            .acquire_lock(&file_token, &request.file_path)
+            .await
+        {
             Ok(()) => {
                 // Lock acquired successfully
                 info!(
@@ -203,25 +233,34 @@ impl LockWaitConsumer {
                     request.file_path.clone(),
                 );
 
-                if let Err(e) = self.connection.publish(
-                    &request.reply_subject,
-                    serde_json::to_vec(&grant)
-                        .map_err(|e| ErgataiError::internal(format!("Failed to serialize grant: {}", e)))?
-                        .into(),
-                ).await {
+                if let Err(e) = self
+                    .connection
+                    .publish(
+                        &request.reply_subject,
+                        serde_json::to_vec(&grant).map_err(|e| {
+                            ErgataiError::internal(format!("Failed to serialize grant: {}", e))
+                        })?,
+                    )
+                    .await
+                {
                     error!("Failed to publish grant notification: {}", e);
                     // Lock was acquired but notification failed - release and retry
-                    let _ = self.lock_manager.release_lock(file_token.id.as_str(), &request.file_path).await;
+                    let _ = self
+                        .lock_manager
+                        .release_lock(file_token.id.as_str(), &request.file_path)
+                        .await;
                     // Don't ack, let NATS redeliver
                     return Ok(());
                 }
 
                 // Ack the message - lock granted successfully
-                message.ack().await.map_err(|e| {
-                    ErgataiError::internal(format!("Failed to ack message: {}", e))
-                })?;
+                message
+                    .ack()
+                    .await
+                    .map_err(|e| ErgataiError::internal(format!("Failed to ack message: {}", e)))?;
             }
-            Err(ErgataiError::LockConflict(_)) | Err(ErgataiError::LockConflictWithRetry { .. }) => {
+            Err(ErgataiError::LockConflict(_))
+            | Err(ErgataiError::LockConflictWithRetry { .. }) => {
                 // Lock still held, don't ack - NATS will redeliver
                 debug!(
                     request_id = %request.request_id,
@@ -238,9 +277,10 @@ impl LockWaitConsumer {
                     delivery_count = delivery_count,
                     "Error acquiring lock: {}", e
                 );
-                message.ack().await.map_err(|e| {
-                    ErgataiError::internal(format!("Failed to ack message: {}", e))
-                })?;
+                message
+                    .ack()
+                    .await
+                    .map_err(|e| ErgataiError::internal(format!("Failed to ack message: {}", e)))?;
             }
         }
 
@@ -252,9 +292,14 @@ impl LockWaitConsumer {
     /// When a lock is released, we don't need to do anything special here.
     /// NATS will redeliver waiting requests based on ack_wait timeout.
     /// This notification is just for logging/monitoring.
-    async fn handle_lock_release(&self, message: async_nats::jetstream::Message) -> ErgataiResult<()> {
+    async fn handle_lock_release(
+        &self,
+        message: async_nats::jetstream::Message,
+    ) -> ErgataiResult<()> {
         let notification: LockReleaseNotification = serde_json::from_slice(&message.payload)
-            .map_err(|e| ErgataiError::internal(format!("Failed to parse LockReleaseNotification: {}", e)))?;
+            .map_err(|e| {
+                ErgataiError::internal(format!("Failed to parse LockReleaseNotification: {}", e))
+            })?;
 
         info!(
             file_path = %notification.file_path,
@@ -263,9 +308,10 @@ impl LockWaitConsumer {
         );
 
         // Ack the release notification
-        message.ack().await.map_err(|e| {
-            ErgataiError::internal(format!("Failed to ack message: {}", e))
-        })?;
+        message
+            .ack()
+            .await
+            .map_err(|e| ErgataiError::internal(format!("Failed to ack message: {}", e)))?;
 
         Ok(())
     }
@@ -275,9 +321,13 @@ impl LockWaitConsumer {
     /// When an agent cancels a wait request, we need to find and remove it.
     /// Since we're using pure NATS, we can't directly remove messages.
     /// Instead, we mark the request as cancelled in the lock_manager.
-    async fn handle_lock_cancel(&self, message: async_nats::jetstream::Message) -> ErgataiResult<()> {
-        let cancel: LockCancelRequest = serde_json::from_slice(&message.payload)
-            .map_err(|e| ErgataiError::internal(format!("Failed to parse LockCancelRequest: {}", e)))?;
+    async fn handle_lock_cancel(
+        &self,
+        message: async_nats::jetstream::Message,
+    ) -> ErgataiResult<()> {
+        let cancel: LockCancelRequest = serde_json::from_slice(&message.payload).map_err(|e| {
+            ErgataiError::internal(format!("Failed to parse LockCancelRequest: {}", e))
+        })?;
 
         info!(
             request_id = %cancel.request_id,
@@ -292,9 +342,10 @@ impl LockWaitConsumer {
         // - If token is invalid, it will be discarded
         // - If agent disconnects, token becomes invalid
 
-        message.ack().await.map_err(|e| {
-            ErgataiError::internal(format!("Failed to ack message: {}", e))
-        })?;
+        message
+            .ack()
+            .await
+            .map_err(|e| ErgataiError::internal(format!("Failed to ack message: {}", e)))?;
 
         Ok(())
     }

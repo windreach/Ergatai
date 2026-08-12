@@ -1,8 +1,8 @@
 // Plan Watcher - Monitors task plans and result files
 // Detects when agents complete tasks and triggers merging
 
-use std::path::PathBuf;
 use std::collections::HashSet;
+use std::path::PathBuf;
 
 /// Simple polling-based watcher
 pub struct PollingWatcher {
@@ -37,11 +37,7 @@ impl PollingWatcher {
                     if !self.seen_results.contains(file_name) {
                         self.seen_results.insert(file_name.to_string());
                         if let Some((task_id, agent_name)) = file_name.split_once('-') {
-                            new_results.push((
-                                task_id.to_string(),
-                                agent_name.to_string(),
-                                path,
-                            ));
+                            new_results.push((task_id.to_string(), agent_name.to_string(), path));
                         }
                     }
                 }

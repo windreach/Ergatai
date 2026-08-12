@@ -16,10 +16,10 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 
 use agent_client_protocol::schema::v1::{
-    CloseSessionRequest, ContentBlock, EnvVariable, InitializeRequest, McpServer,
-    McpServerStdio, NewSessionRequest, PromptRequest, RequestPermissionOutcome,
-    RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome, SessionId,
-    SetSessionConfigOptionRequest, SessionConfigId, SessionConfigValueId, TextContent,
+    CloseSessionRequest, ContentBlock, EnvVariable, InitializeRequest, McpServer, McpServerStdio,
+    NewSessionRequest, PromptRequest, RequestPermissionOutcome, RequestPermissionRequest,
+    RequestPermissionResponse, SelectedPermissionOutcome, SessionConfigId, SessionConfigValueId,
+    SessionId, SetSessionConfigOptionRequest, TextContent,
 };
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::{AcpAgent, Agent, Client, ConnectionTo};
@@ -42,7 +42,8 @@ const MAX_TURN_DURATION: Duration = Duration::from_secs(7200); // 2 hours
 static PERM_REQUEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Pending permission requests (request_id → responder channel)
-type PendingPermissions = Arc<Mutex<std::collections::HashMap<String, oneshot::Sender<Option<String>>>>>;
+type PendingPermissions =
+    Arc<Mutex<std::collections::HashMap<String, oneshot::Sender<Option<String>>>>>;
 
 /// Approval response from TypeScript
 #[derive(Debug, Clone)]
@@ -54,10 +55,13 @@ pub struct ApprovalResponse {
 
 /// Pending approval requests (request_id → responder channel)
 /// Used for multi-agent approval flow
-static APPROVAL_WAITERS: std::sync::OnceLock<Arc<Mutex<std::collections::HashMap<String, oneshot::Sender<ApprovalResponse>>>>> = std::sync::OnceLock::new();
+static APPROVAL_WAITERS: std::sync::OnceLock<
+    Arc<Mutex<std::collections::HashMap<String, oneshot::Sender<ApprovalResponse>>>>,
+> = std::sync::OnceLock::new();
 
 /// Get the global approval waiters map
-pub fn approval_waiters() -> &'static Arc<Mutex<std::collections::HashMap<String, oneshot::Sender<ApprovalResponse>>>> {
+pub fn approval_waiters(
+) -> &'static Arc<Mutex<std::collections::HashMap<String, oneshot::Sender<ApprovalResponse>>>> {
     APPROVAL_WAITERS.get_or_init(|| Arc::new(Mutex::new(std::collections::HashMap::new())))
 }
 
@@ -182,14 +186,17 @@ async fn acquire_file_locks_for_permission(
         "auto".to_string()
     } else {
         // ADMIN permission: requires human approval
-        let request_id = format!("approval-{}", PERM_REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed));
+        let request_id = format!(
+            "approval-{}",
+            PERM_REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
 
         // Create oneshot channel for response
         let (tx, rx) = oneshot::channel();
         {
-            let mut waiters = approval_waiters().lock().map_err(|_| {
-                ErgataiError::internal("Failed to acquire approval waiters lock")
-            })?;
+            let mut waiters = approval_waiters()
+                .lock()
+                .map_err(|_| ErgataiError::internal("Failed to acquire approval waiters lock"))?;
             waiters.insert(request_id.clone(), tx);
         }
 
@@ -240,7 +247,9 @@ async fn acquire_file_locks_for_permission(
             return Err(ErgataiError::PermissionDenied(format!(
                 "ADMIN access denied by {}: {}",
                 response.approved_by,
-                response.reason.unwrap_or_else(|| "No reason provided".to_string())
+                response
+                    .reason
+                    .unwrap_or_else(|| "No reason provided".to_string())
             )));
         }
 
@@ -671,7 +680,10 @@ async fn run_sdk_session(
 
     // Handle connection result
     if let Err(e) = result {
-        return Err(ErgataiError::internal(format!("SDK connection failed: {}", e)));
+        return Err(ErgataiError::internal(format!(
+            "SDK connection failed: {}",
+            e
+        )));
     }
 
     // Return session_id
@@ -768,7 +780,7 @@ pub fn build_ergatai_mcp_servers(cwd: &str, config: &McpServerConfig) -> Vec<Mcp
     let mut env_vars = vec![
         EnvVariable::new("ERGATAI_NATIVE_BINDING", &native_binding),
         EnvVariable::new("ERGATAI_PROJECT_ROOT", cwd),
-        EnvVariable::new("ERGATAI_SESSION_MODE", &config.session_mode.to_string()),
+        EnvVariable::new("ERGATAI_SESSION_MODE", config.session_mode.to_string()),
     ];
 
     // Sub-agent specific env vars
@@ -838,8 +850,7 @@ fn find_mcp_server_script() -> Option<PathBuf> {
 fn find_native_binding() -> String {
     // In development, the native-binding.js is at the project root's src/ directory.
     // When running from cargo test or dev, CARGO_MANIFEST_DIR is src-rust/.
-    let dev_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../src/native-binding.js");
+    let dev_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../src/native-binding.js");
 
     if dev_path.exists() {
         return dev_path.to_string_lossy().to_string();

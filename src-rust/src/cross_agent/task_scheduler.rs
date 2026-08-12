@@ -4,13 +4,13 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::Context;
 use crate::error::{ErgataiError, ErgataiResult};
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
-use super::task_coordinator::{TaskCoordinator, TaskPlan, AgentAssignment};
 use super::agent_launcher::AgentLauncher;
+use super::task_coordinator::{AgentAssignment, TaskCoordinator, TaskPlan};
 
 /// Queue file format version — increment when PendingTask schema changes.
 /// Migration logic in load_from_disk handles older versions.
@@ -82,7 +82,10 @@ impl TaskScheduler {
 
     /// Load pending tasks from disk (call once at startup or when recovering state)
     pub async fn load_from_disk(&self) -> ErgataiResult<()> {
-        if tokio::fs::try_exists(&self.queue_file).await.unwrap_or(false) {
+        if tokio::fs::try_exists(&self.queue_file)
+            .await
+            .unwrap_or(false)
+        {
             let content = tokio::fs::read_to_string(&self.queue_file)
                 .await
                 .with_context(|| format!("Failed to read queue file: {:?}", self.queue_file))?;
@@ -117,12 +120,17 @@ impl TaskScheduler {
                     // Try to parse as legacy format (bare Vec<PendingTask>)
                     match serde_json::from_str::<Vec<PendingTask>>(&content) {
                         Ok(tasks) => {
-                            tracing::info!("Loaded legacy queue format, will save as versioned format");
+                            tracing::info!(
+                                "Loaded legacy queue format, will save as versioned format"
+                            );
                             tasks
                         }
                         Err(e) => {
                             tracing::error!("Failed to parse queue file: {}", e);
-                            return Err(ErgataiError::json(format!("Failed to parse queue file: {}", e)));
+                            return Err(ErgataiError::json(format!(
+                                "Failed to parse queue file: {}",
+                                e
+                            )));
                         }
                     }
                 }
@@ -368,7 +376,10 @@ impl TaskScheduler {
                 if scheduler.pending_count().await > 0 {
                     match scheduler.process_pending().await {
                         Ok(count) if count > 0 => {
-                            tracing::info!("Background scheduler: processed {} pending tasks", count);
+                            tracing::info!(
+                                "Background scheduler: processed {} pending tasks",
+                                count
+                            );
                         }
                         Ok(_) => {}
                         Err(e) => {
@@ -506,18 +517,20 @@ static GLOBAL_SCHEDULER: OnceLock<Arc<TaskScheduler>> = OnceLock::new();
 
 /// Get or create global scheduler instance
 pub fn global_scheduler(project_root: Option<PathBuf>) -> Arc<TaskScheduler> {
-    GLOBAL_SCHEDULER.get_or_init(|| {
-        let root = project_root.unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-        let scheduler = Arc::new(TaskScheduler::new(root, ScheduleStrategy::WaitForAgent));
+    GLOBAL_SCHEDULER
+        .get_or_init(|| {
+            let root = project_root.unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+            let scheduler = Arc::new(TaskScheduler::new(root, ScheduleStrategy::WaitForAgent));
 
-        // Start background scheduler (polling fallback)
-        scheduler.start_background_scheduler();
+            // Start background scheduler (polling fallback)
+            scheduler.start_background_scheduler();
 
-        // Start NATS consumer if available (event-driven, replaces polling when active)
-        scheduler.start_nats_consumer();
+            // Start NATS consumer if available (event-driven, replaces polling when active)
+            scheduler.start_nats_consumer();
 
-        scheduler
-    }).clone()
+            scheduler
+        })
+        .clone()
 }
 
 #[cfg(test)]

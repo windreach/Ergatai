@@ -81,11 +81,11 @@ pub fn file_events_stream_config() -> Config {
     Config {
         name: FILE_EVENTS_STREAM.to_string(),
         subjects: vec![
-            "ergatai.file.ready.*".to_string(),   // File ready (WRITE completed)
-            "ergatai.file.error.*".to_string(),   // File error (writer crashed)
+            "ergatai.file.ready.*".to_string(), // File ready (WRITE completed)
+            "ergatai.file.error.*".to_string(), // File error (writer crashed)
         ],
         retention: RetentionPolicy::WorkQueue,
-        max_age: Duration::from_secs(3600),       // 1 hour (waiters should not wait too long)
+        max_age: Duration::from_secs(3600), // 1 hour (waiters should not wait too long)
         storage: StorageType::File,
         num_replicas: 1,
         ..Default::default()
@@ -108,11 +108,11 @@ pub fn lock_waiters_stream_config() -> Config {
     Config {
         name: LOCK_WAITERS_STREAM.to_string(),
         subjects: vec![
-            "ergatai.lock.request.*".to_string(),   // Lock requests (WorkQueue)
-            "ergatai.lock.release.*".to_string(),   // Lock releases (Pub/Sub)
+            "ergatai.lock.request.*".to_string(), // Lock requests (WorkQueue)
+            "ergatai.lock.release.*".to_string(), // Lock releases (Pub/Sub)
         ],
         retention: RetentionPolicy::WorkQueue,
-        max_age: Duration::from_secs(7200),         // 2 hours (longer timeout for waiting)
+        max_age: Duration::from_secs(7200), // 2 hours (longer timeout for waiting)
         storage: StorageType::File,
         num_replicas: 1,
         ..Default::default()
@@ -127,8 +127,8 @@ pub fn all_file_access_stream_configs() -> Vec<Config> {
         file_access_request_stream_config(),
         file_access_grant_stream_config(),
         file_access_escalate_stream_config(),
-        file_events_stream_config(),      // Phase 5: file ready/error events
-        lock_waiters_stream_config(),     // Lock waiting queue
+        file_events_stream_config(),  // Phase 5: file ready/error events
+        lock_waiters_stream_config(), // Lock waiting queue
     ]
 }
 
@@ -139,7 +139,7 @@ mod tests {
     #[test]
     fn test_stream_configs() {
         let configs = all_file_access_stream_configs();
-        assert_eq!(configs.len(), 5);  // Updated: now includes LOCK_WAITERS
+        assert_eq!(configs.len(), 5); // Updated: now includes LOCK_WAITERS
 
         let request_config = file_access_request_stream_config();
         assert_eq!(request_config.name, "FILE_ACCESS_REQUESTS");
@@ -151,21 +151,32 @@ mod tests {
 
         let escalate_config = file_access_escalate_stream_config();
         assert_eq!(escalate_config.name, "FILE_ACCESS_ESCALATIONS");
-        assert_eq!(escalate_config.subjects, vec!["ergatai.file.access.escalate.*"]);
+        assert_eq!(
+            escalate_config.subjects,
+            vec!["ergatai.file.access.escalate.*"]
+        );
 
         // Phase 5: file events stream
         let events_config = file_events_stream_config();
         assert_eq!(events_config.name, "FILE_EVENTS");
         assert_eq!(events_config.subjects.len(), 2);
-        assert!(events_config.subjects.contains(&"ergatai.file.ready.*".to_string()));
-        assert!(events_config.subjects.contains(&"ergatai.file.error.*".to_string()));
+        assert!(events_config
+            .subjects
+            .contains(&"ergatai.file.ready.*".to_string()));
+        assert!(events_config
+            .subjects
+            .contains(&"ergatai.file.error.*".to_string()));
 
         // Lock waiters stream
         let waiters_config = lock_waiters_stream_config();
         assert_eq!(waiters_config.name, "LOCK_WAITERS");
         assert_eq!(waiters_config.subjects.len(), 2);
-        assert!(waiters_config.subjects.contains(&"ergatai.lock.request.*".to_string()));
-        assert!(waiters_config.subjects.contains(&"ergatai.lock.release.*".to_string()));
+        assert!(waiters_config
+            .subjects
+            .contains(&"ergatai.lock.request.*".to_string()));
+        assert!(waiters_config
+            .subjects
+            .contains(&"ergatai.lock.release.*".to_string()));
     }
 
     #[test]

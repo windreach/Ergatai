@@ -109,7 +109,9 @@ pub fn arbitrate_conflict(conflict: &ConflictInfo) -> ArbitrationDecision {
         }
         (None, None) => {
             // Neither has priority: first-come-first-served (keep with current)
-            info!("Neither has priority, keeping lock with current holder (first-come-first-served)");
+            info!(
+                "Neither has priority, keeping lock with current holder (first-come-first-served)"
+            );
             ArbitrationDecision::KeepWithCurrentHolder
         }
     }
@@ -262,9 +264,7 @@ mod tests {
         current_priority: Option<&str>,
         new_priority: Option<&str>,
     ) -> ConflictInfo {
-        let str_to_priority = |s: &str| -> Option<u8> {
-            priority_to_number(&Some(s.to_string()))
-        };
+        let str_to_priority = |s: &str| -> Option<u8> { priority_to_number(&Some(s.to_string())) };
         ConflictInfo {
             file_path: "test.rs".to_string(),
             current_holder: LockHolderInfo {

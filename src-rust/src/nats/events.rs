@@ -436,8 +436,14 @@ mod tests {
 
         assert_eq!(restored.node_id, "n1");
         assert_eq!(restored.outputs.len(), 2);
-        assert_eq!(restored.outputs.get("review_result"), Some(&"LGTM".to_string()));
-        assert_eq!(restored.result_file, Some(".ergatai/.dag-results/n1.md".to_string()));
+        assert_eq!(
+            restored.outputs.get("review_result"),
+            Some(&"LGTM".to_string())
+        );
+        assert_eq!(
+            restored.result_file,
+            Some(".ergatai/.dag-results/n1.md".to_string())
+        );
     }
 
     #[test]

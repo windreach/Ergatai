@@ -38,49 +38,54 @@ impl LockModeManager {
             "Upgrading lock from READ to WRITE"
         );
 
-        let conn = self.conn.lock().map_err(|e| {
-            ErgataiError::internal(format!("Failed to acquire lock: {}", e))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
 
         conn.execute_batch("BEGIN IMMEDIATE")
             .map_err(|e| ErgataiError::internal(format!("Failed to begin transaction: {}", e)))?;
 
         // Check if current lock exists and is READ mode
-        let current_mode: Option<String> = match conn
-            .query_row(
-                "SELECT mode FROM file_locks
+        let current_mode: Option<String> = match conn.query_row(
+            "SELECT mode FROM file_locks
                  WHERE token_id = ?1 AND file_path = ?2 AND status = 'ACTIVE'
                  LIMIT 1",
-                params![token_id, file_path],
-                |row| row.get(0),
-            ) {
-                Ok(mode) => Some(mode),
-                Err(rusqlite::Error::QueryReturnedNoRows) => None,
-                Err(e) => {
-                    conn.execute_batch("ROLLBACK").ok();
-                    return Err(ErgataiError::internal(format!("Failed to query current lock mode: {}", e)));
-                }
-            };
+            params![token_id, file_path],
+            |row| row.get(0),
+        ) {
+            Ok(mode) => Some(mode),
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(e) => {
+                conn.execute_batch("ROLLBACK").ok();
+                return Err(ErgataiError::internal(format!(
+                    "Failed to query current lock mode: {}",
+                    e
+                )));
+            }
+        };
 
         match current_mode {
             Some(mode) if mode == "READ" => {
                 // Check for WRITE conflicts
-                let conflict = match conn
-                    .query_row(
-                        "SELECT agent_id FROM file_locks
+                let conflict = match conn.query_row(
+                    "SELECT agent_id FROM file_locks
                          WHERE file_path = ?1 AND mode = 'WRITE' AND status = 'ACTIVE'
                          AND token_id != ?2
                          LIMIT 1",
-                        params![file_path, token_id],
-                        |row| row.get::<_, String>(0),
-                    ) {
-                        Ok(agent_id) => Some(agent_id),
-                        Err(rusqlite::Error::QueryReturnedNoRows) => None,
-                        Err(e) => {
-                            conn.execute_batch("ROLLBACK").ok();
-                            return Err(ErgataiError::internal(format!("Failed to check WRITE conflicts: {}", e)));
-                        }
-                    };
+                    params![file_path, token_id],
+                    |row| row.get::<_, String>(0),
+                ) {
+                    Ok(agent_id) => Some(agent_id),
+                    Err(rusqlite::Error::QueryReturnedNoRows) => None,
+                    Err(e) => {
+                        conn.execute_batch("ROLLBACK").ok();
+                        return Err(ErgataiError::internal(format!(
+                            "Failed to check WRITE conflicts: {}",
+                            e
+                        )));
+                    }
+                };
 
                 if let Some(conflict_agent) = conflict {
                     conn.execute_batch("ROLLBACK").ok();
@@ -159,29 +164,32 @@ impl LockModeManager {
             "Downgrading lock from WRITE to READ"
         );
 
-        let conn = self.conn.lock().map_err(|e| {
-            ErgataiError::internal(format!("Failed to acquire lock: {}", e))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
 
         conn.execute_batch("BEGIN IMMEDIATE")
             .map_err(|e| ErgataiError::internal(format!("Failed to begin transaction: {}", e)))?;
 
         // Check if current lock exists and is WRITE mode
-        let current_mode: Option<String> = match conn
-            .query_row(
-                "SELECT mode FROM file_locks
+        let current_mode: Option<String> = match conn.query_row(
+            "SELECT mode FROM file_locks
                  WHERE token_id = ?1 AND file_path = ?2 AND status = 'ACTIVE'
                  LIMIT 1",
-                params![token_id, file_path],
-                |row| row.get(0),
-            ) {
-                Ok(mode) => Some(mode),
-                Err(rusqlite::Error::QueryReturnedNoRows) => None,
-                Err(e) => {
-                    conn.execute_batch("ROLLBACK").ok();
-                    return Err(ErgataiError::internal(format!("Failed to query current lock mode: {}", e)));
-                }
-            };
+            params![token_id, file_path],
+            |row| row.get(0),
+        ) {
+            Ok(mode) => Some(mode),
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(e) => {
+                conn.execute_batch("ROLLBACK").ok();
+                return Err(ErgataiError::internal(format!(
+                    "Failed to query current lock mode: {}",
+                    e
+                )));
+            }
+        };
 
         match current_mode {
             Some(mode) if mode == "WRITE" => {
@@ -239,24 +247,27 @@ impl LockModeManager {
         token_id: &str,
         file_path: &str,
     ) -> Result<Option<FileMode>, ErgataiError> {
-        let conn = self.conn.lock().map_err(|e| {
-            ErgataiError::internal(format!("Failed to acquire lock: {}", e))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
 
-        let mode: Option<String> = match conn
-            .query_row(
-                "SELECT mode FROM file_locks
+        let mode: Option<String> = match conn.query_row(
+            "SELECT mode FROM file_locks
                  WHERE token_id = ?1 AND file_path = ?2 AND status = 'ACTIVE'
                  LIMIT 1",
-                params![token_id, file_path],
-                |row| row.get(0),
-            ) {
-                Ok(m) => Some(m),
-                Err(rusqlite::Error::QueryReturnedNoRows) => None,
-                Err(e) => {
-                    return Err(ErgataiError::internal(format!("Failed to query lock mode: {}", e)));
-                }
-            };
+            params![token_id, file_path],
+            |row| row.get(0),
+        ) {
+            Ok(m) => Some(m),
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(e) => {
+                return Err(ErgataiError::internal(format!(
+                    "Failed to query lock mode: {}",
+                    e
+                )));
+            }
+        };
 
         match mode.as_deref() {
             Some("READ") => Ok(Some(FileMode::Read)),
@@ -462,19 +473,31 @@ mod tests {
 
         // Upgrade to WRITE
         assert!(manager.upgrade_lock("token1", "test.rs").is_ok());
-        assert_eq!(manager.get_lock_mode("token1", "test.rs").unwrap(), Some(FileMode::Write));
+        assert_eq!(
+            manager.get_lock_mode("token1", "test.rs").unwrap(),
+            Some(FileMode::Write)
+        );
 
         // Downgrade to READ
         assert!(manager.downgrade_lock("token1", "test.rs").is_ok());
-        assert_eq!(manager.get_lock_mode("token1", "test.rs").unwrap(), Some(FileMode::Read));
+        assert_eq!(
+            manager.get_lock_mode("token1", "test.rs").unwrap(),
+            Some(FileMode::Read)
+        );
 
         // Upgrade to WRITE again
         assert!(manager.upgrade_lock("token1", "test.rs").is_ok());
-        assert_eq!(manager.get_lock_mode("token1", "test.rs").unwrap(), Some(FileMode::Write));
+        assert_eq!(
+            manager.get_lock_mode("token1", "test.rs").unwrap(),
+            Some(FileMode::Write)
+        );
 
         // Downgrade to READ again
         assert!(manager.downgrade_lock("token1", "test.rs").is_ok());
-        assert_eq!(manager.get_lock_mode("token1", "test.rs").unwrap(), Some(FileMode::Read));
+        assert_eq!(
+            manager.get_lock_mode("token1", "test.rs").unwrap(),
+            Some(FileMode::Read)
+        );
     }
 
     #[test]
@@ -503,10 +526,16 @@ mod tests {
         assert!(result.is_ok());
 
         // Verify agent1 now has WRITE
-        assert_eq!(manager.get_lock_mode("token1", "test.rs").unwrap(), Some(FileMode::Write));
+        assert_eq!(
+            manager.get_lock_mode("token1", "test.rs").unwrap(),
+            Some(FileMode::Write)
+        );
 
         // Verify agent2 still has READ
-        assert_eq!(manager.get_lock_mode("token2", "test.rs").unwrap(), Some(FileMode::Read));
+        assert_eq!(
+            manager.get_lock_mode("token2", "test.rs").unwrap(),
+            Some(FileMode::Read)
+        );
     }
 
     #[test]
@@ -514,7 +543,9 @@ mod tests {
         let (_temp_dir, manager) = setup_test_db();
 
         // Query lock mode for non-existent lock
-        let mode = manager.get_lock_mode("nonexistent-token", "nonexistent.rs").unwrap();
+        let mode = manager
+            .get_lock_mode("nonexistent-token", "nonexistent.rs")
+            .unwrap();
         assert_eq!(mode, None);
     }
 }

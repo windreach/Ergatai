@@ -32,24 +32,24 @@
 //! All business logic lives in the submodules and is NAPI-agnostic.
 
 // ── Business logic modules ──
-pub mod error;
 pub mod acp;
 pub mod agent;
 pub mod cross_agent;
-pub mod orchestration;
-pub mod nats;
+pub mod error;
 pub mod file_access;
+pub mod nats;
+pub mod orchestration;
 
 // Internal modules (not exported to NAPI directly)
-mod skills;
 mod mcp;
+mod skills;
 
 // ── NAPI binding layer ──
 pub mod napi;
 
-use std::sync::Once;
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::sync::Once;
 
 // ── One-time init ──
 
@@ -82,8 +82,11 @@ pub(crate) fn init_logging() {
     INIT_LOGGING.call_once(|| {
         tracing_subscriber::fmt()
             .with_env_filter(
-                tracing_subscriber::EnvFilter::from_default_env()
-                    .add_directive("ergatai=info".parse().expect("\"ergatai=info\" is a valid tracing directive")),
+                tracing_subscriber::EnvFilter::from_default_env().add_directive(
+                    "ergatai=info"
+                        .parse()
+                        .expect("\"ergatai=info\" is a valid tracing directive"),
+                ),
             )
             .with_writer(std::io::stderr)
             .init();

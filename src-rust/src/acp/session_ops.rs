@@ -28,18 +28,29 @@ where
     let agent_config = build_acp_agent_config(config);
     let agent = AcpAgent::new(agent_config);
 
-    let result = Client.builder()
+    let result = Client
+        .builder()
         .connect_with(agent, |connection: ConnectionTo<Agent>| async move {
             // 初始化
-            let init_result = timeout(SESSION_TIMEOUT, connection
-                .send_request(InitializeRequest::new(ProtocolVersion::V1))
-                .block_task())
-                .await;
+            let init_result = timeout(
+                SESSION_TIMEOUT,
+                connection
+                    .send_request(InitializeRequest::new(ProtocolVersion::V1))
+                    .block_task(),
+            )
+            .await;
 
             match init_result {
-                Ok(Ok(_)) => {},
-                Ok(Err(e)) => return Err(agent_client_protocol::Error::internal_error().data(format!("Initialize failed: {}", e))),
-                Err(_) => return Err(agent_client_protocol::Error::internal_error().data("Initialize timeout")),
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => {
+                    return Err(agent_client_protocol::Error::internal_error()
+                        .data(format!("Initialize failed: {}", e)))
+                }
+                Err(_) => {
+                    return Err(
+                        agent_client_protocol::Error::internal_error().data("Initialize timeout")
+                    )
+                }
             }
 
             // 执行操作
@@ -54,7 +65,10 @@ where
 }
 
 /// 从 agent 查询会话列表
-pub async fn list_sessions_from_agent(config: &AgentConfig, cwd: Option<String>) -> ErgataiResult<Vec<SessionInfo>> {
+pub async fn list_sessions_from_agent(
+    config: &AgentConfig,
+    cwd: Option<String>,
+) -> ErgataiResult<Vec<SessionInfo>> {
     let cwd_path = cwd.map(PathBuf::from);
 
     with_agent_connection(config, |connection| async move {
@@ -63,11 +77,13 @@ pub async fn list_sessions_from_agent(config: &AgentConfig, cwd: Option<String>)
             request = request.cwd(cwd.clone());
         }
 
-        let response = timeout(SESSION_TIMEOUT, connection
-            .send_request(request).block_task())
-            .await
-            .map_err(|_| ErgataiError::agent_timeout("ListSessions timeout"))?
-            .map_err(|e| ErgataiError::network_with_source("ListSessions failed", e))?;
+        let response = timeout(
+            SESSION_TIMEOUT,
+            connection.send_request(request).block_task(),
+        )
+        .await
+        .map_err(|_| ErgataiError::agent_timeout("ListSessions timeout"))?
+        .map_err(|e| ErgataiError::network_with_source("ListSessions failed", e))?;
 
         Ok(response.sessions)
     })
@@ -75,15 +91,22 @@ pub async fn list_sessions_from_agent(config: &AgentConfig, cwd: Option<String>)
 }
 
 /// 从 agent 删除会话
-pub async fn delete_session_from_agent(config: &AgentConfig, session_id: &str) -> ErgataiResult<()> {
+pub async fn delete_session_from_agent(
+    config: &AgentConfig,
+    session_id: &str,
+) -> ErgataiResult<()> {
     let sid = SessionId::new(session_id.to_string());
 
     with_agent_connection(config, |connection| async move {
-        timeout(SESSION_TIMEOUT, connection
-            .send_request(DeleteSessionRequest::new(sid)).block_task())
-            .await
-            .map_err(|_| ErgataiError::agent_timeout("DeleteSession timeout"))?
-            .map_err(|e| ErgataiError::network_with_source("DeleteSession failed", e))?;
+        timeout(
+            SESSION_TIMEOUT,
+            connection
+                .send_request(DeleteSessionRequest::new(sid))
+                .block_task(),
+        )
+        .await
+        .map_err(|_| ErgataiError::agent_timeout("DeleteSession timeout"))?
+        .map_err(|e| ErgataiError::network_with_source("DeleteSession failed", e))?;
 
         Ok(())
     })
@@ -330,7 +353,10 @@ pub fn load_session_task(
                     }
                 };
                 if let Some(tx) = tx {
-                    let _ = tx.send(Err(ErgataiError::network(format!("Connection failed: {}", e))));
+                    let _ = tx.send(Err(ErgataiError::network(format!(
+                        "Connection failed: {}",
+                        e
+                    ))));
                 }
             }
         }
@@ -572,7 +598,10 @@ pub fn resume_session_task(
                     }
                 };
                 if let Some(tx) = tx {
-                    let _ = tx.send(Err(ErgataiError::network(format!("Connection failed: {}", e))));
+                    let _ = tx.send(Err(ErgataiError::network(format!(
+                        "Connection failed: {}",
+                        e
+                    ))));
                 }
             }
         }

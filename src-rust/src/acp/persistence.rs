@@ -17,8 +17,7 @@ pub struct PersistedSession {
 
 /// 获取会话存储目录
 fn sessions_dir() -> ErgataiResult<PathBuf> {
-    let config_dir = dirs::config_dir()
-        .ok_or(ConfigError::DirectoryNotFound)?;
+    let config_dir = dirs::config_dir().ok_or(ConfigError::DirectoryNotFound)?;
     Ok(config_dir.join("ergatai").join("sessions"))
 }
 
@@ -97,7 +96,13 @@ fn session_path(session_id: &str) -> ErgataiResult<PathBuf> {
     // 用 session_id 的安全版本做文件名
     let safe_name: String = session_id
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     Ok(sessions_dir()?.join(format!("{}.json", safe_name)))
 }

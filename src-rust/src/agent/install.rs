@@ -2,8 +2,8 @@
 //!
 //! Executes predefined install commands from runtime metadata to install agents.
 
+use anyhow::{Context, Result};
 use std::process::Command;
-use anyhow::{Result, Context};
 
 /// Command whitelist prefixes (prevent command injection)
 const ALLOWED_PREFIXES: &[&str] = &[
@@ -15,11 +15,11 @@ const ALLOWED_PREFIXES: &[&str] = &[
 
 /// Validate that an install command is safe to execute
 fn validate_install_command(cmd: &str) -> Result<()> {
-    if !ALLOWED_PREFIXES.iter().any(|prefix| cmd.starts_with(prefix)) {
-        return Err(anyhow::anyhow!(
-            "Install command not in whitelist: {}",
-            cmd
-        ));
+    if !ALLOWED_PREFIXES
+        .iter()
+        .any(|prefix| cmd.starts_with(prefix))
+    {
+        return Err(anyhow::anyhow!("Install command not in whitelist: {}", cmd));
     }
     Ok(())
 }
@@ -29,7 +29,8 @@ pub async fn install_acp_runtime(runtime_id: &str) -> Result<String> {
     let metadata = crate::agent::runtime_metadata::known_acp_runtime_exact(runtime_id)
         .ok_or_else(|| anyhow::anyhow!("Unknown runtime: {}", runtime_id))?;
 
-    let install_cmd = metadata.install_command
+    let install_cmd = metadata
+        .install_command
         .ok_or_else(|| anyhow::anyhow!("No install command for: {}", runtime_id))?;
 
     // Security check: command must be in whitelist
@@ -38,10 +39,7 @@ pub async fn install_acp_runtime(runtime_id: &str) -> Result<String> {
     // Execute install command via shell (spawn_blocking to avoid blocking async runtime)
     let install_cmd = install_cmd.to_string();
     let output = tokio::task::spawn_blocking(move || {
-        Command::new("sh")
-            .arg("-c")
-            .arg(&install_cmd)
-            .output()
+        Command::new("sh").arg("-c").arg(&install_cmd).output()
     })
     .await
     .context("Failed to spawn blocking task")?

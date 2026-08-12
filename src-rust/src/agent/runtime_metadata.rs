@@ -22,7 +22,7 @@ pub struct KnownAcpRuntime {
     pub config_file_path: Option<&'static str>,
     pub install_instructions_url: &'static str,
     pub install_hint: &'static str,
-    pub install_command: Option<&'static str>,  // Shell command to install this runtime
+    pub install_command: Option<&'static str>, // Shell command to install this runtime
     pub login_hint: Option<&'static str>,
     pub auth_probe_args: Option<&'static [&'static str]>,
 }
@@ -152,7 +152,7 @@ pub static KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         config_file_path: None,
         install_instructions_url: "https://cursor.com/downloads",
         install_hint: "Install Cursor from https://cursor.com/downloads",
-        install_command: None,  // Desktop app, manual download
+        install_command: None, // Desktop app, manual download
         login_hint: None,
         auth_probe_args: None,
     },
@@ -172,7 +172,7 @@ pub static KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         config_file_path: None,
         install_instructions_url: "https://omp.sh/",
         install_hint: "Install Oh My Pi from https://omp.sh/",
-        install_command: None,  // Manual install via web UI
+        install_command: None, // Manual install via web UI
         login_hint: None,
         auth_probe_args: None,
     },
@@ -287,7 +287,10 @@ pub fn known_acp_runtime(command: &str) -> Option<&'static KnownAcpRuntime> {
 
     KNOWN_ACP_RUNTIMES.iter().find(|runtime| {
         normalized == runtime.id
-            || runtime.commands.iter().any(|cmd| normalized == normalize_command_identity(cmd))
+            || runtime
+                .commands
+                .iter()
+                .any(|cmd| normalized == normalize_command_identity(cmd))
             || runtime.aliases.iter().any(|alias| normalized == *alias)
     })
 }
@@ -373,7 +376,10 @@ mod tests {
         assert_eq!(normalize_command_identity("Goose"), "goose");
         assert_eq!(normalize_command_identity("Claude_Code"), "claude-code");
         assert_eq!(normalize_command_identity("/usr/local/bin/goose"), "goose");
-        assert_eq!(normalize_command_identity("claude-agent-acp"), "claude-agent-acp");
+        assert_eq!(
+            normalize_command_identity("claude-agent-acp"),
+            "claude-agent-acp"
+        );
     }
 
     #[test]
@@ -398,6 +404,9 @@ mod tests {
         assert_eq!(goose_env.get("GOOSE_MODE"), Some(&"auto".to_string()));
 
         let hermes_env = default_agent_env("hermes").unwrap();
-        assert_eq!(hermes_env.get("HERMES_ACP_SKIP_CONFIGURED_MCP"), Some(&"1".to_string()));
+        assert_eq!(
+            hermes_env.get("HERMES_ACP_SKIP_CONFIGURED_MCP"),
+            Some(&"1".to_string())
+        );
     }
 }

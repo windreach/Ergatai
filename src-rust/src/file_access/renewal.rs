@@ -39,7 +39,8 @@ impl RenewalManager {
         token_id: &str,
         extension_secs: Option<u64>,
     ) -> Result<String, ErgataiError> {
-        let extension = Duration::seconds(extension_secs.unwrap_or(self.default_extension_secs) as i64);
+        let extension =
+            Duration::seconds(extension_secs.unwrap_or(self.default_extension_secs) as i64);
         let new_expiry = Utc::now() + extension;
 
         info!(
@@ -48,27 +49,30 @@ impl RenewalManager {
             "Renewing system token"
         );
 
-        let conn = self.conn.lock().map_err(|e| {
-            ErgataiError::internal(format!("Failed to acquire lock: {}", e))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
 
         conn.execute_batch("BEGIN IMMEDIATE")
             .map_err(|e| ErgataiError::internal(format!("Failed to begin transaction: {}", e)))?;
 
         // Check if token exists and is active
-        let current_status: Option<String> = match conn
-            .query_row(
-                "SELECT status FROM system_tokens WHERE id = ?1",
-                params![token_id],
-                |row| row.get(0),
-            ) {
-                Ok(status) => Some(status),
-                Err(rusqlite::Error::QueryReturnedNoRows) => None,
-                Err(e) => {
-                    conn.execute_batch("ROLLBACK").ok();
-                    return Err(ErgataiError::internal(format!("Failed to query token status: {}", e)));
-                }
-            };
+        let current_status: Option<String> = match conn.query_row(
+            "SELECT status FROM system_tokens WHERE id = ?1",
+            params![token_id],
+            |row| row.get(0),
+        ) {
+            Ok(status) => Some(status),
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(e) => {
+                conn.execute_batch("ROLLBACK").ok();
+                return Err(ErgataiError::internal(format!(
+                    "Failed to query token status: {}",
+                    e
+                )));
+            }
+        };
 
         match current_status.as_deref() {
             Some("ACTIVE") | Some("UPGRADING") => {
@@ -124,7 +128,8 @@ impl RenewalManager {
         file_path: &str,
         extension_secs: Option<u64>,
     ) -> Result<String, ErgataiError> {
-        let extension = Duration::seconds(extension_secs.unwrap_or(self.default_extension_secs) as i64);
+        let extension =
+            Duration::seconds(extension_secs.unwrap_or(self.default_extension_secs) as i64);
         let new_expiry = Utc::now() + extension;
 
         info!(
@@ -134,29 +139,32 @@ impl RenewalManager {
             "Renewing file lock"
         );
 
-        let conn = self.conn.lock().map_err(|e| {
-            ErgataiError::internal(format!("Failed to acquire lock: {}", e))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
 
         conn.execute_batch("BEGIN IMMEDIATE")
             .map_err(|e| ErgataiError::internal(format!("Failed to begin transaction: {}", e)))?;
 
         // Check if lock exists and is active
-        let current_status: Option<String> = match conn
-            .query_row(
-                "SELECT status FROM file_locks
+        let current_status: Option<String> = match conn.query_row(
+            "SELECT status FROM file_locks
                  WHERE token_id = ?1 AND file_path = ?2 AND status = 'ACTIVE'
                  LIMIT 1",
-                params![token_id, file_path],
-                |row| row.get(0),
-            ) {
-                Ok(status) => Some(status),
-                Err(rusqlite::Error::QueryReturnedNoRows) => None,
-                Err(e) => {
-                    conn.execute_batch("ROLLBACK").ok();
-                    return Err(ErgataiError::internal(format!("Failed to query file lock status: {}", e)));
-                }
-            };
+            params![token_id, file_path],
+            |row| row.get(0),
+        ) {
+            Ok(status) => Some(status),
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(e) => {
+                conn.execute_batch("ROLLBACK").ok();
+                return Err(ErgataiError::internal(format!(
+                    "Failed to query file lock status: {}",
+                    e
+                )));
+            }
+        };
 
         match current_status.as_deref() {
             Some("ACTIVE") => {
@@ -212,7 +220,8 @@ impl RenewalManager {
         token_id: &str,
         extension_secs: Option<u64>,
     ) -> Result<usize, ErgataiError> {
-        let extension = Duration::seconds(extension_secs.unwrap_or(self.default_extension_secs) as i64);
+        let extension =
+            Duration::seconds(extension_secs.unwrap_or(self.default_extension_secs) as i64);
         let new_expiry = Utc::now() + extension;
 
         info!(
@@ -221,9 +230,10 @@ impl RenewalManager {
             "Renewing all locks for token"
         );
 
-        let conn = self.conn.lock().map_err(|e| {
-            ErgataiError::internal(format!("Failed to acquire lock: {}", e))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
 
         conn.execute_batch("BEGIN IMMEDIATE")
             .map_err(|e| ErgataiError::internal(format!("Failed to begin transaction: {}", e)))?;
@@ -274,9 +284,10 @@ impl RenewalManager {
             "Auto-renewing expiring tokens and locks"
         );
 
-        let conn = self.conn.lock().map_err(|e| {
-            ErgataiError::internal(format!("Failed to acquire lock: {}", e))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
 
         conn.execute_batch("BEGIN IMMEDIATE")
             .map_err(|e| ErgataiError::internal(format!("Failed to begin transaction: {}", e)))?;
@@ -472,7 +483,10 @@ mod tests {
         // Try to renew expired token - should fail
         let result = manager.renew_system_token("token1", Some(7200));
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), ErgataiError::InvalidArgument(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            ErgataiError::InvalidArgument(_)
+        ));
     }
 
     #[test]

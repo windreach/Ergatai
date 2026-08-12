@@ -100,7 +100,10 @@ pub struct SessionManager {
     sessions: RwLock<HashMap<String, SessionHandle>>,
     /// Watch channel for session count changes — allows close_all to wait efficiently
     /// instead of polling with sleep.
-    session_count_watch: (tokio::sync::watch::Sender<usize>, tokio::sync::watch::Receiver<usize>),
+    session_count_watch: (
+        tokio::sync::watch::Sender<usize>,
+        tokio::sync::watch::Receiver<usize>,
+    ),
 }
 
 impl Default for SessionManager {
@@ -135,7 +138,10 @@ impl SessionManager {
         let _ = self.session_count_watch.0.send(count);
     }
 
-    pub async fn get_cmd_tx(&self, session_id: &str) -> Option<mpsc::UnboundedSender<SessionCommand>> {
+    pub async fn get_cmd_tx(
+        &self,
+        session_id: &str,
+    ) -> Option<mpsc::UnboundedSender<SessionCommand>> {
         self.sessions
             .read()
             .await
@@ -189,7 +195,9 @@ impl SessionManager {
                     break Ok(());
                 }
             }
-        }).await {
+        })
+        .await
+        {
             Ok(Ok(())) => {
                 tracing::info!("All {} sessions closed gracefully", session_ids.len());
             }
@@ -205,7 +213,8 @@ impl SessionManager {
                     remaining
                 );
                 // Force unregister remaining sessions
-                let remaining_ids: Vec<String> = self.sessions.read().await.keys().cloned().collect();
+                let remaining_ids: Vec<String> =
+                    self.sessions.read().await.keys().cloned().collect();
                 for id in remaining_ids {
                     self.unregister(&id).await;
                 }
@@ -235,7 +244,10 @@ impl SessionManager {
         let mut rx = self.session_count_watch.1.clone();
         let target = {
             let sessions = self.sessions.read().await;
-            sessions.values().filter(|h| h.kind == SessionKind::Dag).count()
+            sessions
+                .values()
+                .filter(|h| h.kind == SessionKind::Dag)
+                .count()
         };
 
         let _ = tokio::time::timeout(timeout_duration, async {

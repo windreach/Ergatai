@@ -32,9 +32,11 @@ struct FileAccessManagerState {
 static FILE_ACCESS_MANAGER: OnceLock<RwLock<FileAccessManagerState>> = OnceLock::new();
 
 fn file_access_manager() -> &'static RwLock<FileAccessManagerState> {
-    FILE_ACCESS_MANAGER.get_or_init(|| RwLock::new(FileAccessManagerState {
-        projects: HashMap::new(),
-    }))
+    FILE_ACCESS_MANAGER.get_or_init(|| {
+        RwLock::new(FileAccessManagerState {
+            projects: HashMap::new(),
+        })
+    })
 }
 
 /// Initialize file access control for a project
@@ -48,10 +50,16 @@ fn file_access_manager() -> &'static RwLock<FileAccessManagerState> {
 pub async fn init_file_access(project_id: &str, project_root: &Path) -> ErgataiResult<()> {
     // M11 fix: Fetch NATS connection BEFORE acquiring write lock
     let nats_client = if let Some(conn) = get_nats_connection().await {
-        info!(project_id = project_id, "NATS available, enabling multi-agent approval flow");
+        info!(
+            project_id = project_id,
+            "NATS available, enabling multi-agent approval flow"
+        );
         Some(Arc::new(conn.client().clone()))
     } else {
-        warn!(project_id = project_id, "NATS not available, running in degraded mode (no multi-agent approval)");
+        warn!(
+            project_id = project_id,
+            "NATS not available, running in degraded mode (no multi-agent approval)"
+        );
         None
     };
 
@@ -60,7 +68,10 @@ pub async fn init_file_access(project_id: &str, project_root: &Path) -> ErgataiR
 
     // Check if already initialized
     if manager.projects.contains_key(project_id) {
-        info!(project_id = project_id, "File access control already initialized");
+        info!(
+            project_id = project_id,
+            "File access control already initialized"
+        );
         return Ok(());
     }
 
@@ -70,13 +81,15 @@ pub async fn init_file_access(project_id: &str, project_root: &Path) -> ErgataiR
     // Ensure .ergatai directory exists
     let lock_db_parent = lock_db_path.parent().ok_or_else(|| {
         ErgataiError::InvalidArgument(format!(
-            "Invalid lock_db_path has no parent: {:?}", lock_db_path
+            "Invalid lock_db_path has no parent: {:?}",
+            lock_db_path
         ))
     })?;
     tokio::fs::create_dir_all(lock_db_parent).await?;
 
     // Create FileLockManager with optional NATS client
-    let lock_manager = FileLockManager::new(&lock_db_path, project_root.to_path_buf(), nats_client)?;
+    let lock_manager =
+        FileLockManager::new(&lock_db_path, project_root.to_path_buf(), nats_client)?;
 
     // If NATS is available, subscribe to approval responses
     if let Err(e) = lock_manager.subscribe_to_nats().await {
@@ -96,11 +109,14 @@ pub async fn init_file_access(project_id: &str, project_root: &Path) -> ErgataiR
     let watchdog = Arc::new(RwLock::new(watchdog));
 
     // Store in global state
-    manager.projects.insert(project_id.to_string(), ProjectFileAccess {
-        lock_manager,
-        snapshot_manager,
-        watchdog,
-    });
+    manager.projects.insert(
+        project_id.to_string(),
+        ProjectFileAccess {
+            lock_manager,
+            snapshot_manager,
+            watchdog,
+        },
+    );
 
     info!(
         project_id = project_id,
@@ -175,9 +191,15 @@ pub async fn shutdown_file_access(project_id: &str) -> ErgataiResult<()> {
         let mut watchdog = project.watchdog.write().await;
         watchdog.stop()?;
 
-        info!(project_id = project_id, "File access control system shutdown");
+        info!(
+            project_id = project_id,
+            "File access control system shutdown"
+        );
     } else {
-        warn!(project_id = project_id, "File access control not initialized for project");
+        warn!(
+            project_id = project_id,
+            "File access control not initialized for project"
+        );
     }
 
     Ok(())

@@ -3,8 +3,8 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::Context;
 use crate::error::{ErgataiError, ErgataiResult};
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 
@@ -16,7 +16,10 @@ use tokio::fs;
 /// `agent_name` into a path.
 fn validate_path_component(name: &str, label: &str) -> ErgataiResult<()> {
     if name.is_empty() {
-        return Err(ErgataiError::InvalidArgument(format!("{} must not be empty", label)));
+        return Err(ErgataiError::InvalidArgument(format!(
+            "{} must not be empty",
+            label
+        )));
     }
     if name.contains("..")
         || name.contains('/')
@@ -28,8 +31,7 @@ fn validate_path_component(name: &str, label: &str) -> ErgataiResult<()> {
     {
         return Err(ErgataiError::InvalidArgument(format!(
             "{} contains invalid characters (refusing path traversal): {:?}",
-            label,
-            name
+            label, name
         )));
     }
     Ok(())
@@ -182,10 +184,9 @@ impl TaskCoordinator {
         validate_path_component(&plan.task_id, "task_id")?;
         for assignment in &plan.assignments {
             validate_path_component(&assignment.agent_name, "agent")?;
-            let result_file = self.results_dir.join(format!(
-                "{}-{}.md",
-                plan.task_id, assignment.agent_name
-            ));
+            let result_file = self
+                .results_dir
+                .join(format!("{}-{}.md", plan.task_id, assignment.agent_name));
             if !tokio::fs::try_exists(&result_file).await.unwrap_or(false) {
                 return Ok(false);
             }
@@ -276,7 +277,8 @@ fn parse_assignments(content: &str) -> ErgataiResult<Vec<AgentAssignment>> {
                     builder.objective = Some(obj.trim().to_string());
                 }
             } else if line.contains("**Type**:") || line.contains("**类型**:") {
-                if let Some(task_type) = line.split(':').nth(1).or_else(|| line.split('：').nth(1)) {
+                if let Some(task_type) = line.split(':').nth(1).or_else(|| line.split('：').nth(1))
+                {
                     builder.task_type = Some(parse_task_type(task_type.trim()));
                 }
             } else if line.contains("**Files to create**:") || line.contains("**创建**:") {
@@ -338,7 +340,7 @@ impl TaskPlan {
     /// Convert TaskPlan to TaskGraph for DAG-based scheduling
     /// Node IDs are auto-generated UUIDs
     pub fn to_task_graph(&self) -> crate::orchestration::TaskGraph {
-        use crate::orchestration::{TaskNode, TaskGraph};
+        use crate::orchestration::{TaskGraph, TaskNode};
         use std::collections::HashMap;
         use uuid::Uuid;
 
@@ -397,7 +399,12 @@ impl TaskPlan {
             node.depends_on = node
                 .depends_on
                 .iter()
-                .map(|name| name_to_uuid.get(name).cloned().unwrap_or_else(|| name.clone()))
+                .map(|name| {
+                    name_to_uuid
+                        .get(name)
+                        .cloned()
+                        .unwrap_or_else(|| name.clone())
+                })
                 .collect();
         }
 
@@ -455,7 +462,9 @@ impl AgentAssignmentBuilder {
 
     fn build(self) -> ErgataiResult<AgentAssignment> {
         let task_type = self.task_type.unwrap_or(TaskType::ReadOnly);
-        let objective = self.objective.unwrap_or_else(|| "No objective specified".to_string());
+        let objective = self
+            .objective
+            .unwrap_or_else(|| "No objective specified".to_string());
 
         Ok(AgentAssignment {
             agent_name: self.agent_name,

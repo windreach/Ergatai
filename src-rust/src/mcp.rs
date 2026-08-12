@@ -108,7 +108,11 @@ pub fn scan_mcp_servers() -> Result<Vec<McpServerInfo>> {
             }
             seen.insert(name.clone(), true);
 
-            let status = if is_server_running(&name) { "running" } else { "stopped" };
+            let status = if is_server_running(&name) {
+                "running"
+            } else {
+                "stopped"
+            };
 
             servers.push(McpServerInfo {
                 id: format!("mcp-{}", name),
@@ -134,14 +138,22 @@ pub fn scan_mcp_servers() -> Result<Vec<McpServerInfo>> {
     let cbm_binary = resource_dir.join("codebase-memory-mcp").join("cbm");
     if cbm_binary.exists() {
         if !seen.contains_key("codebase-memory") {
-            let status = if is_server_running("codebase-memory") { "running" } else { "stopped" };
+            let status = if is_server_running("codebase-memory") {
+                "running"
+            } else {
+                "stopped"
+            };
             servers.push(McpServerInfo {
                 id: "mcp-builtin-codebase-memory".to_string(),
                 name: "codebase-memory".to_string(),
                 category: "built-in".to_string(),
                 status: status.to_string(),
                 command: Some(cbm_binary.to_string_lossy().to_string()),
-                args: Some(vec!["server".to_string(), "--project".to_string(), ".".to_string()]),
+                args: Some(vec![
+                    "server".to_string(),
+                    "--project".to_string(),
+                    ".".to_string(),
+                ]),
                 env: None,
             });
         }
@@ -173,7 +185,11 @@ pub fn check_builtin_services() -> Result<Vec<BuiltinServiceInfo>> {
 
     // Check rtk
     let rtk_paths = [
-        resource_dir.join("rtk").join("target").join("release").join("rtk"),
+        resource_dir
+            .join("rtk")
+            .join("target")
+            .join("release")
+            .join("rtk"),
         PathBuf::from("/usr/local/bin/rtk"),
         PathBuf::from("/usr/bin/rtk"),
     ];
@@ -181,7 +197,11 @@ pub fn check_builtin_services() -> Result<Vec<BuiltinServiceInfo>> {
     services.push(BuiltinServiceInfo {
         name: "rtk".to_string(),
         binary_path: rtk_paths[0].to_string_lossy().to_string(),
-        status: if rtk_exists { "available".to_string() } else { "missing".to_string() },
+        status: if rtk_exists {
+            "available".to_string()
+        } else {
+            "missing".to_string()
+        },
         version: None,
     });
 
@@ -195,7 +215,11 @@ pub fn check_builtin_services() -> Result<Vec<BuiltinServiceInfo>> {
     services.push(BuiltinServiceInfo {
         name: "codebase-memory-mcp".to_string(),
         binary_path: cbm_paths[0].to_string_lossy().to_string(),
-        status: if cbm_exists { "available".to_string() } else { "missing".to_string() },
+        status: if cbm_exists {
+            "available".to_string()
+        } else {
+            "missing".to_string()
+        },
         version: None,
     });
 
@@ -274,11 +298,18 @@ fn is_server_running(name: &str) -> bool {
 /// Spawns the configured command and tracks the child process so it can be
 /// stopped later via [`stop_mcp_server`].
 pub async fn start_mcp_server(name: String) -> Result<String> {
-    let config = get_mcp_server_config(name.clone())?
-        .ok_or_else(|| napi::Error::new(napi::Status::InvalidArg, format!("MCP server not found: {}", name)))?;
+    let config = get_mcp_server_config(name.clone())?.ok_or_else(|| {
+        napi::Error::new(
+            napi::Status::InvalidArg,
+            format!("MCP server not found: {}", name),
+        )
+    })?;
 
     let cmd = config.command.ok_or_else(|| {
-        napi::Error::new(napi::Status::InvalidArg, format!("No command configured for {}", name))
+        napi::Error::new(
+            napi::Status::InvalidArg,
+            format!("No command configured for {}", name),
+        )
     })?;
 
     // Check if already running
@@ -302,7 +333,12 @@ pub async fn start_mcp_server(name: String) -> Result<String> {
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
         .spawn()
-        .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("Failed to spawn MCP server '{}': {}", name, e)))?;
+        .map_err(|e| {
+            napi::Error::new(
+                napi::Status::GenericFailure,
+                format!("Failed to spawn MCP server '{}': {}", name, e),
+            )
+        })?;
 
     let pid = child.id().unwrap_or(0);
 
@@ -310,7 +346,10 @@ pub async fn start_mcp_server(name: String) -> Result<String> {
     if let Ok(mut procs) = mcp_registry().processes.lock() {
         procs.insert(name.clone(), Arc::new(tokio::sync::Mutex::new(child)));
     } else {
-        return Err(napi::Error::new(napi::Status::GenericFailure, "Failed to track MCP server process"));
+        return Err(napi::Error::new(
+            napi::Status::GenericFailure,
+            "Failed to track MCP server process",
+        ));
     }
 
     tracing::info!(server = %name, pid, "MCP server started");
@@ -321,10 +360,16 @@ pub async fn start_mcp_server(name: String) -> Result<String> {
 pub async fn stop_mcp_server(name: String) -> Result<()> {
     let child_arc = {
         let mut procs = mcp_registry().processes.lock().map_err(|_| {
-            napi::Error::new(napi::Status::GenericFailure, "Failed to lock process registry")
+            napi::Error::new(
+                napi::Status::GenericFailure,
+                "Failed to lock process registry",
+            )
         })?;
         procs.remove(&name).ok_or_else(|| {
-            napi::Error::new(napi::Status::InvalidArg, format!("MCP server '{}' is not running", name))
+            napi::Error::new(
+                napi::Status::InvalidArg,
+                format!("MCP server '{}' is not running", name),
+            )
         })?
     };
 

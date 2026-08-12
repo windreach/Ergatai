@@ -125,7 +125,10 @@ impl Watchdog {
         tokio::spawn(async move {
             let mut check_interval = interval(TokioDuration::from_secs(config.check_interval_secs));
 
-            info!("Watchdog started with check interval {}s", config.check_interval_secs);
+            info!(
+                "Watchdog started with check interval {}s",
+                config.check_interval_secs
+            );
 
             loop {
                 tokio::select! {
@@ -166,11 +169,7 @@ impl Watchdog {
     ///
     /// When an agent is executing a long-running task, it can call this to extend
     /// the heartbeat timeout. The watchdog will not reclaim locks until `busy_until`.
-    pub async fn mark_busy(
-        &self,
-        session_id: &str,
-        busy_duration_secs: u64,
-    ) -> ErgataiResult<()> {
+    pub async fn mark_busy(&self, session_id: &str, busy_duration_secs: u64) -> ErgataiResult<()> {
         if !self.config.task_aware {
             debug!("Task-aware heartbeat disabled, ignoring mark_busy");
             return Ok(());
@@ -257,14 +256,15 @@ impl Watchdog {
 
                 // Calculate timeout threshold
                 let heartbeat_interval = token.heartbeat_interval_secs as i64;
-                let timeout_threshold = Duration::seconds(
-                    heartbeat_interval * config.timeout_multiplier as i64,
-                );
+                let timeout_threshold =
+                    Duration::seconds(heartbeat_interval * config.timeout_multiplier as i64);
                 let time_since_heartbeat = now - token.heartbeat_at;
 
                 // Check if timeout
                 if time_since_heartbeat > timeout_threshold {
-                    let state = states.entry(token_id.clone()).or_insert(TimeoutState::Normal);
+                    let state = states
+                        .entry(token_id.clone())
+                        .or_insert(TimeoutState::Normal);
 
                     match state {
                         TimeoutState::Normal => {
@@ -278,11 +278,14 @@ impl Watchdog {
                             actions.push(StateAction {
                                 token_id,
                                 session_id,
-                                kind: StateActionKind::SetState(TimeoutState::GracePeriod1 { since: now }),
+                                kind: StateActionKind::SetState(TimeoutState::GracePeriod1 {
+                                    since: now,
+                                }),
                             });
                         }
                         TimeoutState::GracePeriod1 { since } => {
-                            let grace_duration = Duration::seconds(config.grace_period_1_secs as i64);
+                            let grace_duration =
+                                Duration::seconds(config.grace_period_1_secs as i64);
                             if now - *since > grace_duration {
                                 warn!(
                                     token_id = %token_id,
@@ -292,12 +295,15 @@ impl Watchdog {
                                 actions.push(StateAction {
                                     token_id,
                                     session_id,
-                                    kind: StateActionKind::SetState(TimeoutState::GracePeriod2 { since: now }),
+                                    kind: StateActionKind::SetState(TimeoutState::GracePeriod2 {
+                                        since: now,
+                                    }),
                                 });
                             }
                         }
                         TimeoutState::GracePeriod2 { since } => {
-                            let grace_duration = Duration::seconds(config.grace_period_2_secs as i64);
+                            let grace_duration =
+                                Duration::seconds(config.grace_period_2_secs as i64);
                             if now - *since > grace_duration {
                                 error!(
                                     token_id = %token_id,
@@ -395,7 +401,10 @@ impl Watchdog {
                 let file_path = &lock.file_path;
 
                 // Release the lock
-                if let Err(e) = lock_manager.release_lock(file_token.id.as_str(), file_path).await {
+                if let Err(e) = lock_manager
+                    .release_lock(file_token.id.as_str(), file_path)
+                    .await
+                {
                     error!(
                         token_id = token_id,
                         file_token_id = file_token.id.as_str(),
@@ -456,7 +465,10 @@ impl Watchdog {
 
     /// Handle ACP disconnect (immediately reclaim all tokens for session)
     pub async fn handle_acp_disconnect(&self, session_id: &str) -> ErgataiResult<()> {
-        info!(session_id = session_id, "ACP disconnect detected, reclaiming all tokens");
+        info!(
+            session_id = session_id,
+            "ACP disconnect detected, reclaiming all tokens"
+        );
 
         // Get all active locks for this session (by session_id, not token_id)
         let locks = self.lock_manager.get_locks_by_session(session_id)?;
@@ -484,7 +496,11 @@ impl Watchdog {
 
         // Release each lock using its own token_id (FileToken ID, not SystemToken ID)
         for lock in &locks {
-            if let Err(e) = self.lock_manager.release_lock(lock.token_id.as_str(), &lock.file_path).await {
+            if let Err(e) = self
+                .lock_manager
+                .release_lock(lock.token_id.as_str(), &lock.file_path)
+                .await
+            {
                 error!(
                     session_id = session_id,
                     file_path = %lock.file_path,
@@ -554,9 +570,7 @@ mod tests {
         let db_path = temp_dir.path().join("test_locks.db");
         let project_root = temp_dir.path().to_path_buf();
 
-        let lock_manager = Arc::new(
-            FileLockManager::new(&db_path, project_root, None).unwrap(),
-        );
+        let lock_manager = Arc::new(FileLockManager::new(&db_path, project_root, None).unwrap());
 
         (temp_dir, lock_manager)
     }
@@ -688,7 +702,9 @@ mod tests {
         lock_manager.register_system_token(&sys_token).unwrap();
 
         // Manually set heartbeat to past to trigger timeout
-        lock_manager.set_heartbeat_past(sys_token.id.as_str(), 10).unwrap();
+        lock_manager
+            .set_heartbeat_past(sys_token.id.as_str(), 10)
+            .unwrap();
 
         let watchdog = Watchdog::new(lock_manager.clone(), config);
         let timeout_states = Arc::clone(&watchdog.timeout_states);
@@ -787,7 +803,9 @@ mod tests {
         lock_manager.register_system_token(&sys_token).unwrap();
 
         // Manually set heartbeat to past
-        lock_manager.set_heartbeat_past(sys_token.id.as_str(), 10).unwrap();
+        lock_manager
+            .set_heartbeat_past(sys_token.id.as_str(), 10)
+            .unwrap();
 
         let watchdog = Watchdog::new(lock_manager.clone(), config);
         let timeout_states = Arc::clone(&watchdog.timeout_states);
@@ -813,7 +831,9 @@ mod tests {
         }
 
         // Update heartbeat to now (simulate heartbeat arriving)
-        lock_manager.update_heartbeat(sys_token.id.as_str()).unwrap();
+        lock_manager
+            .update_heartbeat(sys_token.id.as_str())
+            .unwrap();
 
         // Second check - should reset state (remove from timeout_states)
         Watchdog::check_tokens(
@@ -856,7 +876,9 @@ mod tests {
         lock_manager.register_system_token(&sys_token).unwrap();
 
         // Manually set heartbeat to past
-        lock_manager.set_heartbeat_past(sys_token.id.as_str(), 10).unwrap();
+        lock_manager
+            .set_heartbeat_past(sys_token.id.as_str(), 10)
+            .unwrap();
 
         let watchdog = Watchdog::new(lock_manager.clone(), config);
         let timeout_states = Arc::clone(&watchdog.timeout_states);
@@ -945,7 +967,9 @@ mod tests {
         assert_eq!(locks.len(), 1);
 
         // Manually set heartbeat to past
-        lock_manager.set_heartbeat_past(sys_token.id.as_str(), 10).unwrap();
+        lock_manager
+            .set_heartbeat_past(sys_token.id.as_str(), 10)
+            .unwrap();
 
         let watchdog = Watchdog::new(lock_manager.clone(), config);
         let timeout_states = Arc::clone(&watchdog.timeout_states);
@@ -1039,9 +1063,15 @@ mod tests {
         lock_manager.register_system_token(&sys_token3).unwrap();
 
         // Set all heartbeats to past
-        lock_manager.set_heartbeat_past(sys_token1.id.as_str(), 10).unwrap();
-        lock_manager.set_heartbeat_past(sys_token2.id.as_str(), 10).unwrap();
-        lock_manager.set_heartbeat_past(sys_token3.id.as_str(), 10).unwrap();
+        lock_manager
+            .set_heartbeat_past(sys_token1.id.as_str(), 10)
+            .unwrap();
+        lock_manager
+            .set_heartbeat_past(sys_token2.id.as_str(), 10)
+            .unwrap();
+        lock_manager
+            .set_heartbeat_past(sys_token3.id.as_str(), 10)
+            .unwrap();
 
         let watchdog = Watchdog::new(lock_manager.clone(), config);
         let timeout_states = Arc::clone(&watchdog.timeout_states);

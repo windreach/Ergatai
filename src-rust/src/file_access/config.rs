@@ -107,16 +107,20 @@ impl ConfigManager {
     /// # Arguments
     /// * `project_root` - Project root directory
     /// * `reload_interval` - How often to check for config changes (None = disabled)
-    pub fn new(project_root: &Path, reload_interval: Option<Duration>) -> Result<Self, ErgataiError> {
+    pub fn new(
+        project_root: &Path,
+        reload_interval: Option<Duration>,
+    ) -> Result<Self, ErgataiError> {
         let config_path = project_root.join(".ergatai").join("config.json");
 
         let (config, initial_mtime) = if config_path.exists() {
-            let mtime = fs::metadata(&config_path)
-                .and_then(|m| m.modified())
-                .ok();
+            let mtime = fs::metadata(&config_path).and_then(|m| m.modified()).ok();
             (Self::load_config(&config_path)?, mtime)
         } else {
-            debug!("No project config found at {:?}, using defaults", config_path);
+            debug!(
+                "No project config found at {:?}, using defaults",
+                config_path
+            );
             (FileAccessConfig::default(), None)
         };
 
@@ -134,11 +138,17 @@ impl ConfigManager {
     /// Load configuration from file
     fn load_config(config_path: &Path) -> Result<FileAccessConfig, ErgataiError> {
         let content = fs::read_to_string(config_path).map_err(|e| {
-            ErgataiError::internal(format!("Failed to read config file {:?}: {}", config_path, e))
+            ErgataiError::internal(format!(
+                "Failed to read config file {:?}: {}",
+                config_path, e
+            ))
         })?;
 
         let config: FileAccessConfig = serde_json::from_str(&content).map_err(|e| {
-            ErgataiError::internal(format!("Failed to parse config file {:?}: {}", config_path, e))
+            ErgataiError::internal(format!(
+                "Failed to parse config file {:?}: {}",
+                config_path, e
+            ))
         })?;
 
         info!(
@@ -176,10 +186,13 @@ impl ConfigManager {
             }
         }
 
-        self.config.read().unwrap_or_else(|e| {
-            tracing::error!("config RwLock poisoned, recovering: {}", e);
-            e.into_inner()
-        }).clone()
+        self.config
+            .read()
+            .unwrap_or_else(|e| {
+                tracing::error!("config RwLock poisoned, recovering: {}", e);
+                e.into_inner()
+            })
+            .clone()
     }
 
     /// Reload configuration if the file has changed
@@ -190,9 +203,8 @@ impl ConfigManager {
             return Ok(false);
         }
 
-        let metadata = fs::metadata(&config_path).map_err(|e| {
-            ErgataiError::internal(format!("Failed to get config metadata: {}", e))
-        })?;
+        let metadata = fs::metadata(&config_path)
+            .map_err(|e| ErgataiError::internal(format!("Failed to get config metadata: {}", e)))?;
 
         let modified = metadata.modified().map_err(|e| {
             ErgataiError::internal(format!("Failed to get modification time: {}", e))
@@ -213,9 +225,10 @@ impl ConfigManager {
 
         // File has changed, reload
         let new_config = Self::load_config(&config_path)?;
-        let mut config = self.config.write().map_err(|e| {
-            ErgataiError::internal(format!("Config lock poisoned: {}", e))
-        })?;
+        let mut config = self
+            .config
+            .write()
+            .map_err(|e| ErgataiError::internal(format!("Config lock poisoned: {}", e)))?;
         *config = new_config;
         let mut last_modified = self.last_modified.write().map_err(|e| {
             ErgataiError::internal(format!("Config last_modified write lock poisoned: {}", e))
@@ -275,9 +288,10 @@ impl ConfigManager {
         let config_path = self.project_root.join(".ergatai").join("config.json");
         if config_path.exists() {
             let new_config = Self::load_config(&config_path)?;
-            let mut config = self.config.write().map_err(|e| {
-                ErgataiError::internal(format!("Config lock poisoned: {}", e))
-            })?;
+            let mut config = self
+                .config
+                .write()
+                .map_err(|e| ErgataiError::internal(format!("Config lock poisoned: {}", e)))?;
             *config = new_config;
             info!("Configuration manually reloaded");
         }

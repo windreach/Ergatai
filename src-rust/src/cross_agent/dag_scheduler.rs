@@ -38,11 +38,7 @@ impl DagScheduler {
     }
 
     /// Create a new DAG scheduler with the given context
-    pub fn with_context(
-        project_root: PathBuf,
-        graph: TaskGraph,
-        context: DagContext,
-    ) -> Self {
+    pub fn with_context(project_root: PathBuf, graph: TaskGraph, context: DagContext) -> Self {
         Self {
             graph: Arc::new(Mutex::new(graph)),
             context: Arc::new(Mutex::new(context)),
@@ -63,11 +59,7 @@ impl DagScheduler {
     }
 
     /// Record outputs from a completed node into the context
-    pub async fn record_outputs(
-        &self,
-        node_id: &str,
-        outputs: HashMap<String, String>,
-    ) {
+    pub async fn record_outputs(&self, node_id: &str, outputs: HashMap<String, String>) {
         let mut ctx = self.context.lock().await;
         ctx.record_output(node_id, outputs);
     }
@@ -130,9 +122,11 @@ impl DagScheduler {
                     plan_content,
                     plan_file: plan_file.to_string_lossy().to_string(),
                     target_agent: node.agent.clone(),
-                    priority: crate::file_access::conflict_arbitration::priority_to_number(&node.priority)
-                        .map(|p| p as u32)
-                        .unwrap_or(2),
+                    priority: crate::file_access::conflict_arbitration::priority_to_number(
+                        &node.priority,
+                    )
+                    .map(|p| p as u32)
+                    .unwrap_or(2),
                     timeout_secs: node.timeout,
                     dag_id: Some(dag_id),
                 };
@@ -373,7 +367,10 @@ impl DagScheduler {
                         lines.push(format!("  - {}: {}", k, v));
                     }
                 } else {
-                    lines.push(format!("\n**{}** ({}) — completed (no outputs recorded)", dep_name, dep_id));
+                    lines.push(format!(
+                        "\n**{}** ({}) — completed (no outputs recorded)",
+                        dep_name, dep_id
+                    ));
                 }
             } else {
                 lines.push(format!("\n**{}** ({}) — completed", dep_name, dep_id));
@@ -425,11 +422,7 @@ impl DagScheduler {
         for node in ready_nodes {
             match self.generate_and_submit(&node).await {
                 Ok(task_id) => {
-                    tracing::info!(
-                        "Submitted newly ready node {} as task {}",
-                        node.id,
-                        task_id
-                    );
+                    tracing::info!("Submitted newly ready node {} as task {}", node.id, task_id);
                     newly_submitted.push(task_id);
                 }
                 Err(e) => {
@@ -458,14 +451,15 @@ impl DagScheduler {
                     let bus = crate::nats::EventBus::new(conn);
                     let graph = self.graph.lock().await;
                     let total = graph.nodes.len() as u32;
-                    let (completed, failed) = graph.nodes.iter().fold(
-                        (0u32, 0u32),
-                        |(c, f), n| match n.status {
-                            TaskStatus::Completed => (c + 1, f),
-                            TaskStatus::Failed => (c, f + 1),
-                            _ => (c, f),
-                        },
-                    );
+                    let (completed, failed) =
+                        graph
+                            .nodes
+                            .iter()
+                            .fold((0u32, 0u32), |(c, f), n| match n.status {
+                                TaskStatus::Completed => (c + 1, f),
+                                TaskStatus::Failed => (c, f + 1),
+                                _ => (c, f),
+                            });
                     drop(graph);
 
                     let payload = crate::nats::DagCompletePayload {
@@ -492,14 +486,18 @@ impl DagScheduler {
             let mut graph = self.graph.lock().await;
 
             let should_retry = graph.retry_failed(node_id)?;
-            let node = graph
-                .find_node(node_id)
-                .ok_or_else(|| ErgataiError::InvalidArgument(format!("Node not found: {}", node_id)))?;
+            let node = graph.find_node(node_id).ok_or_else(|| {
+                ErgataiError::InvalidArgument(format!("Node not found: {}", node_id))
+            })?;
             (should_retry, node.retry_count, node.clone())
         }; // Lock released here
 
         if should_retry {
-            tracing::info!("Node {} failed, retrying (attempt {})", node_id, retry_count);
+            tracing::info!(
+                "Node {} failed, retrying (attempt {})",
+                node_id,
+                retry_count
+            );
 
             // Submit without holding lock
             match self.generate_and_submit(&node_clone).await {
@@ -538,13 +536,14 @@ impl DagScheduler {
             let graph = self.graph.lock().await;
             let mut queue = vec![failed_id.to_string()];
             let mut to_skip = Vec::new();
-            let mut seen = std::collections::HashSet::new();  // O(1) lookup
+            let mut seen = std::collections::HashSet::new(); // O(1) lookup
 
             while let Some(current) = queue.pop() {
                 for node in &graph.nodes {
                     if node.depends_on.contains(&current)
                         && node.status == TaskStatus::Pending
-                        && seen.insert(&node.id)  // O(1) check + insert
+                        && seen.insert(&node.id)
+                    // O(1) check + insert
                     {
                         to_skip.push(node.id.clone());
                         queue.push(node.id.clone());
@@ -594,7 +593,8 @@ impl DagScheduler {
         // Serialize graph
         let graph_json = {
             let graph = self.graph.lock().await;
-            serde_json::to_string(&*graph).map_err(|e| ErgataiError::json_with_source("Failed to serialize graph", e))?
+            serde_json::to_string(&*graph)
+                .map_err(|e| ErgataiError::json_with_source("Failed to serialize graph", e))?
         };
         let graph_file = ergatai_dir.join("dag-state.json");
         tokio::fs::write(&graph_file, graph_json.as_bytes()).await?;
@@ -602,7 +602,8 @@ impl DagScheduler {
         // Serialize context
         let context_json = {
             let ctx = self.context.lock().await;
-            serde_json::to_string(&*ctx).map_err(|e| ErgataiError::json_with_source("Failed to serialize context", e))?
+            serde_json::to_string(&*ctx)
+                .map_err(|e| ErgataiError::json_with_source("Failed to serialize context", e))?
         };
         let context_file = ergatai_dir.join("dag-context.json");
         tokio::fs::write(&context_file, context_json.as_bytes()).await?;
@@ -629,7 +630,8 @@ impl DagScheduler {
     /// Get a JSON snapshot of the current graph state
     pub async fn graph_snapshot(&self) -> ErgataiResult<String> {
         let graph = self.graph.lock().await;
-        serde_json::to_string(&*graph).map_err(|e| ErgataiError::json_with_source("Failed to serialize graph", e))
+        serde_json::to_string(&*graph)
+            .map_err(|e| ErgataiError::json_with_source("Failed to serialize graph", e))
     }
 }
 
@@ -684,8 +686,7 @@ mod tests {
     fn sample_graph() -> TaskGraph {
         TaskGraph::new(vec![
             TaskNode::new("n1", "agent-a", "Task A"),
-            TaskNode::new("n2", "agent-b", "Task B")
-                .with_dependencies(vec!["n1".into()]),
+            TaskNode::new("n2", "agent-b", "Task B").with_dependencies(vec!["n1".into()]),
         ])
     }
 
@@ -756,9 +757,7 @@ mod tests {
         assert!(get_dag_scheduler().is_some());
 
         // Replace with second scheduler
-        let graph2 = TaskGraph::new(vec![
-            TaskNode::new("x1", "agent", "Task X"),
-        ]);
+        let graph2 = TaskGraph::new(vec![TaskNode::new("x1", "agent", "Task X")]);
         set_dag_scheduler(DagScheduler::new(PathBuf::from("/tmp"), graph2));
 
         // Should have the new one
@@ -777,12 +776,11 @@ mod tests {
         let _ = &mut node_a; // use it
         let node_b = TaskNode::new("n2", "agent-b", "Fix issues")
             .with_dependencies(vec!["n1".into()])
-            .with_input("Fix issues found in review: {{n1.review_result}}. Query: {{global.user_query}}");
+            .with_input(
+                "Fix issues found in review: {{n1.review_result}}. Query: {{global.user_query}}",
+            );
 
-        let graph = TaskGraph::new(vec![
-            TaskNode::new("n1", "agent-a", "Review code"),
-            node_b,
-        ]);
+        let graph = TaskGraph::new(vec![TaskNode::new("n1", "agent-a", "Review code"), node_b]);
 
         let temp_dir = tempfile::tempdir().unwrap();
         let ctx = DagContext::new({
@@ -795,7 +793,10 @@ mod tests {
 
         // Simulate: node n1 completes with outputs
         let mut outputs = HashMap::new();
-        outputs.insert("review_result".to_string(), "3 issues found: unused imports".to_string());
+        outputs.insert(
+            "review_result".to_string(),
+            "3 issues found: unused imports".to_string(),
+        );
         scheduler.record_outputs("n1", outputs).await;
 
         // Now generate plan for n2 and verify template was rendered
@@ -837,5 +838,3 @@ mod tests {
         );
     }
 }
-
-

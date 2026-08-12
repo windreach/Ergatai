@@ -7,7 +7,7 @@ use std::process::{Child, Command};
 use std::time::Duration;
 
 use tokio::time::sleep;
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
 
 use crate::error::{ErgataiError, ErgataiResult};
 
@@ -54,12 +54,15 @@ impl NatsServer {
 
         let child = Command::new(&binary_path)
             .args([
-                "-p", &port.to_string(),
-                "-a", "127.0.0.1",  // Bind to localhost only
-                "--jetstream",       // Enable JetStream
-                "-sd", store_dir.to_str().ok_or_else(|| {
-                    ErgataiError::internal("Invalid NATS store directory path")
-                })?,  // Store directory for persistence
+                "-p",
+                &port.to_string(),
+                "-a",
+                "127.0.0.1",   // Bind to localhost only
+                "--jetstream", // Enable JetStream
+                "-sd",
+                store_dir
+                    .to_str()
+                    .ok_or_else(|| ErgataiError::internal("Invalid NATS store directory path"))?, // Store directory for persistence
             ])
             .spawn()?;
 
@@ -176,7 +179,11 @@ impl NatsServer {
 
         Err(ErgataiError::IoError(std::io::Error::new(
             std::io::ErrorKind::AddrInUse,
-            format!("No available port in range [{}, {})", DEFAULT_PORT, DEFAULT_PORT + MAX_PORT_ATTEMPTS),
+            format!(
+                "No available port in range [{}, {})",
+                DEFAULT_PORT,
+                DEFAULT_PORT + MAX_PORT_ATTEMPTS
+            ),
         )))
     }
 
@@ -254,7 +261,10 @@ mod tests {
 
         if listener.is_ok() {
             // If we successfully bound 4222, find_available_port should skip it
-            assert!(port > DEFAULT_PORT, "Should find next available port when 4222 is busy");
+            assert!(
+                port > DEFAULT_PORT,
+                "Should find next available port when 4222 is busy"
+            );
         }
         // If listener failed, 4222 is already in use; any valid port is acceptable
         assert!(port >= DEFAULT_PORT);

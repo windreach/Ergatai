@@ -204,23 +204,45 @@ pub fn get_skill_detail(name: String) -> Result<SkillDetail> {
     }
 
     let base_paths = [
-        PathBuf::from(".claude").join("skills").join(&name).join("SKILL.md"),
-        PathBuf::from(".agents").join("skills").join(&name).join("SKILL.md"),
+        PathBuf::from(".claude")
+            .join("skills")
+            .join(&name)
+            .join("SKILL.md"),
+        PathBuf::from(".agents")
+            .join("skills")
+            .join(&name)
+            .join("SKILL.md"),
     ];
 
     let mut search_dirs: Vec<PathBuf> = base_paths.to_vec();
 
     // Add home-based paths
     if let Some(home) = dirs::home_dir() {
-        search_dirs.push(home.join(".claude").join("skills").join(&name).join("SKILL.md"));
+        search_dirs.push(
+            home.join(".claude")
+                .join("skills")
+                .join(&name)
+                .join("SKILL.md"),
+        );
     }
     if let Some(config_dir) = dirs::config_dir() {
-        search_dirs.push(config_dir.join("ergatai").join("skills").join(&name).join("SKILL.md"));
+        search_dirs.push(
+            config_dir
+                .join("ergatai")
+                .join("skills")
+                .join(&name)
+                .join("SKILL.md"),
+        );
     }
 
     // Add cwd-based paths
     if let Ok(cwd) = std::env::current_dir() {
-        search_dirs.push(cwd.join(".claude").join("skills").join(&name).join("SKILL.md"));
+        search_dirs.push(
+            cwd.join(".claude")
+                .join("skills")
+                .join(&name)
+                .join("SKILL.md"),
+        );
         search_dirs.push(cwd.join("skills").join(&name).join("SKILL.md"));
     }
 
@@ -259,7 +281,10 @@ description: A test skill for unit testing
 
 Some content here.
 "#;
-        assert_eq!(extract_description(content), "A test skill for unit testing");
+        assert_eq!(
+            extract_description(content),
+            "A test skill for unit testing"
+        );
     }
 
     #[test]

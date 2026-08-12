@@ -62,11 +62,7 @@ impl DagContext {
     /// Record outputs from a completed node
     ///
     /// These become available as `{{node_id.key}}` in downstream templates.
-    pub fn record_output(
-        &mut self,
-        node_id: impl Into<String>,
-        outputs: HashMap<String, String>,
-    ) {
+    pub fn record_output(&mut self, node_id: impl Into<String>, outputs: HashMap<String, String>) {
         let id = node_id.into();
         debug!(node_id = id, keys = ?outputs.keys().collect::<Vec<_>>(), "Recording node outputs");
         self.node_outputs.insert(id, outputs);
@@ -99,8 +95,7 @@ impl DagContext {
     /// Build a flat `key → value` map from all sources
     fn build_context_map(&self) -> HashMap<String, String> {
         let mut map = HashMap::with_capacity(
-            self.global_vars.len()
-                + self.node_outputs.values().map(|m| m.len()).sum::<usize>(),
+            self.global_vars.len() + self.node_outputs.values().map(|m| m.len()).sum::<usize>(),
         );
 
         // Global variables → `global.{key}`

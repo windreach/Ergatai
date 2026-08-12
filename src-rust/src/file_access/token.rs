@@ -180,8 +180,16 @@ impl FileToken {
         heartbeat_interval_secs: u64,
     ) -> Self {
         Self::with_priority(
-            agent_id, session_id, system_token_id, scope, mode,
-            reason, approved_by, ttl_secs, heartbeat_interval_secs, None,
+            agent_id,
+            session_id,
+            system_token_id,
+            scope,
+            mode,
+            reason,
+            approved_by,
+            ttl_secs,
+            heartbeat_interval_secs,
+            None,
         )
     }
 
@@ -323,7 +331,6 @@ pub struct FileLock {
     /// Lock status.
     pub status: TokenStatus,
 }
-
 
 /// Normalize a path for scope matching (H2 fix).
 ///

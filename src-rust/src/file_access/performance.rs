@@ -127,7 +127,10 @@ impl LockCache {
 
                 // If still full, evict oldest entries
                 if cache.len() >= self.max_size {
-                    let mut entries: Vec<_> = cache.iter().map(|(k, v)| (k.clone(), v.cached_at)).collect();
+                    let mut entries: Vec<_> = cache
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.cached_at))
+                        .collect();
                     entries.sort_by_key(|(_, t)| *t);
 
                     let to_evict = cache.len() - self.max_size + 1;
@@ -335,7 +338,8 @@ impl PartialOrd for AsyncLockRequest {
 impl Ord for AsyncLockRequest {
     fn cmp(&self, other: &Self) -> Ordering {
         // Higher priority first
-        self.priority.cmp(&other.priority)
+        self.priority
+            .cmp(&other.priority)
             // For same priority, earlier request first (lower timestamp = greater)
             .then_with(|| other.requested_at_ms.cmp(&self.requested_at_ms))
     }
@@ -360,9 +364,10 @@ impl AsyncLockQueue {
 
     /// Enqueue a lock request — O(log n)
     pub fn enqueue(&self, request: AsyncLockRequest) -> Result<(), ErgataiError> {
-        let mut queue = self.queue.lock().map_err(|e| {
-            ErgataiError::internal(format!("Failed to acquire lock: {}", e))
-        })?;
+        let mut queue = self
+            .queue
+            .lock()
+            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
 
         if queue.len() >= self.max_size {
             return Err(ErgataiError::InvalidArgument(format!(
@@ -373,10 +378,7 @@ impl AsyncLockQueue {
 
         queue.push(request);
 
-        debug!(
-            queue_size = queue.len(),
-            "Enqueued async lock request"
-        );
+        debug!(queue_size = queue.len(), "Enqueued async lock request");
 
         Ok(())
     }
@@ -454,10 +456,7 @@ mod tests {
         );
 
         let batch = BatchOperations::new(cache);
-        let results = batch.batch_check_locked(&[
-            "test1.rs".to_string(),
-            "test2.rs".to_string(),
-        ]);
+        let results = batch.batch_check_locked(&["test1.rs".to_string(), "test2.rs".to_string()]);
 
         assert_eq!(results.get("test1.rs"), Some(&true));
         assert_eq!(results.get("test2.rs"), Some(&false));
@@ -467,29 +466,35 @@ mod tests {
     fn test_async_lock_queue_priority() {
         let queue = AsyncLockQueue::new(100);
 
-        queue.enqueue(AsyncLockRequest {
-            token_id: "token1".to_string(),
-            file_path: "test.rs".to_string(),
-            mode: "WRITE".to_string(),
-            priority: 1,
-            requested_at_ms: 0,
-        }).unwrap();
+        queue
+            .enqueue(AsyncLockRequest {
+                token_id: "token1".to_string(),
+                file_path: "test.rs".to_string(),
+                mode: "WRITE".to_string(),
+                priority: 1,
+                requested_at_ms: 0,
+            })
+            .unwrap();
 
-        queue.enqueue(AsyncLockRequest {
-            token_id: "token2".to_string(),
-            file_path: "test.rs".to_string(),
-            mode: "WRITE".to_string(),
-            priority: 5,
-            requested_at_ms: 0,
-        }).unwrap();
+        queue
+            .enqueue(AsyncLockRequest {
+                token_id: "token2".to_string(),
+                file_path: "test.rs".to_string(),
+                mode: "WRITE".to_string(),
+                priority: 5,
+                requested_at_ms: 0,
+            })
+            .unwrap();
 
-        queue.enqueue(AsyncLockRequest {
-            token_id: "token3".to_string(),
-            file_path: "test.rs".to_string(),
-            mode: "WRITE".to_string(),
-            priority: 3,
-            requested_at_ms: 0,
-        }).unwrap();
+        queue
+            .enqueue(AsyncLockRequest {
+                token_id: "token3".to_string(),
+                file_path: "test.rs".to_string(),
+                mode: "WRITE".to_string(),
+                priority: 3,
+                requested_at_ms: 0,
+            })
+            .unwrap();
 
         // Should dequeue in priority order: 5, 3, 1
         let req1 = queue.dequeue().unwrap();
@@ -524,7 +529,12 @@ mod tests {
     fn test_lock_cache_clear() {
         let cache = LockCache::new(60, 1000);
         for i in 0..5 {
-            cache.insert(format!("f{}.rs", i), "WRITE".into(), "t".into(), "ag".into());
+            cache.insert(
+                format!("f{}.rs", i),
+                "WRITE".into(),
+                "t".into(),
+                "ag".into(),
+            );
         }
         assert!(cache.get("f0.rs").is_some());
 
@@ -545,8 +555,8 @@ mod tests {
         assert_eq!(s0.inserts, 0);
 
         cache.insert("a.rs".into(), "WRITE".into(), "t".into(), "ag".into());
-        let _ = cache.get("a.rs");      // hit
-        let _ = cache.get("miss.rs");   // miss
+        let _ = cache.get("a.rs"); // hit
+        let _ = cache.get("miss.rs"); // miss
 
         let s1 = cache.get_stats();
         assert_eq!(s1.inserts, 1);
@@ -639,16 +649,26 @@ mod tests {
         let queue = AsyncLockQueue::new(100);
         assert_eq!(queue.size(), 0);
 
-        queue.enqueue(AsyncLockRequest {
-            token_id: "t".into(), file_path: "f".into(), mode: "W".into(),
-            priority: 1, requested_at_ms: 0,
-        }).unwrap();
+        queue
+            .enqueue(AsyncLockRequest {
+                token_id: "t".into(),
+                file_path: "f".into(),
+                mode: "W".into(),
+                priority: 1,
+                requested_at_ms: 0,
+            })
+            .unwrap();
         assert_eq!(queue.size(), 1);
 
-        queue.enqueue(AsyncLockRequest {
-            token_id: "t2".into(), file_path: "f2".into(), mode: "W".into(),
-            priority: 1, requested_at_ms: 0,
-        }).unwrap();
+        queue
+            .enqueue(AsyncLockRequest {
+                token_id: "t2".into(),
+                file_path: "f2".into(),
+                mode: "W".into(),
+                priority: 1,
+                requested_at_ms: 0,
+            })
+            .unwrap();
         assert_eq!(queue.size(), 2);
 
         queue.dequeue();
@@ -659,13 +679,15 @@ mod tests {
     fn test_async_lock_queue_clear() {
         let queue = AsyncLockQueue::new(100);
         for i in 0..5 {
-            queue.enqueue(AsyncLockRequest {
-                token_id: format!("t{}", i),
-                file_path: format!("f{}.rs", i),
-                mode: "W".into(),
-                priority: i,
-                requested_at_ms: i as u64,
-            }).unwrap();
+            queue
+                .enqueue(AsyncLockRequest {
+                    token_id: format!("t{}", i),
+                    file_path: format!("f{}.rs", i),
+                    mode: "W".into(),
+                    priority: i,
+                    requested_at_ms: i as u64,
+                })
+                .unwrap();
         }
         assert_eq!(queue.size(), 5);
 
@@ -677,18 +699,31 @@ mod tests {
     #[test]
     fn test_async_lock_queue_enqueue_when_full_returns_error() {
         let queue = AsyncLockQueue::new(2);
-        queue.enqueue(AsyncLockRequest {
-            token_id: "t1".into(), file_path: "f1".into(), mode: "W".into(),
-            priority: 1, requested_at_ms: 0,
-        }).unwrap();
-        queue.enqueue(AsyncLockRequest {
-            token_id: "t2".into(), file_path: "f2".into(), mode: "W".into(),
-            priority: 1, requested_at_ms: 0,
-        }).unwrap();
+        queue
+            .enqueue(AsyncLockRequest {
+                token_id: "t1".into(),
+                file_path: "f1".into(),
+                mode: "W".into(),
+                priority: 1,
+                requested_at_ms: 0,
+            })
+            .unwrap();
+        queue
+            .enqueue(AsyncLockRequest {
+                token_id: "t2".into(),
+                file_path: "f2".into(),
+                mode: "W".into(),
+                priority: 1,
+                requested_at_ms: 0,
+            })
+            .unwrap();
 
         let result = queue.enqueue(AsyncLockRequest {
-            token_id: "t3".into(), file_path: "f3".into(), mode: "W".into(),
-            priority: 1, requested_at_ms: 0,
+            token_id: "t3".into(),
+            file_path: "f3".into(),
+            mode: "W".into(),
+            priority: 1,
+            requested_at_ms: 0,
         });
         assert!(matches!(result, Err(ErgataiError::InvalidArgument(_))));
     }
@@ -704,18 +739,33 @@ mod tests {
         let queue = AsyncLockQueue::new(100);
 
         // Same priority, different timestamps — earlier timestamp dequeues first
-        queue.enqueue(AsyncLockRequest {
-            token_id: "first".into(), file_path: "f".into(), mode: "W".into(),
-            priority: 5, requested_at_ms: 100,
-        }).unwrap();
-        queue.enqueue(AsyncLockRequest {
-            token_id: "second".into(), file_path: "f".into(), mode: "W".into(),
-            priority: 5, requested_at_ms: 200,
-        }).unwrap();
-        queue.enqueue(AsyncLockRequest {
-            token_id: "third".into(), file_path: "f".into(), mode: "W".into(),
-            priority: 5, requested_at_ms: 300,
-        }).unwrap();
+        queue
+            .enqueue(AsyncLockRequest {
+                token_id: "first".into(),
+                file_path: "f".into(),
+                mode: "W".into(),
+                priority: 5,
+                requested_at_ms: 100,
+            })
+            .unwrap();
+        queue
+            .enqueue(AsyncLockRequest {
+                token_id: "second".into(),
+                file_path: "f".into(),
+                mode: "W".into(),
+                priority: 5,
+                requested_at_ms: 200,
+            })
+            .unwrap();
+        queue
+            .enqueue(AsyncLockRequest {
+                token_id: "third".into(),
+                file_path: "f".into(),
+                mode: "W".into(),
+                priority: 5,
+                requested_at_ms: 300,
+            })
+            .unwrap();
 
         assert_eq!(queue.dequeue().unwrap().token_id, "first");
         assert_eq!(queue.dequeue().unwrap().token_id, "second");
@@ -725,12 +775,18 @@ mod tests {
     #[test]
     fn test_async_lock_request_equality() {
         let a = AsyncLockRequest {
-            token_id: "t".into(), file_path: "f".into(), mode: "W".into(),
-            priority: 3, requested_at_ms: 42,
+            token_id: "t".into(),
+            file_path: "f".into(),
+            mode: "W".into(),
+            priority: 3,
+            requested_at_ms: 42,
         };
         let b = AsyncLockRequest {
-            token_id: "different".into(), file_path: "different".into(), mode: "R".into(),
-            priority: 3, requested_at_ms: 42,
+            token_id: "different".into(),
+            file_path: "different".into(),
+            mode: "R".into(),
+            priority: 3,
+            requested_at_ms: 42,
         };
         // Equality is based only on priority + requested_at_ms
         assert!(a == b);
@@ -739,14 +795,19 @@ mod tests {
     #[test]
     fn test_cached_lock_is_expired_directly() {
         let fresh = CachedLock {
-            file_path: "f".into(), mode: "W".into(), token_id: "t".into(),
-            agent_id: "ag".into(), cached_at: Instant::now(),
+            file_path: "f".into(),
+            mode: "W".into(),
+            token_id: "t".into(),
+            agent_id: "ag".into(),
+            cached_at: Instant::now(),
             ttl: Duration::from_secs(60),
         };
         assert!(!fresh.is_expired());
 
         let expired = CachedLock {
-            file_path: "f".into(), mode: "W".into(), token_id: "t".into(),
+            file_path: "f".into(),
+            mode: "W".into(),
+            token_id: "t".into(),
             agent_id: "ag".into(),
             cached_at: Instant::now() - Duration::from_secs(10),
             ttl: Duration::from_secs(1),

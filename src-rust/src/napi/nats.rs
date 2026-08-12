@@ -1,7 +1,7 @@
 //! NAPI bindings for NATS management
 
-use napi_derive::napi;
 use crate::nats;
+use napi_derive::napi;
 
 /// Initialize NATS (start embedded nats-server + connect)
 ///
@@ -16,9 +16,7 @@ pub async fn nats_init() -> napi::Result<u32> {
         .map_err(|e| napi::Error::from_reason(format!("Failed to initialize NATS: {}", e)))?;
 
     // Get the actual port from the running server (may differ from 4222 if it was in use)
-    let port = nats::get_nats_server_port()
-        .await
-        .unwrap_or(4222);
+    let port = nats::get_nats_server_port().await.unwrap_or(4222);
 
     Ok(port as u32)
 }
@@ -88,13 +86,12 @@ pub async fn nats_scan_and_route_mentions(
 ) -> napi::Result<u32> {
     crate::napi::guard();
 
-    let count = crate::cross_agent::message_router::scan_and_route_mentions(
-        &from_agent,
-        &text,
-        thread_id,
-    )
-    .await
-    .map_err(|e| napi::Error::from_reason(format!("Failed to scan and route mentions: {}", e)))?;
+    let count =
+        crate::cross_agent::message_router::scan_and_route_mentions(&from_agent, &text, thread_id)
+            .await
+            .map_err(|e| {
+                napi::Error::from_reason(format!("Failed to scan and route mentions: {}", e))
+            })?;
 
     Ok(count as u32)
 }

@@ -77,7 +77,9 @@ pub fn is_sensitive_path(file_path: &str) -> bool {
     let normalized_path = file_path.replace('\\', "/");
 
     // Use pre-compiled patterns (LazyLock ensures single compilation)
-    COMPILED_PATTERNS.iter().any(|pattern| pattern.matches(&normalized_path))
+    COMPILED_PATTERNS
+        .iter()
+        .any(|pattern| pattern.matches(&normalized_path))
 }
 
 /// Check if a file path is within a sensitive directory

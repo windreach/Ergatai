@@ -3,14 +3,14 @@
 //! Defines the message types used for lock waiting and notification
 //! through the NATS JetStream LOCK_WAITERS stream.
 
-use serde::{Deserialize, Serialize};
 use crate::file_access::FileMode;
+use serde::{Deserialize, Serialize};
 
 /// Lock priority levels for queue ordering
 ///
 /// Higher priority requests are granted first when multiple agents
 /// are waiting for the same file lock.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LockPriority {
     /// System-critical operations (e.g., recovery, cleanup)
@@ -18,15 +18,10 @@ pub enum LockPriority {
     /// High-priority user operations
     High,
     /// Normal operations (default)
+    #[default]
     Normal,
     /// Background tasks, low-priority operations
     Low,
-}
-
-impl Default for LockPriority {
-    fn default() -> Self {
-        Self::Normal
-    }
 }
 
 impl std::fmt::Display for LockPriority {
@@ -147,7 +142,14 @@ impl LockWaitRequest {
         priority: Option<String>,
     ) -> Self {
         let parsed_priority = priority.as_deref().and_then(LockPriority::from_str_opt);
-        Self::new(token_id, agent_id, session_id, file_path, mode, parsed_priority)
+        Self::new(
+            token_id,
+            agent_id,
+            session_id,
+            file_path,
+            mode,
+            parsed_priority,
+        )
     }
 
     /// Get the NATS subject for this request
@@ -180,8 +182,7 @@ impl LockGrantedNotification {
     /// Create a new lock grant notification
     pub fn new(request_id: String, file_path: String) -> Self {
         let granted_at = chrono::Utc::now().to_rfc3339();
-        let expires_at = (chrono::Utc::now() + chrono::Duration::seconds(30))
-            .to_rfc3339();
+        let expires_at = (chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc3339();
 
         Self {
             request_id,
@@ -288,10 +289,8 @@ mod tests {
 
     #[test]
     fn test_lock_release_notification() {
-        let notification = LockReleaseNotification::new(
-            "src/main.rs".to_string(),
-            "token-123".to_string(),
-        );
+        let notification =
+            LockReleaseNotification::new("src/main.rs".to_string(), "token-123".to_string());
 
         assert_eq!(notification.file_path, "src/main.rs");
         assert_eq!(notification.released_by_token_id, "token-123");
@@ -303,10 +302,8 @@ mod tests {
 
     #[test]
     fn test_lock_granted_notification() {
-        let notification = LockGrantedNotification::new(
-            "req-456".to_string(),
-            "src/main.rs".to_string(),
-        );
+        let notification =
+            LockGrantedNotification::new("req-456".to_string(), "src/main.rs".to_string());
 
         assert_eq!(notification.request_id, "req-456");
         assert_eq!(notification.file_path, "src/main.rs");
@@ -339,9 +336,15 @@ mod tests {
 
     #[test]
     fn test_priority_from_string() {
-        assert_eq!(LockPriority::from_str_opt("critical"), Some(LockPriority::Critical));
+        assert_eq!(
+            LockPriority::from_str_opt("critical"),
+            Some(LockPriority::Critical)
+        );
         assert_eq!(LockPriority::from_str_opt("HIGH"), Some(LockPriority::High));
-        assert_eq!(LockPriority::from_str_opt("Normal"), Some(LockPriority::Normal));
+        assert_eq!(
+            LockPriority::from_str_opt("Normal"),
+            Some(LockPriority::Normal)
+        );
         assert_eq!(LockPriority::from_str_opt("low"), Some(LockPriority::Low));
         assert_eq!(LockPriority::from_str_opt("invalid"), None);
     }

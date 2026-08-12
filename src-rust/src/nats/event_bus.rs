@@ -34,7 +34,10 @@ impl EventBus {
 
     /// Publish a task submission event
     pub async fn publish_task_submit(&self, payload: &TaskSubmitPayload) -> ErgataiResult<()> {
-        let subject = format!("ergatai.task.submit.{}", sanitize_agent_name(&payload.target_agent));
+        let subject = format!(
+            "ergatai.task.submit.{}",
+            sanitize_agent_name(&payload.target_agent)
+        );
         self.publish(&subject, payload).await
     }
 
@@ -61,14 +64,20 @@ impl EventBus {
     /// Routes the message to the target agent's inbox subject.
     /// Example: message to "codex" → `ergatai.agent.message.codex`
     pub async fn publish_agent_message(&self, payload: &AgentMessagePayload) -> ErgataiResult<()> {
-        let subject = format!("ergatai.agent.message.{}", sanitize_agent_name(&payload.to_agent));
+        let subject = format!(
+            "ergatai.agent.message.{}",
+            sanitize_agent_name(&payload.to_agent)
+        );
         self.publish(&subject, payload).await
     }
 
     // ── Subscribe helpers ──
 
     /// Subscribe to task submission events for a specific agent
-    pub async fn subscribe_task_submit(&self, agent_name: &str) -> ErgataiResult<async_nats::Subscriber> {
+    pub async fn subscribe_task_submit(
+        &self,
+        agent_name: &str,
+    ) -> ErgataiResult<async_nats::Subscriber> {
         let subject = format!("ergatai.task.submit.{}", sanitize_agent_name(agent_name));
         self.connection.subscribe(&subject).await
     }
@@ -79,18 +88,26 @@ impl EventBus {
     }
 
     /// Subscribe to node completion events for a specific node
-    pub async fn subscribe_node_complete(&self, node_id: &str) -> ErgataiResult<async_nats::Subscriber> {
+    pub async fn subscribe_node_complete(
+        &self,
+        node_id: &str,
+    ) -> ErgataiResult<async_nats::Subscriber> {
         let subject = format!("ergatai.dag.node_complete.{}", node_id);
         self.connection.subscribe(&subject).await
     }
 
     /// Subscribe to ALL node completion events (wildcard)
     pub async fn subscribe_all_node_complete(&self) -> ErgataiResult<async_nats::Subscriber> {
-        self.connection.subscribe("ergatai.dag.node_complete.*").await
+        self.connection
+            .subscribe("ergatai.dag.node_complete.*")
+            .await
     }
 
     /// Subscribe to node failure events for a specific node
-    pub async fn subscribe_node_failed(&self, node_id: &str) -> ErgataiResult<async_nats::Subscriber> {
+    pub async fn subscribe_node_failed(
+        &self,
+        node_id: &str,
+    ) -> ErgataiResult<async_nats::Subscriber> {
         let subject = format!("ergatai.dag.node_failed.{}", node_id);
         self.connection.subscribe(&subject).await
     }
@@ -101,7 +118,10 @@ impl EventBus {
     }
 
     /// Subscribe to DAG completion events
-    pub async fn subscribe_dag_complete(&self, dag_id: &str) -> ErgataiResult<async_nats::Subscriber> {
+    pub async fn subscribe_dag_complete(
+        &self,
+        dag_id: &str,
+    ) -> ErgataiResult<async_nats::Subscriber> {
         let subject = format!("ergatai.dag.complete.{}", dag_id);
         self.connection.subscribe(&subject).await
     }
@@ -114,7 +134,10 @@ impl EventBus {
     /// Subscribe to messages for a specific agent
     ///
     /// Example: `subscribe_agent_message("codex")` subscribes to `ergatai.agent.message.codex`
-    pub async fn subscribe_agent_message(&self, agent_name: &str) -> ErgataiResult<async_nats::Subscriber> {
+    pub async fn subscribe_agent_message(
+        &self,
+        agent_name: &str,
+    ) -> ErgataiResult<async_nats::Subscriber> {
         let subject = format!("ergatai.agent.message.{}", sanitize_agent_name(agent_name));
         self.connection.subscribe(&subject).await
     }
@@ -129,52 +152,97 @@ impl EventBus {
     // ── File Access Control publish helpers ──
 
     /// Publish a file access request
-    pub async fn publish_file_access_request(&self, payload: &FileAccessRequestPayload) -> ErgataiResult<()> {
+    pub async fn publish_file_access_request(
+        &self,
+        payload: &FileAccessRequestPayload,
+    ) -> ErgataiResult<()> {
         self.publish("ergatai.file.access.request", payload).await
     }
 
     /// Publish a file access grant (to specific agent)
-    pub async fn publish_file_access_grant(&self, payload: &FileAccessGrantPayload) -> ErgataiResult<()> {
-        let subject = format!("ergatai.file.access.grant.{}", sanitize_agent_name(&payload.agent_id));
+    pub async fn publish_file_access_grant(
+        &self,
+        payload: &FileAccessGrantPayload,
+    ) -> ErgataiResult<()> {
+        let subject = format!(
+            "ergatai.file.access.grant.{}",
+            sanitize_agent_name(&payload.agent_id)
+        );
         self.publish(&subject, payload).await
     }
 
     /// Publish a file access deny (to specific agent)
-    pub async fn publish_file_access_deny(&self, payload: &FileAccessDenyPayload) -> ErgataiResult<()> {
-        let subject = format!("ergatai.file.access.deny.{}", sanitize_agent_name(&payload.agent_id));
+    pub async fn publish_file_access_deny(
+        &self,
+        payload: &FileAccessDenyPayload,
+    ) -> ErgataiResult<()> {
+        let subject = format!(
+            "ergatai.file.access.deny.{}",
+            sanitize_agent_name(&payload.agent_id)
+        );
         self.publish(&subject, payload).await
     }
 
     /// Publish a file access escalation (to main agent)
-    pub async fn publish_file_access_escalate(&self, payload: &FileAccessEscalatePayload, main_agent_id: &str) -> ErgataiResult<()> {
-        let subject = format!("ergatai.file.access.escalate.{}", sanitize_agent_name(main_agent_id));
+    pub async fn publish_file_access_escalate(
+        &self,
+        payload: &FileAccessEscalatePayload,
+        main_agent_id: &str,
+    ) -> ErgataiResult<()> {
+        let subject = format!(
+            "ergatai.file.access.escalate.{}",
+            sanitize_agent_name(main_agent_id)
+        );
         self.publish(&subject, payload).await
     }
 
     /// Publish a file access approval (from main agent)
-    pub async fn publish_file_access_approve(&self, payload: &FileAccessApprovePayload) -> ErgataiResult<()> {
+    pub async fn publish_file_access_approve(
+        &self,
+        payload: &FileAccessApprovePayload,
+    ) -> ErgataiResult<()> {
         self.publish("ergatai.file.access.approve", payload).await
     }
 
     /// Publish a file access rejection (from main agent)
-    pub async fn publish_file_access_reject(&self, payload: &FileAccessRejectPayload) -> ErgataiResult<()> {
+    pub async fn publish_file_access_reject(
+        &self,
+        payload: &FileAccessRejectPayload,
+    ) -> ErgataiResult<()> {
         self.publish("ergatai.file.access.reject", payload).await
     }
 
     /// Publish a file access release
-    pub async fn publish_file_access_release(&self, payload: &FileAccessReleasePayload) -> ErgataiResult<()> {
+    pub async fn publish_file_access_release(
+        &self,
+        payload: &FileAccessReleasePayload,
+    ) -> ErgataiResult<()> {
         self.publish("ergatai.file.access.release", payload).await
     }
 
     /// Publish a file access revocation (to specific agent)
-    pub async fn publish_file_access_revoke(&self, payload: &FileAccessRevokePayload, agent_id: &str) -> ErgataiResult<()> {
-        let subject = format!("ergatai.file.access.revoke.{}", sanitize_agent_name(agent_id));
+    pub async fn publish_file_access_revoke(
+        &self,
+        payload: &FileAccessRevokePayload,
+        agent_id: &str,
+    ) -> ErgataiResult<()> {
+        let subject = format!(
+            "ergatai.file.access.revoke.{}",
+            sanitize_agent_name(agent_id)
+        );
         self.publish(&subject, payload).await
     }
 
     /// Publish a file conflict arbitration request (to main agent)
-    pub async fn publish_file_conflict_arbitrate(&self, payload: &FileConflictArbitratePayload, main_agent_id: &str) -> ErgataiResult<()> {
-        let subject = format!("ergatai.file.conflict.arbitrate.{}", sanitize_agent_name(main_agent_id));
+    pub async fn publish_file_conflict_arbitrate(
+        &self,
+        payload: &FileConflictArbitratePayload,
+        main_agent_id: &str,
+    ) -> ErgataiResult<()> {
+        let subject = format!(
+            "ergatai.file.conflict.arbitrate.{}",
+            sanitize_agent_name(main_agent_id)
+        );
         self.publish(&subject, payload).await
     }
 
@@ -195,7 +263,10 @@ impl EventBus {
 
     /// Publish a system token issuance
     pub async fn publish_system_token(&self, payload: &SystemTokenPayload) -> ErgataiResult<()> {
-        let subject = format!("ergatai.system.token.{}", sanitize_agent_name(&payload.agent_id));
+        let subject = format!(
+            "ergatai.system.token.{}",
+            sanitize_agent_name(&payload.agent_id)
+        );
         self.publish(&subject, payload).await
     }
 
@@ -203,75 +274,121 @@ impl EventBus {
 
     /// Subscribe to file access requests (FileLockManager)
     pub async fn subscribe_file_access_request(&self) -> ErgataiResult<async_nats::Subscriber> {
-        self.connection.subscribe("ergatai.file.access.request").await
+        self.connection
+            .subscribe("ergatai.file.access.request")
+            .await
     }
 
     /// Subscribe to file access grants for a specific agent
-    pub async fn subscribe_file_access_grant(&self, agent_id: &str) -> ErgataiResult<async_nats::Subscriber> {
-        let subject = format!("ergatai.file.access.grant.{}", sanitize_agent_name(agent_id));
+    pub async fn subscribe_file_access_grant(
+        &self,
+        agent_id: &str,
+    ) -> ErgataiResult<async_nats::Subscriber> {
+        let subject = format!(
+            "ergatai.file.access.grant.{}",
+            sanitize_agent_name(agent_id)
+        );
         self.connection.subscribe(&subject).await
     }
 
     /// Subscribe to ALL file access grants (wildcard)
     pub async fn subscribe_all_file_access_grants(&self) -> ErgataiResult<async_nats::Subscriber> {
-        self.connection.subscribe("ergatai.file.access.grant.*").await
+        self.connection
+            .subscribe("ergatai.file.access.grant.*")
+            .await
     }
 
     /// Subscribe to file access denials for a specific agent
-    pub async fn subscribe_file_access_deny(&self, agent_id: &str) -> ErgataiResult<async_nats::Subscriber> {
+    pub async fn subscribe_file_access_deny(
+        &self,
+        agent_id: &str,
+    ) -> ErgataiResult<async_nats::Subscriber> {
         let subject = format!("ergatai.file.access.deny.{}", sanitize_agent_name(agent_id));
         self.connection.subscribe(&subject).await
     }
 
     /// Subscribe to file access escalations (Main Agent)
-    pub async fn subscribe_file_access_escalate(&self, main_agent_id: &str) -> ErgataiResult<async_nats::Subscriber> {
-        let subject = format!("ergatai.file.access.escalate.{}", sanitize_agent_name(main_agent_id));
+    pub async fn subscribe_file_access_escalate(
+        &self,
+        main_agent_id: &str,
+    ) -> ErgataiResult<async_nats::Subscriber> {
+        let subject = format!(
+            "ergatai.file.access.escalate.{}",
+            sanitize_agent_name(main_agent_id)
+        );
         self.connection.subscribe(&subject).await
     }
 
     /// Subscribe to file access approvals (FileLockManager)
     pub async fn subscribe_file_access_approve(&self) -> ErgataiResult<async_nats::Subscriber> {
-        self.connection.subscribe("ergatai.file.access.approve").await
+        self.connection
+            .subscribe("ergatai.file.access.approve")
+            .await
     }
 
     /// Subscribe to file access rejections (FileLockManager)
     pub async fn subscribe_file_access_reject(&self) -> ErgataiResult<async_nats::Subscriber> {
-        self.connection.subscribe("ergatai.file.access.reject").await
+        self.connection
+            .subscribe("ergatai.file.access.reject")
+            .await
     }
 
     /// Subscribe to file access releases (FileLockManager)
     pub async fn subscribe_file_access_release(&self) -> ErgataiResult<async_nats::Subscriber> {
-        self.connection.subscribe("ergatai.file.access.release").await
+        self.connection
+            .subscribe("ergatai.file.access.release")
+            .await
     }
 
     /// Subscribe to file access revocations for a specific agent
-    pub async fn subscribe_file_access_revoke(&self, agent_id: &str) -> ErgataiResult<async_nats::Subscriber> {
-        let subject = format!("ergatai.file.access.revoke.{}", sanitize_agent_name(agent_id));
+    pub async fn subscribe_file_access_revoke(
+        &self,
+        agent_id: &str,
+    ) -> ErgataiResult<async_nats::Subscriber> {
+        let subject = format!(
+            "ergatai.file.access.revoke.{}",
+            sanitize_agent_name(agent_id)
+        );
         self.connection.subscribe(&subject).await
     }
 
     /// Subscribe to file conflict arbitration (Main Agent)
-    pub async fn subscribe_file_conflict_arbitrate(&self, main_agent_id: &str) -> ErgataiResult<async_nats::Subscriber> {
-        let subject = format!("ergatai.file.conflict.arbitrate.{}", sanitize_agent_name(main_agent_id));
+    pub async fn subscribe_file_conflict_arbitrate(
+        &self,
+        main_agent_id: &str,
+    ) -> ErgataiResult<async_nats::Subscriber> {
+        let subject = format!(
+            "ergatai.file.conflict.arbitrate.{}",
+            sanitize_agent_name(main_agent_id)
+        );
         self.connection.subscribe(&subject).await
     }
 
     /// Subscribe to file ready notifications for a specific file
-    pub async fn subscribe_file_ready(&self, file_path: &str) -> ErgataiResult<async_nats::Subscriber> {
+    pub async fn subscribe_file_ready(
+        &self,
+        file_path: &str,
+    ) -> ErgataiResult<async_nats::Subscriber> {
         let file_hash = format!("{:x}", md5::compute(file_path.as_bytes()));
         let subject = format!("ergatai.file.ready.{}", file_hash);
         self.connection.subscribe(&subject).await
     }
 
     /// Subscribe to file error notifications for a specific file
-    pub async fn subscribe_file_error(&self, file_path: &str) -> ErgataiResult<async_nats::Subscriber> {
+    pub async fn subscribe_file_error(
+        &self,
+        file_path: &str,
+    ) -> ErgataiResult<async_nats::Subscriber> {
         let file_hash = format!("{:x}", md5::compute(file_path.as_bytes()));
         let subject = format!("ergatai.file.error.{}", file_hash);
         self.connection.subscribe(&subject).await
     }
 
     /// Subscribe to system token issuance for a specific agent
-    pub async fn subscribe_system_token(&self, agent_id: &str) -> ErgataiResult<async_nats::Subscriber> {
+    pub async fn subscribe_system_token(
+        &self,
+        agent_id: &str,
+    ) -> ErgataiResult<async_nats::Subscriber> {
         let subject = format!("ergatai.system.token.{}", sanitize_agent_name(agent_id));
         self.connection.subscribe(&subject).await
     }
@@ -305,15 +422,16 @@ where
     use futures_util::StreamExt;
 
     match subscriber.next().await {
-        Some(msg) => {
-            match serde_json::from_slice::<T>(&msg.payload) {
-                Ok(payload) => Some(Ok(payload)),
-                Err(e) => {
-                    warn!(error = %e, "Failed to deserialize NATS event");
-                    Some(Err(ErgataiError::json_with_source("Failed to deserialize NATS event", e)))
-                }
+        Some(msg) => match serde_json::from_slice::<T>(&msg.payload) {
+            Ok(payload) => Some(Ok(payload)),
+            Err(e) => {
+                warn!(error = %e, "Failed to deserialize NATS event");
+                Some(Err(ErgataiError::json_with_source(
+                    "Failed to deserialize NATS event",
+                    e,
+                )))
             }
-        }
+        },
         None => None, // Stream closed
     }
 }
@@ -321,7 +439,13 @@ where
 /// Sanitize agent name for use in NATS subject (replace non-alphanumeric with _)
 fn sanitize_agent_name(name: &str) -> String {
     name.chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -349,7 +473,9 @@ mod tests {
             }
         };
 
-        let conn = crate::nats::NatsConnection::connect_to_server(&server).await.unwrap();
+        let conn = crate::nats::NatsConnection::connect_to_server(&server)
+            .await
+            .unwrap();
         let bus = EventBus::new(conn);
 
         // Subscribe first
@@ -370,14 +496,11 @@ mod tests {
 
         // Receive
         let received: TaskSubmitPayload =
-            tokio::time::timeout(
-                std::time::Duration::from_secs(2),
-                receive_event(&mut sub),
-            )
-            .await
-            .expect("timeout")
-            .expect("stream closed")
-            .expect("deserialization failed");
+            tokio::time::timeout(std::time::Duration::from_secs(2), receive_event(&mut sub))
+                .await
+                .expect("timeout")
+                .expect("stream closed")
+                .expect("deserialization failed");
 
         assert_eq!(received.task_id, "task-1");
         assert_eq!(received.plan_content, "# Plan\nDo stuff");
@@ -395,7 +518,9 @@ mod tests {
             }
         };
 
-        let conn = crate::nats::NatsConnection::connect_to_server(&server).await.unwrap();
+        let conn = crate::nats::NatsConnection::connect_to_server(&server)
+            .await
+            .unwrap();
         let bus = EventBus::new(conn);
 
         let mut sub = bus.subscribe_all_node_complete().await.unwrap();
@@ -415,14 +540,11 @@ mod tests {
         bus.publish_node_complete(&payload).await.unwrap();
 
         let received: NodeCompletePayload =
-            tokio::time::timeout(
-                std::time::Duration::from_secs(2),
-                receive_event(&mut sub),
-            )
-            .await
-            .expect("timeout")
-            .expect("stream closed")
-            .expect("deser failed");
+            tokio::time::timeout(std::time::Duration::from_secs(2), receive_event(&mut sub))
+                .await
+                .expect("timeout")
+                .expect("stream closed")
+                .expect("deser failed");
 
         assert_eq!(received.node_id, "n1");
         assert_eq!(received.outputs.get("result"), Some(&"done".to_string()));
@@ -439,7 +561,9 @@ mod tests {
             }
         };
 
-        let conn = crate::nats::NatsConnection::connect_to_server(&server).await.unwrap();
+        let conn = crate::nats::NatsConnection::connect_to_server(&server)
+            .await
+            .unwrap();
         let bus = EventBus::new(conn);
 
         let mut sub = bus.subscribe_all_node_failed().await.unwrap();
@@ -455,14 +579,11 @@ mod tests {
         bus.publish_node_failed(&payload).await.unwrap();
 
         let received: NodeFailedPayload =
-            tokio::time::timeout(
-                std::time::Duration::from_secs(2),
-                receive_event(&mut sub),
-            )
-            .await
-            .expect("timeout")
-            .expect("stream closed")
-            .expect("deser failed");
+            tokio::time::timeout(std::time::Duration::from_secs(2), receive_event(&mut sub))
+                .await
+                .expect("timeout")
+                .expect("stream closed")
+                .expect("deser failed");
 
         assert_eq!(received.node_id, "n2");
         assert_eq!(received.error, "crash");

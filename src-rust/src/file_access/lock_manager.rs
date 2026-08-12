@@ -13,11 +13,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
-use tracing::{debug, info, warn, error};
+use tracing::{debug, error, info, warn};
 
 use super::audit::AuditManager;
 use super::token::{FileLock, FileMode, FileToken, SystemToken, TokenId, TokenStatus};
-use crate::nats::events::{FileAccessEscalatePayload, FileAccessApprovePayload, FileAccessRejectPayload};
+use crate::nats::events::{
+    FileAccessApprovePayload, FileAccessEscalatePayload, FileAccessRejectPayload,
+};
 
 /// Stabilization window for single-agent mode detection.
 ///
@@ -126,9 +128,8 @@ impl FileLockManager {
     ) -> Result<Self, ErgataiError> {
         info!("Initializing FileLockManager at {:?}", db_path);
 
-        let conn = Connection::open(db_path).map_err(|e| {
-            ErgataiError::internal(format!("Failed to open lock database: {}", e))
-        })?;
+        let conn = Connection::open(db_path)
+            .map_err(|e| ErgataiError::internal(format!("Failed to open lock database: {}", e)))?;
 
         // Enable WAL mode for better concurrent performance (C3 fix)
         conn.execute_batch(
@@ -158,10 +159,7 @@ impl FileLockManager {
 
         // Cache canonical project root (M2 fix: avoid repeated I/O)
         let project_root_canonical = project_root.canonicalize().map_err(|e| {
-            ErgataiError::internal(format!(
-                "Failed to canonicalize project root: {}",
-                e
-            ))
+            ErgataiError::internal(format!("Failed to canonicalize project root: {}", e))
         })?;
 
         Ok(Self {
@@ -299,9 +297,10 @@ impl FileLockManager {
 
     /// Register a new system token.
     pub fn register_system_token(&self, token: &SystemToken) -> Result<(), ErgataiError> {
-        let conn = self.conn.lock().map_err(|e| {
-            ErgataiError::internal(format!("Failed to acquire lock: {}", e))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
 
         conn.execute(
             "INSERT INTO system_tokens (
@@ -322,15 +321,19 @@ impl FileLockManager {
         )
         .map_err(|e| ErgataiError::internal(format!("Failed to insert system token: {}", e)))?;
 
-        debug!("Registered system token {} for agent {}", token.id, token.agent_id);
+        debug!(
+            "Registered system token {} for agent {}",
+            token.id, token.agent_id
+        );
         Ok(())
     }
 
     /// Get a system token by session ID.
     pub fn get_system_token(&self, session_id: &str) -> Result<Option<SystemToken>, ErgataiError> {
-        let conn = self.conn.lock().map_err(|e| {
-            ErgataiError::internal(format!("Failed to acquire lock: {}", e))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
 
         let mut stmt = conn
             .prepare(
@@ -342,36 +345,57 @@ impl FileLockManager {
             .map_err(|e| ErgataiError::internal(format!("Failed to prepare query: {}", e)))?;
 
         let result = match stmt.query_row(params![session_id], |row| {
-                Ok(SystemToken {
-                    id: TokenId::from_string(row.get(0)?),
-                    agent_id: row.get(1)?,
-                    session_id: row.get(2)?,
-                    project_root: row.get(3)?,
-                    issued_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(4)?)
-                        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))?
-                        .with_timezone(&Utc),
-                    expires_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(5)?)
-                        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))?
-                        .with_timezone(&Utc),
-                    heartbeat_interval_secs: row.get::<_, i64>(6)? as u64,
-                    heartbeat_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(7)?)
-                        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))?
-                        .with_timezone(&Utc),
-                    status: match row.get::<_, String>(8)?.as_str() {
-                        "ACTIVE" => TokenStatus::Active,
-                        "UPGRADING" => TokenStatus::Upgrading,
-                        "EXPIRED" => TokenStatus::Expired,
-                        "REVOKED" => TokenStatus::Revoked,
-                        _ => TokenStatus::Expired,
-                    },
-                })
-            }) {
-                Ok(token) => Some(token),
-                Err(rusqlite::Error::QueryReturnedNoRows) => None,
-                Err(e) => {
-                    return Err(ErgataiError::internal(format!("Failed to query token by session: {}", e)));
-                }
-            };
+            Ok(SystemToken {
+                id: TokenId::from_string(row.get(0)?),
+                agent_id: row.get(1)?,
+                session_id: row.get(2)?,
+                project_root: row.get(3)?,
+                issued_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(4)?)
+                    .map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            0,
+                            rusqlite::types::Type::Text,
+                            Box::new(e),
+                        )
+                    })?
+                    .with_timezone(&Utc),
+                expires_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(5)?)
+                    .map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            0,
+                            rusqlite::types::Type::Text,
+                            Box::new(e),
+                        )
+                    })?
+                    .with_timezone(&Utc),
+                heartbeat_interval_secs: row.get::<_, i64>(6)? as u64,
+                heartbeat_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(7)?)
+                    .map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            0,
+                            rusqlite::types::Type::Text,
+                            Box::new(e),
+                        )
+                    })?
+                    .with_timezone(&Utc),
+                status: match row.get::<_, String>(8)?.as_str() {
+                    "ACTIVE" => TokenStatus::Active,
+                    "UPGRADING" => TokenStatus::Upgrading,
+                    "EXPIRED" => TokenStatus::Expired,
+                    "REVOKED" => TokenStatus::Revoked,
+                    _ => TokenStatus::Expired,
+                },
+            })
+        }) {
+            Ok(token) => Some(token),
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(e) => {
+                return Err(ErgataiError::internal(format!(
+                    "Failed to query token by session: {}",
+                    e
+                )));
+            }
+        };
 
         Ok(result)
     }
@@ -380,7 +404,11 @@ impl FileLockManager {
     ///
     /// Uses BEGIN IMMEDIATE for atomicity. Checks for conflicts via unique index.
     /// M1 fix: Path validation happens before acquiring the mutex to reduce lock contention.
-    pub async fn acquire_lock(&self, token: &FileToken, file_path: &str) -> Result<(), ErgataiError> {
+    pub async fn acquire_lock(
+        &self,
+        token: &FileToken,
+        file_path: &str,
+    ) -> Result<(), ErgataiError> {
         // Validate and normalize path BEFORE acquiring lock (M1 fix)
         let normalized_path = self.validate_and_normalize_path(file_path)?;
 
@@ -406,12 +434,14 @@ impl FileLockManager {
         // Check for WRITE conflict and get conflict info if any
         // This block ensures conn is released before any async operations
         let conflict_info = {
-            let conn = self.conn.lock().map_err(|e| {
-                ErgataiError::internal(format!("Failed to acquire lock: {}", e))
-            })?;
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
 
-            conn.execute_batch("BEGIN IMMEDIATE")
-                .map_err(|e| ErgataiError::internal(format!("Failed to begin transaction: {}", e)))?;
+            conn.execute_batch("BEGIN IMMEDIATE").map_err(|e| {
+                ErgataiError::internal(format!("Failed to begin transaction: {}", e))
+            })?;
 
             // Check for WRITE conflict (unique index will enforce this)
             // In single-agent mode, skip the conflict check — there is no contention risk
@@ -419,55 +449,57 @@ impl FileLockManager {
             let single_agent = self.is_single_agent_mode();
             if token.mode == FileMode::Write && !single_agent {
                 // Get conflict information for arbitration
-                match conn
-                    .query_row(
-                        "SELECT agent_id, session_id, token_id, reason, priority FROM file_locks
+                match conn.query_row(
+                    "SELECT agent_id, session_id, token_id, reason, priority FROM file_locks
                          WHERE file_path = ?1 AND mode = 'WRITE' AND status = 'ACTIVE'
                          LIMIT 1",
-                        params![normalized_path],
-                        |row| {
-                            Ok(crate::file_access::conflict_arbitration::ConflictInfo {
-                                file_path: normalized_path.clone(),
-                                current_holder: crate::file_access::conflict_arbitration::LockHolderInfo {
+                    params![normalized_path],
+                    |row| {
+                        Ok(crate::file_access::conflict_arbitration::ConflictInfo {
+                            file_path: normalized_path.clone(),
+                            current_holder:
+                                crate::file_access::conflict_arbitration::LockHolderInfo {
                                     agent_id: row.get(0)?,
                                     session_id: row.get(1)?,
                                     token_id: row.get(2)?,
                                     priority: row.get(4)?,
                                     reason: row.get(3)?,
                                 },
-                                new_requester: crate::file_access::conflict_arbitration::LockHolderInfo {
+                            new_requester:
+                                crate::file_access::conflict_arbitration::LockHolderInfo {
                                     agent_id: token.agent_id.clone(),
                                     session_id: token.session_id.clone(),
                                     token_id: token.id.as_str().to_string(),
                                     priority: token.priority,
                                     reason: token.reason.clone(),
                                 },
-                                timestamp: chrono::Utc::now().to_rfc3339(),
-                            })
-                        },
-                    ) {
-                        Ok(info) => {
-                            // Rollback before dropping conn
-                            conn.execute_batch("ROLLBACK").ok();
-                            Some(info)
-                        }
-                        Err(rusqlite::Error::QueryReturnedNoRows) => {
-                            // No conflict, rollback
-                            conn.execute_batch("ROLLBACK").ok();
-                            None
-                        }
-                        Err(e) => {
-                            conn.execute_batch("ROLLBACK").ok();
-                            return Err(ErgataiError::internal(format!(
-                                "Failed to check WRITE conflict (DB error): {}", e
-                            )));
-                        }
+                            timestamp: chrono::Utc::now().to_rfc3339(),
+                        })
+                    },
+                ) {
+                    Ok(info) => {
+                        // Rollback before dropping conn
+                        conn.execute_batch("ROLLBACK").ok();
+                        Some(info)
                     }
-                } else {
-                    // Not a WRITE lock or single-agent mode, no conflict check needed
-                    conn.execute_batch("ROLLBACK").ok();
-                    None
+                    Err(rusqlite::Error::QueryReturnedNoRows) => {
+                        // No conflict, rollback
+                        conn.execute_batch("ROLLBACK").ok();
+                        None
+                    }
+                    Err(e) => {
+                        conn.execute_batch("ROLLBACK").ok();
+                        return Err(ErgataiError::internal(format!(
+                            "Failed to check WRITE conflict (DB error): {}",
+                            e
+                        )));
+                    }
                 }
+            } else {
+                // Not a WRITE lock or single-agent mode, no conflict check needed
+                conn.execute_batch("ROLLBACK").ok();
+                None
+            }
         }; // conn is released here
 
         // If there's a conflict, handle escalation or local arbitration
@@ -482,15 +514,23 @@ impl FileLockManager {
                 );
 
                 // Request approval from main agent
-                let request_id = self.request_approval_from_main_agent(
-                    token,
-                    file_path,
-                    Some(&conflict.current_holder.agent_id),
-                    &format!("WRITE conflict on {} with agent {}", file_path, conflict.current_holder.agent_id),
-                ).await?;
+                let request_id = self
+                    .request_approval_from_main_agent(
+                        token,
+                        file_path,
+                        Some(&conflict.current_holder.agent_id),
+                        &format!(
+                            "WRITE conflict on {} with agent {}",
+                            file_path, conflict.current_holder.agent_id
+                        ),
+                    )
+                    .await?;
 
                 // Wait for approval response (30 second timeout)
-                match self.wait_for_approval(&request_id, Duration::from_secs(30)).await {
+                match self
+                    .wait_for_approval(&request_id, Duration::from_secs(30))
+                    .await
+                {
                     Ok(response) if response.approved => {
                         info!(
                             request_id = %request_id,
@@ -510,7 +550,9 @@ impl FileLockManager {
                         return Err(ErgataiError::PermissionDenied(format!(
                             "WRITE access denied by main agent {}: {}",
                             response.approved_by,
-                            response.reason.unwrap_or_else(|| "No reason provided".to_string())
+                            response
+                                .reason
+                                .unwrap_or_else(|| "No reason provided".to_string())
                         )));
                     }
                     Err(e) => {
@@ -541,9 +583,10 @@ impl FileLockManager {
         }
 
         // No conflict, proceed with lock acquisition
-        let conn = self.conn.lock().map_err(|e| {
-            ErgataiError::internal(format!("Failed to acquire lock: {}", e))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
 
         conn.execute_batch("BEGIN IMMEDIATE")
             .map_err(|e| ErgataiError::internal(format!("Failed to begin transaction: {}", e)))?;
@@ -618,7 +661,11 @@ impl FileLockManager {
     ///
     /// This is called when a WRITE conflict has been escalated to and approved by the main agent.
     /// It bypasses the normal conflict detection since we already have approval.
-    async fn acquire_lock_approved(&self, token: &FileToken, file_path: &str) -> Result<(), ErgataiError> {
+    async fn acquire_lock_approved(
+        &self,
+        token: &FileToken,
+        file_path: &str,
+    ) -> Result<(), ErgataiError> {
         let normalized_path = self.validate_and_normalize_path(file_path)?;
 
         if !token.matches_path(&normalized_path) {
@@ -628,9 +675,10 @@ impl FileLockManager {
             )));
         }
 
-        let conn = self.conn.lock().map_err(|e| {
-            ErgataiError::internal(format!("Failed to acquire lock: {}", e))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
 
         conn.execute_batch("BEGIN IMMEDIATE")
             .map_err(|e| ErgataiError::internal(format!("Failed to begin transaction: {}", e)))?;
@@ -641,9 +689,13 @@ impl FileLockManager {
                 "UPDATE file_locks SET status = 'EXPIRED'
                  WHERE file_path = ?1 AND mode = 'WRITE' AND status = 'ACTIVE'",
                 params![normalized_path],
-            ).map_err(|e| {
+            )
+            .map_err(|e| {
                 conn.execute_batch("ROLLBACK").ok();
-                ErgataiError::internal(format!("Failed to expire existing WRITE lock on {}: {}", normalized_path, e))
+                ErgataiError::internal(format!(
+                    "Failed to expire existing WRITE lock on {}: {}",
+                    normalized_path, e
+                ))
             })?;
         }
 
@@ -711,9 +763,10 @@ impl FileLockManager {
         file_path: &str,
         conflict: &crate::file_access::conflict_arbitration::ConflictInfo,
     ) -> Result<bool, ErgataiError> {
-        let conn = self.conn.lock().map_err(|e| {
-            ErgataiError::internal(format!("Failed to acquire lock: {}", e))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
 
         conn.execute_batch("BEGIN IMMEDIATE")
             .map_err(|e| ErgataiError::internal(format!("Failed to begin transaction: {}", e)))?;
@@ -723,9 +776,10 @@ impl FileLockManager {
         // Look up retry counts for both agents
         let key_new = (normalized_path.clone(), token.agent_id.clone());
         let new_retry_count = {
-            let tracker = self.retry_tracker.lock().map_err(|e| {
-                ErgataiError::internal(format!("retry_tracker poisoned: {}", e))
-            })?;
+            let tracker = self
+                .retry_tracker
+                .lock()
+                .map_err(|e| ErgataiError::internal(format!("retry_tracker poisoned: {}", e)))?;
             tracker.get(&key_new).copied().unwrap_or(0)
         };
 
@@ -737,23 +791,30 @@ impl FileLockManager {
             }
             return Err(ErgataiError::LockConflict(format!(
                 "File {} lock conflict: agent {} exceeded max retries ({})",
-                file_path, token.agent_id,
+                file_path,
+                token.agent_id,
                 crate::file_access::conflict_arbitration::MAX_RETRIES
             )));
         }
 
         // Look up current holder's retry count (for priority boost)
         let curr_retry_count = {
-            let key_curr = (normalized_path.clone(), conflict.current_holder.agent_id.clone());
-            let tracker = self.retry_tracker.lock().map_err(|e| {
-                ErgataiError::internal(format!("retry_tracker poisoned: {}", e))
-            })?;
+            let key_curr = (
+                normalized_path.clone(),
+                conflict.current_holder.agent_id.clone(),
+            );
+            let tracker = self
+                .retry_tracker
+                .lock()
+                .map_err(|e| ErgataiError::internal(format!("retry_tracker poisoned: {}", e)))?;
             tracker.get(&key_curr).copied().unwrap_or(0)
         };
 
         // Arbitrate with priority boost
         let decision = crate::file_access::conflict_arbitration::arbitrate_with_boost(
-            conflict, curr_retry_count, new_retry_count,
+            conflict,
+            curr_retry_count,
+            new_retry_count,
         );
 
         match decision {
@@ -855,16 +916,17 @@ impl FileLockManager {
 
         // Use a block to ensure conn is dropped before async call
         let release_result = {
-            let conn = self.conn.lock().map_err(|e| {
-                ErgataiError::internal(format!("Failed to acquire lock: {}", e))
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
+
+            conn.execute_batch("BEGIN IMMEDIATE").map_err(|e| {
+                ErgataiError::internal(format!("Failed to begin transaction: {}", e))
             })?;
 
-            conn.execute_batch("BEGIN IMMEDIATE")
-            .map_err(|e| ErgataiError::internal(format!("Failed to begin transaction: {}", e)))?;
-
-        // Get lock info for audit
-        let lock_info: Option<(String, String)> = match conn
-            .query_row(
+            // Get lock info for audit
+            let lock_info: Option<(String, String)> = match conn.query_row(
                 "SELECT agent_id, session_id FROM file_locks
                  WHERE token_id = ?1 AND file_path = ?2 AND status = 'ACTIVE'",
                 params![token_id, normalized_path],
@@ -874,25 +936,28 @@ impl FileLockManager {
                 Err(rusqlite::Error::QueryReturnedNoRows) => None,
                 Err(e) => {
                     conn.execute_batch("ROLLBACK").ok();
-                    return Err(ErgataiError::internal(format!("Failed to query lock info for release: {}", e)));
+                    return Err(ErgataiError::internal(format!(
+                        "Failed to query lock info for release: {}",
+                        e
+                    )));
                 }
             };
 
-        if let Some((agent_id, session_id)) = lock_info {
-            // Mark lock as expired
-            conn.execute(
-                "UPDATE file_locks SET status = 'EXPIRED'
+            if let Some((agent_id, session_id)) = lock_info {
+                // Mark lock as expired
+                conn.execute(
+                    "UPDATE file_locks SET status = 'EXPIRED'
                  WHERE token_id = ?1 AND file_path = ?2",
-                params![token_id, normalized_path],
-            )
-            .map_err(|e| {
-                conn.execute_batch("ROLLBACK").ok();
-                ErgataiError::internal(format!("Failed to update lock: {}", e))
-            })?;
+                    params![token_id, normalized_path],
+                )
+                .map_err(|e| {
+                    conn.execute_batch("ROLLBACK").ok();
+                    ErgataiError::internal(format!("Failed to update lock: {}", e))
+                })?;
 
-            // Log to audit IN SAME TRANSACTION (avoid reentrant lock)
-            let now_audit = Utc::now().to_rfc3339();
-            conn.execute(
+                // Log to audit IN SAME TRANSACTION (avoid reentrant lock)
+                let now_audit = Utc::now().to_rfc3339();
+                conn.execute(
                 "INSERT INTO audit_log (timestamp, agent_id, session_id, action, file_path, mode, reason)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![now_audit, agent_id, session_id, "LOCK_RELEASED", normalized_path, Option::<String>::None, Option::<String>::None],
@@ -902,25 +967,26 @@ impl FileLockManager {
                 ErgataiError::internal(format!("Failed to log audit: {}", e))
             })?;
 
-            conn.execute_batch("COMMIT")
-                .map_err(|e| ErgataiError::internal(format!("Failed to commit: {}", e)))?;
+                conn.execute_batch("COMMIT")
+                    .map_err(|e| ErgataiError::internal(format!("Failed to commit: {}", e)))?;
 
-            info!("Released lock on {}", file_path);
-            Ok(())
-        } else {
-            conn.execute_batch("ROLLBACK").ok();
-            Err(ErgataiError::NotFound(format!(
-                "No active lock found for token {} on file {}",
-                token_id, file_path
-            )))
-        }
+                info!("Released lock on {}", file_path);
+                Ok(())
+            } else {
+                conn.execute_batch("ROLLBACK").ok();
+                Err(ErgataiError::NotFound(format!(
+                    "No active lock found for token {} on file {}",
+                    token_id, file_path
+                )))
+            }
         }; // conn is dropped here
 
         // Notify waiters after releasing the mutex
         release_result?;
         self.notify_file_ready(&normalized_path).await?;
         // Publish lock release notification to trigger active wake-up in LockWaitConsumer
-        self.publish_lock_release_notification(&normalized_path, token_id).await?;
+        self.publish_lock_release_notification(&normalized_path, token_id)
+            .await?;
 
         Ok(())
     }
@@ -929,9 +995,10 @@ impl FileLockManager {
     pub fn is_file_locked(&self, file_path: &str) -> Result<bool, ErgataiError> {
         let normalized_path = self.validate_and_normalize_path(file_path)?;
 
-        let conn = self.conn.lock().map_err(|e| {
-            ErgataiError::internal(format!("Failed to acquire lock: {}", e))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
 
         let is_locked: bool = conn
             .query_row(
@@ -950,11 +1017,7 @@ impl FileLockManager {
     /// Called by `FileSystemWatcher` when a file modification is detected
     /// without a corresponding active lock. The agent/session are recorded
     /// as "unknown" since the watcher cannot identify the modifier.
-    pub fn record_violation(
-        &self,
-        file_path: &str,
-        action: &str,
-    ) -> Result<(), ErgataiError> {
+    pub fn record_violation(&self, file_path: &str, action: &str) -> Result<(), ErgataiError> {
         let normalized_path = self
             .validate_and_normalize_path(file_path)
             .unwrap_or_else(|_| file_path.to_string());
@@ -976,9 +1039,10 @@ impl FileLockManager {
     pub fn update_heartbeat(&self, token_id: &str) -> Result<(), ErgataiError> {
         let now = Utc::now().to_rfc3339();
 
-        let conn = self.conn.lock().map_err(|e| {
-            ErgataiError::internal(format!("Failed to acquire lock: {}", e))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
 
         // Use transaction for atomicity (M3 fix)
         conn.execute_batch("BEGIN IMMEDIATE")
@@ -1003,11 +1067,10 @@ impl FileLockManager {
             ErgataiError::internal(format!("Failed to update file_locks heartbeat: {}", e))
         })?;
 
-        conn.execute_batch("COMMIT")
-            .map_err(|e| {
-                conn.execute_batch("ROLLBACK").ok();
-                ErgataiError::internal(format!("Failed to commit heartbeat update: {}", e))
-            })?;
+        conn.execute_batch("COMMIT").map_err(|e| {
+            conn.execute_batch("ROLLBACK").ok();
+            ErgataiError::internal(format!("Failed to commit heartbeat update: {}", e))
+        })?;
 
         debug!("Updated heartbeat for token {}", token_id);
         Ok(())
@@ -1026,10 +1089,7 @@ impl FileLockManager {
 
         // Canonicalize (resolves symlinks, .., etc.)
         let canonical = full_path.canonicalize().map_err(|e| {
-            ErgataiError::InvalidPath(format!(
-                "Failed to canonicalize path {}: {}",
-                file_path, e
-            ))
+            ErgataiError::InvalidPath(format!("Failed to canonicalize path {}: {}", file_path, e))
         })?;
 
         // Use cached project_root_canonical (M2 fix: avoid repeated canonicalize)
@@ -1117,9 +1177,10 @@ impl FileLockManager {
         mode: Option<&str>,
         reason: Option<&str>,
     ) -> Result<(), ErgataiError> {
-        let conn = self.conn.lock().map_err(|e| {
-            ErgataiError::internal(format!("Failed to acquire lock: {}", e))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
 
         let now = Utc::now().to_rfc3339();
 
@@ -1138,9 +1199,10 @@ impl FileLockManager {
     /// Removes entries older than the specified number of days.
     /// Returns the number of entries deleted.
     pub fn cleanup_old_audit_logs(&self, days_to_keep: u32) -> Result<usize, ErgataiError> {
-        let conn = self.conn.lock().map_err(|e| {
-            ErgataiError::internal(format!("Failed to acquire lock: {}", e))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
 
         let cutoff = Utc::now() - chrono::Duration::days(days_to_keep as i64);
         let deleted = conn
@@ -1165,9 +1227,10 @@ impl FileLockManager {
     ///
     /// Returns all tokens with status "ACTIVE".
     pub fn get_active_tokens(&self) -> Result<Vec<SystemToken>, ErgataiError> {
-        let conn = self.conn.lock().map_err(|e| {
-            ErgataiError::internal(format!("Failed to acquire lock: {}", e))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
 
         let mut stmt = conn
             .prepare(
@@ -1186,14 +1249,32 @@ impl FileLockManager {
                     session_id: row.get(2)?,
                     project_root: row.get(3)?,
                     issued_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(4)?)
-                        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))?
+                        .map_err(|e| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                0,
+                                rusqlite::types::Type::Text,
+                                Box::new(e),
+                            )
+                        })?
                         .with_timezone(&Utc),
                     expires_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(5)?)
-                        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))?
+                        .map_err(|e| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                0,
+                                rusqlite::types::Type::Text,
+                                Box::new(e),
+                            )
+                        })?
                         .with_timezone(&Utc),
                     heartbeat_interval_secs: row.get::<_, i64>(6)? as u64,
                     heartbeat_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(7)?)
-                        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))?
+                        .map_err(|e| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                0,
+                                rusqlite::types::Type::Text,
+                                Box::new(e),
+                            )
+                        })?
                         .with_timezone(&Utc),
                     status: match row.get::<_, String>(8)?.as_str() {
                         "ACTIVE" => TokenStatus::Active,
@@ -1212,10 +1293,14 @@ impl FileLockManager {
     }
 
     /// Get all tokens for a session (for ACP disconnect handling).
-    pub fn get_tokens_by_session(&self, session_id: &str) -> Result<Vec<SystemToken>, ErgataiError> {
-        let conn = self.conn.lock().map_err(|e| {
-            ErgataiError::internal(format!("Failed to acquire lock: {}", e))
-        })?;
+    pub fn get_tokens_by_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<SystemToken>, ErgataiError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
 
         let mut stmt = conn
             .prepare(
@@ -1234,14 +1319,32 @@ impl FileLockManager {
                     session_id: row.get(2)?,
                     project_root: row.get(3)?,
                     issued_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(4)?)
-                        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))?
+                        .map_err(|e| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                0,
+                                rusqlite::types::Type::Text,
+                                Box::new(e),
+                            )
+                        })?
                         .with_timezone(&Utc),
                     expires_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(5)?)
-                        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))?
+                        .map_err(|e| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                0,
+                                rusqlite::types::Type::Text,
+                                Box::new(e),
+                            )
+                        })?
                         .with_timezone(&Utc),
                     heartbeat_interval_secs: row.get::<_, i64>(6)? as u64,
                     heartbeat_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(7)?)
-                        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))?
+                        .map_err(|e| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                0,
+                                rusqlite::types::Type::Text,
+                                Box::new(e),
+                            )
+                        })?
                         .with_timezone(&Utc),
                     status: match row.get::<_, String>(8)?.as_str() {
                         "ACTIVE" => TokenStatus::Active,
@@ -1261,9 +1364,10 @@ impl FileLockManager {
 
     /// Get all locks held by a token (for reclaim on timeout).
     pub fn get_locks_by_token(&self, token_id: &str) -> Result<Vec<FileLock>, ErgataiError> {
-        let conn = self.conn.lock().map_err(|e| {
-            ErgataiError::internal(format!("Failed to acquire lock: {}", e))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
 
         let mut stmt = conn
             .prepare(
@@ -1291,14 +1395,32 @@ impl FileLockManager {
                     reason: row.get(7)?,
                     approved_by: row.get(8)?,
                     created_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(9)?)
-                        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))?
+                        .map_err(|e| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                0,
+                                rusqlite::types::Type::Text,
+                                Box::new(e),
+                            )
+                        })?
                         .with_timezone(&Utc),
                     expires_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(10)?)
-                        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))?
+                        .map_err(|e| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                0,
+                                rusqlite::types::Type::Text,
+                                Box::new(e),
+                            )
+                        })?
                         .with_timezone(&Utc),
                     heartbeat_interval_secs: row.get::<_, i64>(11)? as u64,
                     heartbeat_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(12)?)
-                        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))?
+                        .map_err(|e| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                0,
+                                rusqlite::types::Type::Text,
+                                Box::new(e),
+                            )
+                        })?
                         .with_timezone(&Utc),
                     status: match row.get::<_, String>(13)?.as_str() {
                         "ACTIVE" => TokenStatus::Active,
@@ -1322,9 +1444,10 @@ impl FileLockManager {
     /// this queries by session_id — which is what the watchdog needs
     /// when reclaiming all locks for a disconnected agent session.
     pub fn get_locks_by_session(&self, session_id: &str) -> Result<Vec<FileLock>, ErgataiError> {
-        let conn = self.conn.lock().map_err(|e| {
-            ErgataiError::internal(format!("Failed to acquire lock: {}", e))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
 
         let mut stmt = conn
             .prepare(
@@ -1356,9 +1479,10 @@ impl FileLockManager {
     /// Test helper: Set heartbeat to a past time for testing timeout scenarios
     #[cfg(test)]
     pub fn set_heartbeat_past(&self, token_id: &str, seconds_ago: i64) -> Result<(), ErgataiError> {
-        let conn = self.conn.lock().map_err(|e| {
-            ErgataiError::internal(format!("Failed to acquire lock: {}", e))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
 
         // Use strftime to format as RFC3339 (ISO 8601 with timezone)
         conn.execute(
@@ -1371,10 +1495,14 @@ impl FileLockManager {
     }
 
     /// Get all file tokens for a given system token ID
-    pub fn get_file_tokens_by_system_token(&self, system_token_id: &str) -> Result<Vec<FileToken>, ErgataiError> {
-        let conn = self.conn.lock().map_err(|e| {
-            ErgataiError::internal(format!("Failed to acquire lock: {}", e))
-        })?;
+    pub fn get_file_tokens_by_system_token(
+        &self,
+        system_token_id: &str,
+    ) -> Result<Vec<FileToken>, ErgataiError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
 
         let mut stmt = conn
             .prepare(
@@ -1409,7 +1537,9 @@ impl FileLockManager {
 
         let mut result = Vec::new();
         for token in tokens {
-            result.push(token.map_err(|e| ErgataiError::internal(format!("Failed to parse file token: {}", e)))?);
+            result.push(token.map_err(|e| {
+                ErgataiError::internal(format!("Failed to parse file token: {}", e))
+            })?);
         }
 
         Ok(result)
@@ -1418,9 +1548,10 @@ impl FileLockManager {
     /// Test helper: Get all active file locks
     #[cfg(test)]
     pub fn get_all_active_locks(&self) -> Result<Vec<FileLock>, ErgataiError> {
-        let conn = self.conn.lock().map_err(|e| {
-            ErgataiError::internal(format!("Failed to acquire lock: {}", e))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
 
         let mut stmt = conn
             .prepare(
@@ -1471,7 +1602,7 @@ impl FileLockManager {
         nats_connection: Arc<crate::nats::connection::NatsConnection>,
         timeout: std::time::Duration,
     ) -> Result<(), ErgataiError> {
-        use crate::file_access::lock_waiter::{LockWaitRequest, LockGrantedNotification};
+        use crate::file_access::lock_waiter::{LockGrantedNotification, LockWaitRequest};
         use futures_util::StreamExt;
 
         // Try to acquire immediately
@@ -1501,7 +1632,7 @@ impl FileLockManager {
             token.agent_id.clone(),
             token.session_id.clone(),
             file_path.to_string(),
-            token.mode.clone(),
+            token.mode,
             None, // No priority for now
         );
 
@@ -1510,11 +1641,16 @@ impl FileLockManager {
 
         // Publish to NATS
         let subject = wait_request.subject();
-        let payload = serde_json::to_vec(&wait_request)
-            .map_err(|e| ErgataiError::internal(format!("Failed to serialize wait request: {}", e)))?;
+        let payload = serde_json::to_vec(&wait_request).map_err(|e| {
+            ErgataiError::internal(format!("Failed to serialize wait request: {}", e))
+        })?;
 
-        nats_connection.publish(&subject, payload).await
-            .map_err(|e| ErgataiError::internal(format!("Failed to publish wait request: {}", e)))?;
+        nats_connection
+            .publish(&subject, payload)
+            .await
+            .map_err(|e| {
+                ErgataiError::internal(format!("Failed to publish wait request: {}", e))
+            })?;
 
         tracing::debug!(
             request_id = %request_id,
@@ -1523,8 +1659,13 @@ impl FileLockManager {
         );
 
         // Subscribe to reply subject
-        let mut subscriber = nats_connection.client().subscribe(reply_subject.clone()).await
-            .map_err(|e| ErgataiError::internal(format!("Failed to subscribe to reply subject: {}", e)))?;
+        let mut subscriber = nats_connection
+            .client()
+            .subscribe(reply_subject.clone())
+            .await
+            .map_err(|e| {
+                ErgataiError::internal(format!("Failed to subscribe to reply subject: {}", e))
+            })?;
 
         // Wait for notification with timeout
         let notification = tokio::time::timeout(timeout, async {
@@ -1574,7 +1715,9 @@ impl FileLockManager {
                     file_path = file_path,
                     "Subscriber closed before receiving grant"
                 );
-                Err(ErgataiError::internal("Lock wait channel closed unexpectedly"))
+                Err(ErgataiError::internal(
+                    "Lock wait channel closed unexpectedly",
+                ))
             }
             Err(_) => {
                 tracing::warn!(
@@ -1593,9 +1736,10 @@ impl FileLockManager {
 
     /// Mark a token as expired (for watchdog timeout handling).
     pub fn expire_token(&self, token_id: &str) -> Result<(), ErgataiError> {
-        let conn = self.conn.lock().map_err(|e| {
-            ErgataiError::internal(format!("Failed to acquire lock: {}", e))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
 
         conn.execute(
             "UPDATE system_tokens SET status = 'EXPIRED' WHERE id = ?1",
@@ -1614,9 +1758,10 @@ impl FileLockManager {
         &self,
         session_id: &str,
     ) -> Result<FileToken, ErgataiError> {
-        let conn = self.conn.lock().map_err(|e| {
-            ErgataiError::internal(format!("Failed to acquire lock: {}", e))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
 
         let mut stmt = conn
             .prepare(
@@ -1661,9 +1806,10 @@ impl FileLockManager {
         &self,
         session_id: &str,
     ) -> Result<SystemToken, ErgataiError> {
-        let conn = self.conn.lock().map_err(|e| {
-            ErgataiError::internal(format!("Failed to acquire lock: {}", e))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
 
         let mut stmt = conn
             .prepare(
@@ -1700,9 +1846,10 @@ impl FileLockManager {
         // Validate scope size (M9 fix): count matching files and reject if over limit
         self.validate_scope_size(&token.scope)?;
 
-        let conn = self.conn.lock().map_err(|e| {
-            ErgataiError::internal(format!("Failed to acquire lock: {}", e))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
 
         conn.execute(
             "INSERT INTO file_tokens (
@@ -1729,18 +1876,19 @@ impl FileLockManager {
         )
         .map_err(|e| ErgataiError::internal(format!("Failed to register file token: {}", e)))?;
 
-        info!("FileToken {} registered for agent {}", token.id, token.agent_id);
+        info!(
+            "FileToken {} registered for agent {}",
+            token.id, token.agent_id
+        );
         Ok(())
     }
 
     /// Find an active FileToken by token_id.
-    pub fn find_active_file_token_by_id(
-        &self,
-        token_id: &str,
-    ) -> Result<FileToken, ErgataiError> {
-        let conn = self.conn.lock().map_err(|e| {
-            ErgataiError::internal(format!("Failed to acquire lock: {}", e))
-        })?;
+    pub fn find_active_file_token_by_id(&self, token_id: &str) -> Result<FileToken, ErgataiError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
 
         let mut stmt = conn
             .prepare(
@@ -1816,7 +1964,11 @@ impl FileLockManager {
     }
 
     /// Notify waiters that a file has an error (writer crashed).
-    pub async fn notify_file_error(&self, file_path: &str, reason: &str) -> Result<(), ErgataiError> {
+    pub async fn notify_file_error(
+        &self,
+        file_path: &str,
+        reason: &str,
+    ) -> Result<(), ErgataiError> {
         let mut waiters = self.waiters.lock().map_err(|e| {
             ErgataiError::internal(format!("Failed to acquire waiters lock: {}", e))
         })?;
@@ -1857,12 +2009,17 @@ impl FileLockManager {
         use crate::file_access::lock_waiter::LockReleaseNotification;
         let notification = LockReleaseNotification::new(file_path, token_id);
 
-        let payload = serde_json::to_vec(&notification)
-            .map_err(|e| ErgataiError::internal(format!("Failed to serialize notification: {}", e)))?;
+        let payload = serde_json::to_vec(&notification).map_err(|e| {
+            ErgataiError::internal(format!("Failed to serialize notification: {}", e))
+        })?;
 
         let subject = notification.subject();
-        nats_client.publish(subject, payload.into()).await
-            .map_err(|e| ErgataiError::NatsError(format!("Failed to publish lock release: {}", e)))?;
+        nats_client
+            .publish(subject, payload.into())
+            .await
+            .map_err(|e| {
+                ErgataiError::NatsError(format!("Failed to publish lock release: {}", e))
+            })?;
 
         info!(
             file_path = %file_path,
@@ -1891,12 +2048,17 @@ impl FileLockManager {
         use crate::file_access::lock_waiter::LockCancelRequest;
         let cancel = LockCancelRequest::new(request_id, agent_id, reason);
 
-        let payload = serde_json::to_vec(&cancel)
-            .map_err(|e| ErgataiError::internal(format!("Failed to serialize cancel request: {}", e)))?;
+        let payload = serde_json::to_vec(&cancel).map_err(|e| {
+            ErgataiError::internal(format!("Failed to serialize cancel request: {}", e))
+        })?;
 
         let subject = cancel.subject();
-        nats_client.publish(subject, payload.into()).await
-            .map_err(|e| ErgataiError::NatsError(format!("Failed to publish lock cancel: {}", e)))?;
+        nats_client
+            .publish(subject, payload.into())
+            .await
+            .map_err(|e| {
+                ErgataiError::NatsError(format!("Failed to publish lock cancel: {}", e))
+            })?;
 
         info!(
             request_id = %request_id,
@@ -1912,9 +2074,10 @@ impl FileLockManager {
         // Normalize path to match database storage format
         let normalized_path = self.validate_and_normalize_path(file_path)?;
 
-        let conn = self.conn.lock().map_err(|e| {
-            ErgataiError::internal(format!("Failed to acquire lock: {}", e))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
 
         let has_lock: bool = conn
             .query_row(
@@ -1987,9 +2150,9 @@ impl FileLockManager {
 
         // Read the file using normalized path
         let full_path = self.project_root.join(&normalized_path);
-        tokio::fs::read(&full_path)
-            .await
-            .map_err(|e| ErgataiError::internal(format!("Failed to read file {}: {}", normalized_path, e)))
+        tokio::fs::read(&full_path).await.map_err(|e| {
+            ErgataiError::internal(format!("Failed to read file {}: {}", normalized_path, e))
+        })
     }
 
     // ─── Single-agent mode detection ─────────────────────────────────────
@@ -2026,7 +2189,10 @@ impl FileLockManager {
         if let Ok(mut guard) = self.disconnected_sessions.lock() {
             let was_disconnected = guard.remove(session_id).is_some();
             if was_disconnected {
-                info!(session_id = session_id, "Session reconnected within stickiness window");
+                info!(
+                    session_id = session_id,
+                    "Session reconnected within stickiness window"
+                );
             }
         }
         self.register_session();
@@ -2039,8 +2205,11 @@ impl FileLockManager {
     /// The session is marked as temporarily_disconnected for SESSION_STICKINESS_SECS.
     pub fn unregister_session(&self) {
         // Use fetch_update for atomic saturating subtract (prevents lost-update race with fetch_add)
-        let prev = self.active_session_count
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |val| Some(val.saturating_sub(1)))
+        let prev = self
+            .active_session_count
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |val| {
+                Some(val.saturating_sub(1))
+            })
             .unwrap_or(0);
         let new = prev.saturating_sub(1);
         // Reset hysteresis timer — count changed
@@ -2166,7 +2335,11 @@ impl FileLockManager {
     ///
     /// This avoids the in-place UPDATE deadlock that occurs when multiple agents
     /// try to upgrade READ→WRITE simultaneously on the same file.
-    pub async fn upgrade_to_write(&self, token: &FileToken, file_path: &str) -> Result<(), ErgataiError> {
+    pub async fn upgrade_to_write(
+        &self,
+        token: &FileToken,
+        file_path: &str,
+    ) -> Result<(), ErgataiError> {
         info!(
             token_id = %token.id,
             file_path = file_path,
@@ -2176,9 +2349,10 @@ impl FileLockManager {
 
         // Step 1: Verify current READ lock exists
         {
-            let conn = self.conn.lock().map_err(|e| {
-                ErgataiError::internal(format!("Failed to acquire lock: {}", e))
-            })?;
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
             let mode: Option<String> = match conn.query_row(
                 "SELECT mode FROM file_locks
                  WHERE token_id = ?1 AND file_path = ?2 AND status = 'ACTIVE'
@@ -2190,7 +2364,8 @@ impl FileLockManager {
                 Err(rusqlite::Error::QueryReturnedNoRows) => None,
                 Err(e) => {
                     return Err(ErgataiError::internal(format!(
-                        "Failed to query lock mode for upgrade: {}", e
+                        "Failed to query lock mode for upgrade: {}",
+                        e
                     )));
                 }
             };
@@ -2202,7 +2377,8 @@ impl FileLockManager {
                 }
                 Some(other) => {
                     return Err(ErgataiError::InvalidArgument(format!(
-                        "Cannot upgrade lock in {} mode (expected READ)", other
+                        "Cannot upgrade lock in {} mode (expected READ)",
+                        other
                     )));
                 }
                 None => {
@@ -2290,7 +2466,11 @@ impl FileLockManager {
     /// Downgrade an existing WRITE lock to READ on the same file.
     ///
     /// Safer than upgrade (no contention risk) — just updates the lock mode.
-    pub fn downgrade_to_read(&self, token: &FileToken, file_path: &str) -> Result<(), ErgataiError> {
+    pub fn downgrade_to_read(
+        &self,
+        token: &FileToken,
+        file_path: &str,
+    ) -> Result<(), ErgataiError> {
         info!(
             token_id = %token.id,
             file_path = file_path,
@@ -2298,9 +2478,10 @@ impl FileLockManager {
             "Downgrading lock from WRITE to READ"
         );
 
-        let conn = self.conn.lock().map_err(|e| {
-            ErgataiError::internal(format!("Failed to acquire lock: {}", e))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
 
         conn.execute_batch("BEGIN IMMEDIATE")
             .map_err(|e| ErgataiError::internal(format!("Failed to begin transaction: {}", e)))?;
@@ -2318,7 +2499,8 @@ impl FileLockManager {
             Err(e) => {
                 conn.execute_batch("ROLLBACK").ok();
                 return Err(ErgataiError::internal(format!(
-                    "Failed to query lock mode for downgrade: {}", e
+                    "Failed to query lock mode for downgrade: {}",
+                    e
                 )));
             }
         };
@@ -2336,8 +2518,9 @@ impl FileLockManager {
                     ErgataiError::internal(format!("Failed to downgrade lock: {}", e))
                 })?;
 
-                conn.execute_batch("COMMIT")
-                    .map_err(|e| ErgataiError::internal(format!("Failed to commit downgrade: {}", e)))?;
+                conn.execute_batch("COMMIT").map_err(|e| {
+                    ErgataiError::internal(format!("Failed to commit downgrade: {}", e))
+                })?;
 
                 info!(token_id = %token.id, file_path = file_path, "Lock downgraded to READ");
                 Ok(())
@@ -2349,7 +2532,8 @@ impl FileLockManager {
             Some(other) => {
                 conn.execute_batch("ROLLBACK").ok();
                 Err(ErgataiError::InvalidArgument(format!(
-                    "Cannot downgrade lock in {} mode", other
+                    "Cannot downgrade lock in {} mode",
+                    other
                 )))
             }
             None => {
@@ -2383,12 +2567,16 @@ impl FileLockManager {
         let mut approve_subscriber = client
             .subscribe("ergatai.file.access.approve")
             .await
-            .map_err(|e| ErgataiError::internal(format!("Failed to subscribe to approve subject: {}", e)))?;
+            .map_err(|e| {
+                ErgataiError::internal(format!("Failed to subscribe to approve subject: {}", e))
+            })?;
 
         let mut reject_subscriber = client
             .subscribe("ergatai.file.access.reject")
             .await
-            .map_err(|e| ErgataiError::internal(format!("Failed to subscribe to reject subject: {}", e)))?;
+            .map_err(|e| {
+                ErgataiError::internal(format!("Failed to subscribe to reject subject: {}", e))
+            })?;
 
         let pending = self.pending_approvals.clone();
 
@@ -2431,7 +2619,8 @@ impl FileLockManager {
 
         // Parse the payload and extract both response and request_id in one pass
         let (response, request_id) = if is_approval {
-            let Ok(payload) = serde_json::from_slice::<FileAccessApprovePayload>(&msg.payload) else {
+            let Ok(payload) = serde_json::from_slice::<FileAccessApprovePayload>(&msg.payload)
+            else {
                 error!("Failed to parse FileAccessApprovePayload");
                 return;
             };
@@ -2442,7 +2631,8 @@ impl FileLockManager {
             };
             (response, payload.request_id)
         } else {
-            let Ok(payload) = serde_json::from_slice::<FileAccessRejectPayload>(&msg.payload) else {
+            let Ok(payload) = serde_json::from_slice::<FileAccessRejectPayload>(&msg.payload)
+            else {
                 error!("Failed to parse FileAccessRejectPayload");
                 return;
             };
@@ -2532,13 +2722,16 @@ impl FileLockManager {
 
         if let Some(client) = &self.nats_client {
             let subject = "ergatai.file.access.escalate.main";
-            let payload_bytes = serde_json::to_vec(&payload)
-                .map_err(|e| ErgataiError::internal(format!("Failed to serialize payload: {}", e)))?;
+            let payload_bytes = serde_json::to_vec(&payload).map_err(|e| {
+                ErgataiError::internal(format!("Failed to serialize payload: {}", e))
+            })?;
 
             client
                 .publish(subject, payload_bytes.into())
                 .await
-                .map_err(|e| ErgataiError::internal(format!("Failed to publish escalation request: {}", e)))?;
+                .map_err(|e| {
+                    ErgataiError::internal(format!("Failed to publish escalation request: {}", e))
+                })?;
 
             // Record the request for idempotency
             if let Ok(mut guard) = self.pending_request_keys.lock() {
@@ -2599,7 +2792,10 @@ impl FileLockManager {
 
                 warn!(request_id = %request_id, "Approval request timed out");
                 Err(ErgataiError::AgentTimeout {
-                    message: format!("Approval request timed out after {} seconds", timeout_duration.as_secs()),
+                    message: format!(
+                        "Approval request timed out after {} seconds",
+                        timeout_duration.as_secs()
+                    ),
                     source: None,
                 })
             }
@@ -2630,7 +2826,10 @@ fn parse_file_mode(s: &str) -> FileMode {
     } else if s.eq_ignore_ascii_case("ADMIN") {
         FileMode::Admin
     } else {
-        tracing::warn!(mode = s, "Unknown file mode in DB, defaulting to Read (least privilege)");
+        tracing::warn!(
+            mode = s,
+            "Unknown file mode in DB, defaulting to Read (least privilege)"
+        );
         FileMode::Read
     }
 }
@@ -2645,7 +2844,10 @@ fn parse_token_status(s: &str) -> TokenStatus {
     } else if s.eq_ignore_ascii_case("REVOKED") {
         TokenStatus::Revoked
     } else {
-        tracing::warn!(status = s, "Unknown token status in DB, defaulting to Expired (fail-safe)");
+        tracing::warn!(
+            status = s,
+            "Unknown token status in DB, defaulting to Expired (fail-safe)"
+        );
         TokenStatus::Expired
     }
 }
@@ -2677,14 +2879,32 @@ fn parse_file_lock_row(row: &rusqlite::Row) -> rusqlite::Result<FileLock> {
         reason: row.get(7)?,
         approved_by: row.get(8)?,
         created_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(9)?)
-            .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))?
+            .map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })?
             .with_timezone(&Utc),
         expires_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(10)?)
-            .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))?
+            .map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })?
             .with_timezone(&Utc),
         heartbeat_interval_secs: row.get::<_, i64>(11)? as u64,
         heartbeat_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(12)?)
-            .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))?
+            .map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })?
             .with_timezone(&Utc),
         status: match row.get::<_, String>(13)?.as_str() {
             "ACTIVE" => TokenStatus::Active,
@@ -2758,7 +2978,10 @@ mod tests {
         assert!(manager.is_file_locked("test.txt").unwrap());
 
         // Release lock
-        manager.release_lock(file_token.id.as_str(), "test.txt").await.unwrap();
+        manager
+            .release_lock(file_token.id.as_str(), "test.txt")
+            .await
+            .unwrap();
 
         // Check lock released
         assert!(!manager.is_file_locked("test.txt").unwrap());
@@ -2807,7 +3030,10 @@ mod tests {
 
         // Second agent should fail (conflict) — now returns LockConflictWithRetry
         let result = manager.acquire_lock(&token2, "test.txt");
-        assert!(matches!(result.await, Err(ErgataiError::LockConflict(_)) | Err(ErgataiError::LockConflictWithRetry { .. })));
+        assert!(matches!(
+            result.await,
+            Err(ErgataiError::LockConflict(_)) | Err(ErgataiError::LockConflictWithRetry { .. })
+        ));
     }
 
     #[tokio::test]
@@ -2937,34 +3163,43 @@ mod tests {
         }
 
         // Upgrade to WRITE
-        manager.upgrade_to_write(&read_token, "test.rs").await.unwrap();
+        manager
+            .upgrade_to_write(&read_token, "test.rs")
+            .await
+            .unwrap();
 
         // Verify a WRITE lock now exists on the file.
         // upgrade_to_write releases the READ lock (original token_id → RELEASED)
         // and creates a new synthetic WRITE token (new token_id → ACTIVE).
         // So we query for any ACTIVE lock on this file with agent_id = "test-agent".
         let conn = manager.conn.lock().unwrap();
-        let active_write: Vec<(String, String)> = conn.prepare(
-            "SELECT token_id, mode FROM file_locks
-             WHERE file_path = ?1 AND agent_id = ?2 AND status = 'ACTIVE'"
-        )
-        .unwrap()
-        .query_map(params!["test.rs", "test-agent"], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })
-        .unwrap()
-        .map(|r| r.unwrap())
-        .collect();
+        let active_write: Vec<(String, String)> = conn
+            .prepare(
+                "SELECT token_id, mode FROM file_locks
+             WHERE file_path = ?1 AND agent_id = ?2 AND status = 'ACTIVE'",
+            )
+            .unwrap()
+            .query_map(params!["test.rs", "test-agent"], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
 
         assert_eq!(active_write.len(), 1);
         assert_eq!(active_write[0].1, "WRITE");
         // Original token should no longer be ACTIVE (it was released during upgrade)
-        let orig_status: String = conn.query_row(
-            "SELECT status FROM file_locks WHERE token_id = ?1 AND file_path = ?2",
-            params![read_token.id.as_str(), "test.rs"],
-            |row| row.get(0),
-        ).unwrap();
-        assert_ne!(orig_status, "ACTIVE", "Original READ lock should not be ACTIVE after upgrade");
+        let orig_status: String = conn
+            .query_row(
+                "SELECT status FROM file_locks WHERE token_id = ?1 AND file_path = ?2",
+                params![read_token.id.as_str(), "test.rs"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_ne!(
+            orig_status, "ACTIVE",
+            "Original READ lock should not be ACTIVE after upgrade"
+        );
     }
 
     #[tokio::test]
@@ -3010,14 +3245,18 @@ mod tests {
 
         // Register two sessions so we're NOT in single-agent mode
         let sys1 = SystemToken::new(
-            "agent-a".to_string(), "session-a".to_string(),
+            "agent-a".to_string(),
+            "session-a".to_string(),
             manager.project_root.to_string_lossy().to_string(),
-            3600, 30,
+            3600,
+            30,
         );
         let sys2 = SystemToken::new(
-            "agent-b".to_string(), "session-b".to_string(),
+            "agent-b".to_string(),
+            "session-b".to_string(),
             manager.project_root.to_string_lossy().to_string(),
-            3600, 30,
+            3600,
+            30,
         );
         manager.register_system_token(&sys1).unwrap();
         manager.register_system_token(&sys2).unwrap();
@@ -3060,21 +3299,25 @@ mod tests {
         // The original READ lock was released, then re-acquired with a new token.
         // Check: at least one ACTIVE lock for agent-a on test.rs with mode READ.
         let conn = manager.conn.lock().unwrap();
-        let restored: Vec<(String, String)> = conn.prepare(
-            "SELECT token_id, mode FROM file_locks
-             WHERE file_path = ?1 AND agent_id = ?2 AND status = 'ACTIVE'"
-        )
-        .unwrap()
-        .query_map(params!["test.rs", "agent-a"], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })
-        .unwrap()
-        .map(|r| r.unwrap())
-        .collect();
+        let restored: Vec<(String, String)> = conn
+            .prepare(
+                "SELECT token_id, mode FROM file_locks
+             WHERE file_path = ?1 AND agent_id = ?2 AND status = 'ACTIVE'",
+            )
+            .unwrap()
+            .query_map(params!["test.rs", "agent-a"], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
 
         // Should have exactly one restored READ lock
-        assert!(restored.iter().any(|(_, m)| m == "READ"),
-            "Expected a restored READ lock for agent-a on test.rs, got: {:?}", restored);
+        assert!(
+            restored.iter().any(|(_, m)| m == "READ"),
+            "Expected a restored READ lock for agent-a on test.rs, got: {:?}",
+            restored
+        );
     }
 
     #[tokio::test]

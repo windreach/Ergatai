@@ -1,9 +1,9 @@
 // Simple Cross-Agent Test (No NAPI Dependencies)
 // This demonstrates the core cross-agent logic works
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tokio::sync::{mpsc, Mutex, RwLock};
-use serde::{Deserialize, Serialize};
 
 /// Cross-agent message
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -50,7 +50,12 @@ impl SimpleCrossAgentManager {
         rx
     }
 
-    pub async fn send_message(&self, from: String, to: String, content: String) -> Result<String, String> {
+    pub async fn send_message(
+        &self,
+        from: String,
+        to: String,
+        content: String,
+    ) -> Result<String, String> {
         // Create conversation ID
         let conv_id = format!("conv-{}-{}", from, to);
 
@@ -69,18 +74,21 @@ impl SimpleCrossAgentManager {
         // Add to conversation
         {
             let mut convs = self.conversations.write().await;
-            let conv = convs.entry(conv_id.clone()).or_insert_with(|| Conversation {
-                id: conv_id.clone(),
-                participants: vec![from.clone(), to.clone()],
-                messages: Vec::new(),
-            });
+            let conv = convs
+                .entry(conv_id.clone())
+                .or_insert_with(|| Conversation {
+                    id: conv_id.clone(),
+                    participants: vec![from.clone(), to.clone()],
+                    messages: Vec::new(),
+                });
             conv.messages.push(message.clone());
         }
 
         // Try to deliver
         let queues = self.agent_queues.lock().await;
         if let Some(tx) = queues.get(&to) {
-            tx.send(message).map_err(|e| format!("Failed to send: {}", e))?;
+            tx.send(message)
+                .map_err(|e| format!("Failed to send: {}", e))?;
         }
 
         Ok(conv_id)
@@ -134,7 +142,11 @@ async fn main() {
 
     for (msg, expected) in test_cases {
         let detected = detect_intent(msg);
-        let status = if detected.as_deref() == expected { "✅" } else { "❌" };
+        let status = if detected.as_deref() == expected {
+            "✅"
+        } else {
+            "❌"
+        };
         println!("{} {:?} → {:?}", status, msg, detected);
     }
 
@@ -203,7 +215,11 @@ async fn main() {
     let convs = manager.list_conversations().await;
     println!("✅ Total conversations: {}", convs.len());
     for conv in convs {
-        println!("   - {} ({} participants)", conv.id, conv.participants.len());
+        println!(
+            "   - {} ({} participants)",
+            conv.id,
+            conv.participants.len()
+        );
     }
 
     println!("\n=== All Tests Passed! ===");

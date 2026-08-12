@@ -14,8 +14,8 @@
 
 #[cfg(test)]
 mod tests {
+    use ergatai::acp::manager::{manager, SessionCommand};
     use ergatai::acp::sdk_session::spawn_session_task;
-    use ergatai::acp::manager::{SessionCommand, manager};
     use ergatai::agent::config::get_agent_config;
     use tokio::sync::oneshot;
 
@@ -39,7 +39,10 @@ mod tests {
             }
             Err(e) => {
                 println!("❌ Failed to load config: {}", e);
-                println!("💡 Create config at ~/.config/ergatai/agents/{}.json", agent_name);
+                println!(
+                    "💡 Create config at ~/.config/ergatai/agents/{}.json",
+                    agent_name
+                );
                 panic!("Agent config not found");
             }
         };
@@ -50,36 +53,38 @@ mod tests {
         println!("   This will start the agent process and initialize ACP protocol");
         let (session_id_tx, session_id_rx) = oneshot::channel();
 
-        let cwd = std::env::var("TEST_CWD")
-            .unwrap_or_else(|_| std::env::current_dir().unwrap().to_string_lossy().to_string());
+        let cwd = std::env::var("TEST_CWD").unwrap_or_else(|_| {
+            std::env::current_dir()
+                .unwrap()
+                .to_string_lossy()
+                .to_string()
+        });
         println!("   Working directory: {}\n", cwd);
 
         spawn_session_task(config.clone(), cwd, session_id_tx);
 
         // Wait for session creation (with timeout)
         println!("⏳ Waiting for session creation...");
-        let session_id = match tokio::time::timeout(
-            tokio::time::Duration::from_secs(30),
-            session_id_rx
-        ).await {
-            Ok(Ok(Ok(id))) => {
-                println!("✅ Session created successfully!");
-                println!("   Session ID: {}\n", id);
-                id
-            }
-            Ok(Ok(Err(e))) => {
-                println!("❌ Session creation failed: {}\n", e);
-                panic!("Session creation failed");
-            }
-            Ok(Err(_)) => {
-                println!("❌ Session channel died\n");
-                panic!("Session channel died");
-            }
-            Err(_) => {
-                println!("❌ Session creation timed out (30s)\n");
-                panic!("Session creation timeout");
-            }
-        };
+        let session_id =
+            match tokio::time::timeout(tokio::time::Duration::from_secs(30), session_id_rx).await {
+                Ok(Ok(Ok(id))) => {
+                    println!("✅ Session created successfully!");
+                    println!("   Session ID: {}\n", id);
+                    id
+                }
+                Ok(Ok(Err(e))) => {
+                    println!("❌ Session creation failed: {}\n", e);
+                    panic!("Session creation failed");
+                }
+                Ok(Err(_)) => {
+                    println!("❌ Session channel died\n");
+                    panic!("Session channel died");
+                }
+                Err(_) => {
+                    println!("❌ Session creation timed out (30s)\n");
+                    panic!("Session creation timeout");
+                }
+            };
 
         // Step 3: Verify session is registered
         println!("🔍 Step 3: Verifying session registration...");
@@ -117,10 +122,7 @@ mod tests {
             });
 
             // Wait for response (with timeout)
-            match tokio::time::timeout(
-                tokio::time::Duration::from_secs(60),
-                reply_rx
-            ).await {
+            match tokio::time::timeout(tokio::time::Duration::from_secs(60), reply_rx).await {
                 Ok(Ok(Ok(()))) => {
                     println!("✅ Prompt completed successfully!\n");
                 }

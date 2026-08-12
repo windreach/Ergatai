@@ -2,8 +2,8 @@
 //!
 //! Exposes Rust agent management functions to TypeScript via NAPI-RS.
 
-use napi_derive::napi;
 use napi::bindgen_prelude::*;
+use napi_derive::napi;
 
 use crate::agent::{
     config::{self, AgentConfig},
@@ -31,8 +31,7 @@ pub async fn discover_acp_runtimes() -> Result<Vec<AcpRuntimeCatalogEntry>> {
 #[napi]
 pub async fn get_global_agent_config() -> Result<GlobalAgentConfig> {
     guard();
-    global_config::load_global_agent_config()
-        .map_err(to_napi)
+    global_config::load_global_agent_config().map_err(to_napi)
 }
 
 /// Save the global agent configuration.
@@ -41,8 +40,7 @@ pub async fn get_global_agent_config() -> Result<GlobalAgentConfig> {
 #[napi]
 pub async fn set_global_agent_config(config: GlobalAgentConfig) -> Result<()> {
     guard();
-    global_config::save_global_agent_config(&config)
-        .map_err(to_napi)?;
+    global_config::save_global_agent_config(&config).map_err(to_napi)?;
     Ok(())
 }
 
@@ -52,8 +50,7 @@ pub async fn set_global_agent_config(config: GlobalAgentConfig) -> Result<()> {
 #[napi]
 pub async fn save_custom_harness(harness: HarnessDefinition) -> Result<AcpRuntimeCatalogEntry> {
     guard();
-    custom_harness::save_custom_harness(&harness)
-        .map_err(to_napi)?;
+    custom_harness::save_custom_harness(&harness).map_err(to_napi)?;
 
     // Return the updated catalog entry for this harness
     let runtimes = discovery::discover_acp_runtimes();
@@ -61,10 +58,12 @@ pub async fn save_custom_harness(harness: HarnessDefinition) -> Result<AcpRuntim
     runtimes
         .into_iter()
         .find(|r| r.id == harness.id)
-        .ok_or_else(|| Error::from_reason(format!(
-            "Failed to find harness '{}' after save",
-            harness.id
-        )))
+        .ok_or_else(|| {
+            Error::from_reason(format!(
+                "Failed to find harness '{}' after save",
+                harness.id
+            ))
+        })
 }
 
 /// Delete a custom harness by id.
@@ -73,8 +72,7 @@ pub async fn save_custom_harness(harness: HarnessDefinition) -> Result<AcpRuntim
 #[napi]
 pub async fn delete_custom_harness(id: String) -> Result<()> {
     guard();
-    custom_harness::delete_custom_harness(&id)
-        .map_err(to_napi)
+    custom_harness::delete_custom_harness(&id).map_err(to_napi)
 }
 
 /// Install an ACP runtime by executing its predefined install command.
@@ -96,8 +94,7 @@ pub async fn install_acp_runtime(runtime_id: String) -> Result<String> {
 #[napi]
 pub async fn get_agent_config(name: String) -> Result<AgentConfig> {
     guard();
-    config::get_agent_config(&name)
-        .map_err(to_napi)
+    config::get_agent_config(&name).map_err(to_napi)
 }
 
 /// Save agent configuration.
@@ -106,8 +103,7 @@ pub async fn get_agent_config(name: String) -> Result<AgentConfig> {
 #[napi]
 pub async fn save_agent_config(cfg: AgentConfig) -> Result<()> {
     guard();
-    config::save_agent_config(&cfg)
-        .map_err(to_napi)
+    config::save_agent_config(&cfg).map_err(to_napi)
 }
 
 // ===== Hosted Agent Configuration =====
@@ -148,8 +144,7 @@ impl From<&HostedAgentConfig> for NapiHostedAgent {
 #[napi]
 pub async fn list_hosted_agents() -> Result<Vec<String>> {
     guard();
-    hosted_config::list_hosted_agents()
-        .map_err(to_napi)
+    hosted_config::list_hosted_agents().map_err(to_napi)
 }
 
 /// Get detailed info about a hosted agent.
@@ -159,8 +154,7 @@ pub async fn list_hosted_agents() -> Result<Vec<String>> {
 #[napi]
 pub async fn get_hosted_agent(name: String) -> Result<NapiHostedAgent> {
     guard();
-    let config = hosted_config::load_hosted_agent(&name)
-        .map_err(to_napi)?;
+    let config = hosted_config::load_hosted_agent(&name).map_err(to_napi)?;
     Ok(NapiHostedAgent::from(&config))
 }
 
@@ -172,17 +166,13 @@ pub async fn get_hosted_agent(name: String) -> Result<NapiHostedAgent> {
 pub async fn get_hosted_agent_settings(name: String) -> Result<String> {
     guard();
     // Validate name to prevent path traversal
-    hosted_config::validate_agent_name(&name)
-        .map_err(to_napi)?;
+    hosted_config::validate_agent_name(&name).map_err(to_napi)?;
 
-    let base_dir = hosted_config::hosted_agents_dir()
-        .map_err(to_napi)?;
+    let base_dir = hosted_config::hosted_agents_dir().map_err(to_napi)?;
     let settings_path = base_dir.join(&name).join("settings.json");
 
     if !settings_path.exists() {
-        return Err(Error::from_reason(format!(
-            "Agent '{}' not found", name
-        )));
+        return Err(Error::from_reason(format!("Agent '{}' not found", name)));
     }
 
     std::fs::read_to_string(&settings_path)
@@ -194,16 +184,12 @@ pub async fn get_hosted_agent_settings(name: String) -> Result<String> {
 /// `settings_json` is the full JSON string including the `ergatai` group.
 /// Returns the agent directory path on success.
 #[napi]
-pub async fn create_hosted_agent(
-    name: String,
-    settings_json: String,
-) -> Result<String> {
+pub async fn create_hosted_agent(name: String, settings_json: String) -> Result<String> {
     guard();
     let settings: serde_json::Value = serde_json::from_str(&settings_json)
         .map_err(|e| Error::from_reason(format!("Invalid JSON: {}", e)))?;
 
-    let path = hosted_config::create_hosted_agent(&name, &settings)
-        .map_err(to_napi)?;
+    let path = hosted_config::create_hosted_agent(&name, &settings).map_err(to_napi)?;
 
     Ok(path.to_string_lossy().to_string())
 }
@@ -212,24 +198,19 @@ pub async fn create_hosted_agent(
 ///
 /// `settings_json` is the full JSON string including the `ergatai` group.
 #[napi]
-pub async fn update_hosted_agent(
-    name: String,
-    settings_json: String,
-) -> Result<()> {
+pub async fn update_hosted_agent(name: String, settings_json: String) -> Result<()> {
     guard();
     let settings: serde_json::Value = serde_json::from_str(&settings_json)
         .map_err(|e| Error::from_reason(format!("Invalid JSON: {}", e)))?;
 
-    hosted_config::update_hosted_agent(&name, &settings)
-        .map_err(to_napi)
+    hosted_config::update_hosted_agent(&name, &settings).map_err(to_napi)
 }
 
 /// Delete a hosted agent and its directory.
 #[napi]
 pub async fn delete_hosted_agent(name: String) -> Result<()> {
     guard();
-    hosted_config::delete_hosted_agent(&name)
-        .map_err(to_napi)
+    hosted_config::delete_hosted_agent(&name).map_err(to_napi)
 }
 
 /// Get the base directory for hosted agents.
@@ -238,7 +219,6 @@ pub async fn delete_hosted_agent(name: String) -> Result<()> {
 #[napi]
 pub async fn get_hosted_agents_dir() -> Result<String> {
     guard();
-    let dir = hosted_config::hosted_agents_dir()
-        .map_err(to_napi)?;
+    let dir = hosted_config::hosted_agents_dir().map_err(to_napi)?;
     Ok(dir.to_string_lossy().to_string())
 }

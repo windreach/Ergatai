@@ -130,11 +130,19 @@ pub enum ErgataiError {
 
     /// Agent initialization failed — preserves source error chain
     #[error("Agent initialization failed: {message}")]
-    AgentInitFailed { message: String, #[source] source: Option<BoxError> },
+    AgentInitFailed {
+        message: String,
+        #[source]
+        source: Option<BoxError>,
+    },
 
     /// Agent timeout — preserves source error chain (e.g., tokio::time::error::Elapsed)
     #[error("Agent timeout: {message}")]
-    AgentTimeout { message: String, #[source] source: Option<BoxError> },
+    AgentTimeout {
+        message: String,
+        #[source]
+        source: Option<BoxError>,
+    },
 
     /// Agent protocol error (JSON-RPC, ACP protocol violations)
     #[error("Agent protocol error: {0}")]
@@ -160,7 +168,11 @@ pub enum ErgataiError {
     // ===== Network Errors =====
     /// Network connection failed — preserves source error chain
     #[error("Network error: {message}")]
-    NetworkError { message: String, #[source] source: Option<BoxError> },
+    NetworkError {
+        message: String,
+        #[source]
+        source: Option<BoxError>,
+    },
 
     /// NATS connection error
     #[error("NATS error: {0}")]
@@ -205,7 +217,11 @@ pub enum ErgataiError {
     // ===== Internal Errors =====
     /// Unexpected internal error — preserves source error chain
     #[error("Internal error: {message}")]
-    InternalError { message: String, #[source] source: Option<BoxError> },
+    InternalError {
+        message: String,
+        #[source]
+        source: Option<BoxError>,
+    },
 
     /// Channel communication error
     #[error("Channel error: {0}")]
@@ -213,7 +229,11 @@ pub enum ErgataiError {
 
     /// JSON serialization/deserialization error — preserves source error chain
     #[error("JSON error: {message}")]
-    JsonError { message: String, #[source] source: Option<BoxError> },
+    JsonError {
+        message: String,
+        #[source]
+        source: Option<BoxError>,
+    },
 }
 
 // ===== Source-preserving From impls =====
@@ -248,52 +268,97 @@ impl From<rusqlite::Error> for ErgataiError {
 impl ErgataiError {
     /// Internal error without source (backward compat convenience)
     pub fn internal(message: impl Into<String>) -> Self {
-        Self::InternalError { message: message.into(), source: None }
+        Self::InternalError {
+            message: message.into(),
+            source: None,
+        }
     }
 
     /// Internal error with source chain
-    pub fn internal_with_source(message: impl Into<String>, source: impl std::error::Error + Send + Sync + 'static) -> Self {
-        Self::InternalError { message: message.into(), source: Some(Box::new(source)) }
+    pub fn internal_with_source(
+        message: impl Into<String>,
+        source: impl std::error::Error + Send + Sync + 'static,
+    ) -> Self {
+        Self::InternalError {
+            message: message.into(),
+            source: Some(Box::new(source)),
+        }
     }
 
     /// Network error without source
     pub fn network(message: impl Into<String>) -> Self {
-        Self::NetworkError { message: message.into(), source: None }
+        Self::NetworkError {
+            message: message.into(),
+            source: None,
+        }
     }
 
     /// Network error with source chain
-    pub fn network_with_source(message: impl Into<String>, source: impl std::error::Error + Send + Sync + 'static) -> Self {
-        Self::NetworkError { message: message.into(), source: Some(Box::new(source)) }
+    pub fn network_with_source(
+        message: impl Into<String>,
+        source: impl std::error::Error + Send + Sync + 'static,
+    ) -> Self {
+        Self::NetworkError {
+            message: message.into(),
+            source: Some(Box::new(source)),
+        }
     }
 
     /// Agent timeout without source
     pub fn agent_timeout(message: impl Into<String>) -> Self {
-        Self::AgentTimeout { message: message.into(), source: None }
+        Self::AgentTimeout {
+            message: message.into(),
+            source: None,
+        }
     }
 
     /// Agent timeout with source chain
-    pub fn agent_timeout_with_source(message: impl Into<String>, source: impl std::error::Error + Send + Sync + 'static) -> Self {
-        Self::AgentTimeout { message: message.into(), source: Some(Box::new(source)) }
+    pub fn agent_timeout_with_source(
+        message: impl Into<String>,
+        source: impl std::error::Error + Send + Sync + 'static,
+    ) -> Self {
+        Self::AgentTimeout {
+            message: message.into(),
+            source: Some(Box::new(source)),
+        }
     }
 
     /// Agent init failed without source
     pub fn agent_init_failed(message: impl Into<String>) -> Self {
-        Self::AgentInitFailed { message: message.into(), source: None }
+        Self::AgentInitFailed {
+            message: message.into(),
+            source: None,
+        }
     }
 
     /// Agent init failed with source chain
-    pub fn agent_init_failed_with_source(message: impl Into<String>, source: impl std::error::Error + Send + Sync + 'static) -> Self {
-        Self::AgentInitFailed { message: message.into(), source: Some(Box::new(source)) }
+    pub fn agent_init_failed_with_source(
+        message: impl Into<String>,
+        source: impl std::error::Error + Send + Sync + 'static,
+    ) -> Self {
+        Self::AgentInitFailed {
+            message: message.into(),
+            source: Some(Box::new(source)),
+        }
     }
 
     /// JSON error without source
     pub fn json(message: impl Into<String>) -> Self {
-        Self::JsonError { message: message.into(), source: None }
+        Self::JsonError {
+            message: message.into(),
+            source: None,
+        }
     }
 
     /// JSON error with source chain
-    pub fn json_with_source(message: impl Into<String>, source: impl std::error::Error + Send + Sync + 'static) -> Self {
-        Self::JsonError { message: message.into(), source: Some(Box::new(source)) }
+    pub fn json_with_source(
+        message: impl Into<String>,
+        source: impl std::error::Error + Send + Sync + 'static,
+    ) -> Self {
+        Self::JsonError {
+            message: message.into(),
+            source: Some(Box::new(source)),
+        }
     }
 }
 
@@ -448,10 +513,7 @@ mod tests {
         let err = ConfigError::FileNotFound {
             path: PathBuf::from("/etc/app.toml"),
         };
-        assert_eq!(
-            err.to_string(),
-            "config file not found: /etc/app.toml"
-        );
+        assert_eq!(err.to_string(), "config file not found: /etc/app.toml");
 
         let ergatai_err = ErgataiError::ConfigError(err);
         assert_eq!(ergatai_err.error_code(), ErrorCode::ConfigFileNotFound);
@@ -534,7 +596,8 @@ mod tests {
 
     #[test]
     fn test_source_chain_preserved() {
-        let io_err = std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "connection refused");
+        let io_err =
+            std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "connection refused");
         let err = ErgataiError::network_with_source("failed to connect", io_err);
 
         // Source chain accessible via std::error::Error::source()
@@ -556,10 +619,14 @@ mod tests {
     #[test]
     fn test_internal_helpers() {
         let err1 = ErgataiError::internal("simple");
-        assert!(matches!(err1, ErgataiError::InternalError { ref message, source: None } if message == "simple"));
+        assert!(
+            matches!(err1, ErgataiError::InternalError { ref message, source: None } if message == "simple")
+        );
 
         let io_err = std::io::Error::other("boom");
         let err2 = ErgataiError::internal_with_source("wrapped", io_err);
-        assert!(matches!(err2, ErgataiError::InternalError { ref message, source: Some(_) } if message == "wrapped"));
+        assert!(
+            matches!(err2, ErgataiError::InternalError { ref message, source: Some(_) } if message == "wrapped")
+        );
     }
 }

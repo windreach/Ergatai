@@ -13,13 +13,13 @@ use napi_derive::napi;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
+use crate::acp::sdk_session::{approval_waiters, ApprovalResponse};
 use crate::error::ErgataiError;
 use crate::file_access::{
     ConfigManager, FileLockManager, FileMode, FileToken, SnapshotManager, SystemToken, Watchdog,
     WatchdogConfig,
 };
 use crate::napi::to_napi;
-use crate::acp::sdk_session::{ApprovalResponse, approval_waiters};
 
 /// Per-project file access control state
 #[derive(Clone)]
@@ -38,9 +38,11 @@ struct FileAccessState {
 static FILE_ACCESS_STATE: OnceLock<RwLock<FileAccessState>> = OnceLock::new();
 
 fn file_access_state() -> &'static RwLock<FileAccessState> {
-    FILE_ACCESS_STATE.get_or_init(|| RwLock::new(FileAccessState {
-        projects: HashMap::new(),
-    }))
+    FILE_ACCESS_STATE.get_or_init(|| {
+        RwLock::new(FileAccessState {
+            projects: HashMap::new(),
+        })
+    })
 }
 
 /// Get or initialize file access state for a project
@@ -48,16 +50,12 @@ async fn get_project_state(project_id: &str) -> Result<ProjectFileAccessState, E
     let state = file_access_state();
     let state = state.read().await;
 
-    state
-        .projects
-        .get(project_id)
-        .cloned()
-        .ok_or_else(|| {
-            ErgataiError::NotFound(format!(
-                "File access control not initialized for project: {}",
-                project_id
-            ))
-        })
+    state.projects.get(project_id).cloned().ok_or_else(|| {
+        ErgataiError::NotFound(format!(
+            "File access control not initialized for project: {}",
+            project_id
+        ))
+    })
 }
 
 /// Initialize file access control system for a project
@@ -65,10 +63,7 @@ async fn get_project_state(project_id: &str) -> Result<ProjectFileAccessState, E
 /// Creates lock database, snapshot manager, watchdog, and file system watcher.
 /// Returns a handle that can be used to manage the system.
 #[napi]
-pub async fn file_access_init(
-    project_id: String,
-    project_root: String,
-) -> napi::Result<()> {
+pub async fn file_access_init(project_id: String, project_root: String) -> napi::Result<()> {
     crate::napi::guard();
 
     let state = file_access_state();
@@ -76,7 +71,10 @@ pub async fn file_access_init(
 
     // Check if already initialized
     if state.projects.contains_key(&project_id) {
-        info!(project_id = project_id, "File access control already initialized");
+        info!(
+            project_id = project_id,
+            "File access control already initialized"
+        );
         return Ok(());
     }
 
@@ -89,12 +87,18 @@ pub async fn file_access_init(
     // Ensure .ergatai directory exists
     let lock_db_parent = lock_db_path.parent().ok_or_else(|| {
         napi::Error::from_reason(format!(
-            "Invalid lock_db_path has no parent: {:?}", lock_db_path
+            "Invalid lock_db_path has no parent: {:?}",
+            lock_db_path
         ))
     })?;
     tokio::fs::create_dir_all(lock_db_parent)
         .await
-        .map_err(|e| to_napi(ErgataiError::internal(format!("Failed to create .ergatai directory: {}", e))))?;
+        .map_err(|e| {
+            to_napi(ErgataiError::internal(format!(
+                "Failed to create .ergatai directory: {}",
+                e
+            )))
+        })?;
 
     // Try to get NATS client (optional, None = degraded mode)
     let nats_client = if let Some(conn) = crate::nats::get_nats_connection().await {
@@ -117,8 +121,7 @@ pub async fn file_access_init(
     let lock_manager = Arc::new(lock_manager);
 
     // Create SnapshotManager
-    let snapshot_manager = SnapshotManager::new(&project_root_path)
-        .map_err(to_napi)?;
+    let snapshot_manager = SnapshotManager::new(&project_root_path).map_err(to_napi)?;
     let snapshot_manager = Arc::new(snapshot_manager);
 
     // Create Watchdog
@@ -128,20 +131,21 @@ pub async fn file_access_init(
     let watchdog = Arc::new(RwLock::new(watchdog));
 
     // Create ConfigManager (loads .ergatai/config.json if present, with hot reload every 30s)
-    let config_manager = ConfigManager::new(
-        &project_root_path,
-        Some(std::time::Duration::from_secs(30)),
-    )
-    .map_err(to_napi)?;
+    let config_manager =
+        ConfigManager::new(&project_root_path, Some(std::time::Duration::from_secs(30)))
+            .map_err(to_napi)?;
     let config_manager = Arc::new(config_manager);
 
     // Store in global state
-    state.projects.insert(project_id.clone(), ProjectFileAccessState {
-        lock_manager,
-        snapshot_manager,
-        watchdog,
-        config_manager,
-    });
+    state.projects.insert(
+        project_id.clone(),
+        ProjectFileAccessState {
+            lock_manager,
+            snapshot_manager,
+            watchdog,
+            config_manager,
+        },
+    );
 
     info!(
         project_id = project_id,
@@ -175,7 +179,10 @@ pub async fn file_access_register_system_token(
     );
 
     // Register in lock manager
-    project_state.lock_manager.register_system_token(&token).map_err(to_napi)?;
+    project_state
+        .lock_manager
+        .register_system_token(&token)
+        .map_err(to_napi)?;
 
     info!(
         project_id = project_id,
@@ -305,7 +312,11 @@ pub async fn file_access_release_lock(
 
     let project_state = get_project_state(&project_id).await.map_err(to_napi)?;
 
-    project_state.lock_manager.release_lock(&token_id, &file_path).await.map_err(to_napi)?;
+    project_state
+        .lock_manager
+        .release_lock(&token_id, &file_path)
+        .await
+        .map_err(to_napi)?;
 
     info!(
         project_id = project_id,
@@ -402,7 +413,11 @@ pub async fn file_access_read_latest(
 
     let project_state = get_project_state(&project_id).await.map_err(to_napi)?;
 
-    let content = project_state.lock_manager.read_latest(&file_path).await.map_err(to_napi)?;
+    let content = project_state
+        .lock_manager
+        .read_latest(&file_path)
+        .await
+        .map_err(to_napi)?;
 
     Ok(content)
 }
@@ -423,12 +438,10 @@ pub async fn file_access_create_snapshot(
     let snapshot_manager = project_state.snapshot_manager.clone();
     let fp = file_path.clone();
     let aid = agent_id.clone();
-    let git_hash = tokio::task::spawn_blocking(move || {
-        snapshot_manager.create_snapshot(&fp, &aid)
-    })
-    .await
-    .map_err(|e| napi::Error::from_reason(format!("spawn_blocking join error: {}", e)))?
-    .map_err(to_napi)?;
+    let git_hash = tokio::task::spawn_blocking(move || snapshot_manager.create_snapshot(&fp, &aid))
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("spawn_blocking join error: {}", e)))?
+        .map_err(to_napi)?;
 
     info!(
         project_id = project_id,
@@ -453,7 +466,10 @@ pub async fn file_access_mark_busy(
     let project_state = get_project_state(&project_id).await.map_err(to_napi)?;
 
     let watchdog = project_state.watchdog.read().await;
-    watchdog.mark_busy(&session_id, duration_secs as u64).await.map_err(to_napi)?;
+    watchdog
+        .mark_busy(&session_id, duration_secs as u64)
+        .await
+        .map_err(to_napi)?;
 
     info!(
         project_id = project_id,
@@ -467,10 +483,7 @@ pub async fn file_access_mark_busy(
 
 /// Clear busy status for a session
 #[napi]
-pub async fn file_access_clear_busy(
-    project_id: String,
-    session_id: String,
-) -> napi::Result<()> {
+pub async fn file_access_clear_busy(project_id: String, session_id: String) -> napi::Result<()> {
     crate::napi::guard();
 
     let project_state = get_project_state(&project_id).await.map_err(to_napi)?;
@@ -503,9 +516,15 @@ pub async fn file_access_shutdown(project_id: String) -> napi::Result<()> {
         let mut watchdog = project_state.watchdog.write().await;
         watchdog.stop().map_err(to_napi)?;
 
-        info!(project_id = project_id, "File access control system shutdown");
+        info!(
+            project_id = project_id,
+            "File access control system shutdown"
+        );
     } else {
-        warn!(project_id = project_id, "File access control not initialized for project");
+        warn!(
+            project_id = project_id,
+            "File access control not initialized for project"
+        );
     }
 
     Ok(())
@@ -525,9 +544,9 @@ pub async fn file_access_respond_approval(
     crate::napi::guard();
 
     // Get the approval waiters lock
-    let mut waiters = approval_waiters().lock().map_err(|_| {
-        napi::Error::from_reason("Failed to acquire approval waiters lock")
-    })?;
+    let mut waiters = approval_waiters()
+        .lock()
+        .map_err(|_| napi::Error::from_reason("Failed to acquire approval waiters lock"))?;
 
     // Remove the waiter and send the response
     if let Some(tx) = waiters.remove(&request_id) {

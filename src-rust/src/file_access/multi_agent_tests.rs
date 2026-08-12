@@ -11,8 +11,8 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::file_access::{FileLockManager, FileMode, FileToken, SystemToken};
     use crate::error::ErgataiError;
+    use crate::file_access::{FileLockManager, FileMode, FileToken, SystemToken};
     use std::sync::Arc;
     use tempfile::TempDir;
 
@@ -31,9 +31,7 @@ mod tests {
         std::fs::write(project_root.join("src/app.rs"), "struct App;").unwrap();
         std::fs::write(project_root.join("src/util.rs"), "fn util() {}").unwrap();
 
-        let manager = Arc::new(
-            FileLockManager::new(&db_path, project_root, None).unwrap()
-        );
+        let manager = Arc::new(FileLockManager::new(&db_path, project_root, None).unwrap());
         (temp_dir, manager)
     }
 
@@ -90,12 +88,17 @@ mod tests {
         assert!(result.is_err(), "Expected error, got: {:?}", result);
         let err = result.unwrap_err();
         assert!(
-            matches!(err, ErgataiError::LockConflict(_)) || matches!(err, ErgataiError::LockConflictWithRetry { .. }),
-            "Expected LockConflict or LockConflictWithRetry, got: {:?}", err
+            matches!(err, ErgataiError::LockConflict(_))
+                || matches!(err, ErgataiError::LockConflictWithRetry { .. }),
+            "Expected LockConflict or LockConflictWithRetry, got: {:?}",
+            err
         );
 
         // Agent A releases → Agent B can now acquire
-        manager.release_lock(token_a.id.as_str(), "main.rs").await.unwrap();
+        manager
+            .release_lock(token_a.id.as_str(), "main.rs")
+            .await
+            .unwrap();
         assert!(!manager.is_file_locked("main.rs").unwrap());
 
         manager.acquire_lock(&token_b, "main.rs").await.unwrap();
@@ -142,7 +145,10 @@ mod tests {
 
         manager.update_heartbeat(token.id.as_str()).unwrap();
 
-        manager.release_lock(token.id.as_str(), "lib.rs").await.unwrap();
+        manager
+            .release_lock(token.id.as_str(), "lib.rs")
+            .await
+            .unwrap();
         assert!(!manager.is_file_locked("lib.rs").unwrap());
 
         let sys_b = SystemToken::new("agent-b".into(), "session-b".into(), root, 3600, 30);
@@ -166,11 +172,17 @@ mod tests {
         let token = make_file_token("agent-a", "session-a", &sys.id, "src/**", FileMode::Write);
 
         manager.acquire_lock(&token, "src/app.rs").await.unwrap();
-        manager.release_lock(token.id.as_str(), "src/app.rs").await.unwrap();
+        manager
+            .release_lock(token.id.as_str(), "src/app.rs")
+            .await
+            .unwrap();
 
         let result = manager.acquire_lock(&token, "main.rs").await;
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), ErgataiError::PermissionDenied(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            ErgataiError::PermissionDenied(_)
+        ));
     }
 
     // ================================================================
@@ -242,9 +254,18 @@ mod tests {
         assert!(manager.is_file_locked("lib.rs").unwrap());
         assert!(manager.is_file_locked("config.rs").unwrap());
 
-        manager.release_lock(token_a.id.as_str(), "main.rs").await.unwrap();
-        manager.release_lock(token_b.id.as_str(), "lib.rs").await.unwrap();
-        manager.release_lock(token_c.id.as_str(), "config.rs").await.unwrap();
+        manager
+            .release_lock(token_a.id.as_str(), "main.rs")
+            .await
+            .unwrap();
+        manager
+            .release_lock(token_b.id.as_str(), "lib.rs")
+            .await
+            .unwrap();
+        manager
+            .release_lock(token_c.id.as_str(), "config.rs")
+            .await
+            .unwrap();
 
         assert!(!manager.is_file_locked("main.rs").unwrap());
         assert!(!manager.is_file_locked("lib.rs").unwrap());
@@ -264,9 +285,21 @@ mod tests {
         let token = make_file_token("agent-a", "session-a", &sys.id, "**", FileMode::Write);
 
         manager.acquire_lock(&token, "main.rs").await.unwrap();
-        manager.release_lock(token.id.as_str(), "main.rs").await.unwrap();
+        manager
+            .release_lock(token.id.as_str(), "main.rs")
+            .await
+            .unwrap();
 
-        manager.log_audit("agent-a", "session-a", "TEST_CHECK", Some("main.rs"), Some("WRITE"), Some("test")).unwrap();
+        manager
+            .log_audit(
+                "agent-a",
+                "session-a",
+                "TEST_CHECK",
+                Some("main.rs"),
+                Some("WRITE"),
+                Some("test"),
+            )
+            .unwrap();
     }
 
     // ================================================================
@@ -308,7 +341,8 @@ mod tests {
         let token_a_clone = token_a.clone();
         let token_b_clone = token_b.clone();
 
-        let handle_a = tokio::spawn(async move { mgr_a.acquire_lock(&token_a_clone, "main.rs").await });
+        let handle_a =
+            tokio::spawn(async move { mgr_a.acquire_lock(&token_a_clone, "main.rs").await });
         let handle_b = tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             mgr_b.acquire_lock(&token_b_clone, "main.rs").await
@@ -319,7 +353,12 @@ mod tests {
 
         let a_ok = result_a.is_ok();
         let b_ok = result_b.is_ok();
-        assert!(a_ok ^ b_ok, "Exactly one should succeed: a_ok={}, b_ok={}", a_ok, b_ok);
+        assert!(
+            a_ok ^ b_ok,
+            "Exactly one should succeed: a_ok={}, b_ok={}",
+            a_ok,
+            b_ok
+        );
     }
 
     // ================================================================
@@ -343,7 +382,10 @@ mod tests {
         let result = manager.release_lock(token_b.id.as_str(), "main.rs").await;
         assert!(result.is_err());
 
-        manager.release_lock(token_a.id.as_str(), "main.rs").await.unwrap();
+        manager
+            .release_lock(token_a.id.as_str(), "main.rs")
+            .await
+            .unwrap();
     }
 
     // ================================================================
@@ -362,10 +404,19 @@ mod tests {
         manager.acquire_lock(&token, "lib.rs").await.unwrap();
         manager.acquire_lock(&token, "config.rs").await.unwrap();
 
-        assert_eq!(manager.get_locks_by_token(token.id.as_str()).unwrap().len(), 3);
+        assert_eq!(
+            manager.get_locks_by_token(token.id.as_str()).unwrap().len(),
+            3
+        );
 
-        manager.release_lock(token.id.as_str(), "lib.rs").await.unwrap();
-        assert_eq!(manager.get_locks_by_token(token.id.as_str()).unwrap().len(), 2);
+        manager
+            .release_lock(token.id.as_str(), "lib.rs")
+            .await
+            .unwrap();
+        assert_eq!(
+            manager.get_locks_by_token(token.id.as_str()).unwrap().len(),
+            2
+        );
     }
 
     // ================================================================
@@ -383,7 +434,10 @@ mod tests {
         assert_eq!(tokens.len(), 1);
         assert_eq!(tokens[0].agent_id, "agent-a");
 
-        assert_eq!(manager.get_tokens_by_session("nonexistent").unwrap().len(), 0);
+        assert_eq!(
+            manager.get_tokens_by_session("nonexistent").unwrap().len(),
+            0
+        );
     }
 
     // ================================================================
@@ -394,31 +448,82 @@ mod tests {
         let (_temp, manager) = setup_test_env();
         let root = test_project_root();
 
-        let sys_a = SystemToken::new("analyzer".into(), "session-analyze".into(), root.clone(), 3600, 30);
-        let sys_b = SystemToken::new("modifier".into(), "session-modify".into(), root.clone(), 3600, 30);
-        let sys_c = SystemToken::new("tester".into(), "session-test".into(), root.clone(), 3600, 30);
+        let sys_a = SystemToken::new(
+            "analyzer".into(),
+            "session-analyze".into(),
+            root.clone(),
+            3600,
+            30,
+        );
+        let sys_b = SystemToken::new(
+            "modifier".into(),
+            "session-modify".into(),
+            root.clone(),
+            3600,
+            30,
+        );
+        let sys_c = SystemToken::new(
+            "tester".into(),
+            "session-test".into(),
+            root.clone(),
+            3600,
+            30,
+        );
         manager.register_system_token(&sys_a).unwrap();
         manager.register_system_token(&sys_b).unwrap();
         manager.register_system_token(&sys_c).unwrap();
 
         // Phase 1: Analyzer reads
-        let token_a = make_file_token("analyzer", "session-analyze", &sys_a.id, "src/**", FileMode::Read);
+        let token_a = make_file_token(
+            "analyzer",
+            "session-analyze",
+            &sys_a.id,
+            "src/**",
+            FileMode::Read,
+        );
         manager.acquire_lock(&token_a, "src/app.rs").await.unwrap();
         manager.acquire_lock(&token_a, "src/util.rs").await.unwrap();
-        manager.release_lock(token_a.id.as_str(), "src/app.rs").await.unwrap();
-        manager.release_lock(token_a.id.as_str(), "src/util.rs").await.unwrap();
+        manager
+            .release_lock(token_a.id.as_str(), "src/app.rs")
+            .await
+            .unwrap();
+        manager
+            .release_lock(token_a.id.as_str(), "src/util.rs")
+            .await
+            .unwrap();
 
         // Phase 2: Modifier writes
-        let token_b = make_file_token("modifier", "session-modify", &sys_b.id, "src/**", FileMode::Write);
+        let token_b = make_file_token(
+            "modifier",
+            "session-modify",
+            &sys_b.id,
+            "src/**",
+            FileMode::Write,
+        );
         manager.acquire_lock(&token_b, "src/app.rs").await.unwrap();
-        manager.release_lock(token_b.id.as_str(), "src/app.rs").await.unwrap();
+        manager
+            .release_lock(token_b.id.as_str(), "src/app.rs")
+            .await
+            .unwrap();
 
         // Phase 3: Tester reads
-        let token_c = make_file_token("tester", "session-test", &sys_c.id, "src/**", FileMode::Read);
+        let token_c = make_file_token(
+            "tester",
+            "session-test",
+            &sys_c.id,
+            "src/**",
+            FileMode::Read,
+        );
         manager.acquire_lock(&token_c, "src/app.rs").await.unwrap();
         manager.acquire_lock(&token_c, "src/util.rs").await.unwrap();
-        manager.release_lock(token_c.id.as_str(), "src/app.rs").await.unwrap();
-        manager.release_lock(token_c.id.as_str(), "src/util.rs").await.unwrap();
+        manager
+            .release_lock(token_c.id.as_str(), "src/app.rs")
+            .await
+            .unwrap();
+        manager
+            .release_lock(token_c.id.as_str(), "src/util.rs")
+            .await
+            .unwrap();
 
         assert!(!manager.is_file_locked("src/app.rs").unwrap());
         assert!(!manager.is_file_locked("src/util.rs").unwrap());
@@ -449,8 +554,26 @@ mod tests {
     async fn test_cleanup_old_audit_logs_no_fresh_delete() {
         let (_temp, manager) = setup_test_env();
 
-        manager.log_audit("agent-a", "session-a", "LOCK_ACQUIRED", Some("main.rs"), Some("WRITE"), Some("test")).unwrap();
-        manager.log_audit("agent-a", "session-a", "LOCK_RELEASED", Some("main.rs"), None, None).unwrap();
+        manager
+            .log_audit(
+                "agent-a",
+                "session-a",
+                "LOCK_ACQUIRED",
+                Some("main.rs"),
+                Some("WRITE"),
+                Some("test"),
+            )
+            .unwrap();
+        manager
+            .log_audit(
+                "agent-a",
+                "session-a",
+                "LOCK_RELEASED",
+                Some("main.rs"),
+                None,
+                None,
+            )
+            .unwrap();
 
         let deleted = manager.cleanup_old_audit_logs(30).unwrap();
         assert_eq!(deleted, 0);
@@ -506,7 +629,13 @@ mod tests {
         let mut tokens = Vec::new();
 
         for (agent_id, session_id, _) in &agents {
-            let sys = SystemToken::new(agent_id.to_string(), session_id.to_string(), root.clone(), 3600, 30);
+            let sys = SystemToken::new(
+                agent_id.to_string(),
+                session_id.to_string(),
+                root.clone(),
+                3600,
+                30,
+            );
             manager.register_system_token(&sys).unwrap();
             let token = make_file_token(agent_id, session_id, &sys.id, "**", FileMode::Write);
             tokens.push((token, sys));
@@ -514,11 +643,19 @@ mod tests {
 
         for (i, (agent_id, _, file)) in agents.iter().enumerate() {
             manager.acquire_lock(&tokens[i].0, file).await.unwrap();
-            assert!(manager.is_file_locked(file).unwrap(), "{} should have locked {}", agent_id, file);
+            assert!(
+                manager.is_file_locked(file).unwrap(),
+                "{} should have locked {}",
+                agent_id,
+                file
+            );
         }
 
         for (i, (_, _, file)) in agents.iter().enumerate() {
-            manager.release_lock(tokens[i].0.id.as_str(), file).await.unwrap();
+            manager
+                .release_lock(tokens[i].0.id.as_str(), file)
+                .await
+                .unwrap();
         }
 
         for (_, _, file) in &agents {
@@ -640,7 +777,10 @@ mod tests {
         assert!(manager.is_file_locked("main.rs").unwrap());
         assert!(manager.is_file_locked("lib.rs").unwrap());
         assert_eq!(manager.get_active_tokens().unwrap().len(), 1);
-        assert_eq!(manager.get_locks_by_token(token.id.as_str()).unwrap().len(), 2);
+        assert_eq!(
+            manager.get_locks_by_token(token.id.as_str()).unwrap().len(),
+            2
+        );
 
         // Create watchdog and simulate ACP disconnect
         let config = WatchdogConfig::default();
@@ -649,11 +789,25 @@ mod tests {
         watchdog.handle_acp_disconnect("session-a").await.unwrap();
 
         // After disconnect: token expired, locks released
-        assert_eq!(manager.get_active_tokens().unwrap().len(), 0, "Token should be expired");
-        assert_eq!(manager.get_locks_by_token(token.id.as_str()).unwrap().len(), 0, "Locks should be released");
+        assert_eq!(
+            manager.get_active_tokens().unwrap().len(),
+            0,
+            "Token should be expired"
+        );
+        assert_eq!(
+            manager.get_locks_by_token(token.id.as_str()).unwrap().len(),
+            0,
+            "Locks should be released"
+        );
 
         // Files should be unlocked — another agent can now acquire
-        let sys_b = SystemToken::new("agent-b".into(), "session-b".into(), test_project_root(), 3600, 30);
+        let sys_b = SystemToken::new(
+            "agent-b".into(),
+            "session-b".into(),
+            test_project_root(),
+            3600,
+            30,
+        );
         manager.register_system_token(&sys_b).unwrap();
         let token_b = make_file_token("agent-b", "session-b", &sys_b.id, "**", FileMode::Write);
         manager.acquire_lock(&token_b, "main.rs").await.unwrap();
@@ -687,8 +841,15 @@ mod tests {
         watchdog.handle_acp_disconnect("session-a").await.unwrap();
 
         // session-a: token expired, lock released
-        assert_eq!(manager.get_tokens_by_session("session-a").unwrap().iter()
-            .filter(|t| t.status == crate::file_access::TokenStatus::Active).count(), 0);
+        assert_eq!(
+            manager
+                .get_tokens_by_session("session-a")
+                .unwrap()
+                .iter()
+                .filter(|t| t.status == crate::file_access::TokenStatus::Active)
+                .count(),
+            0
+        );
         assert!(!manager.is_file_locked("main.rs").unwrap());
 
         // session-b: unaffected
@@ -718,13 +879,21 @@ mod tests {
         let (_temp, manager) = setup_test_env();
         let root = test_project_root();
 
-        let sys_a = SystemToken::new("reader".into(), "session-reader".into(), root.clone(), 3600, 30);
+        let sys_a = SystemToken::new(
+            "reader".into(),
+            "session-reader".into(),
+            root.clone(),
+            3600,
+            30,
+        );
         let sys_b = SystemToken::new("writer".into(), "session-writer".into(), root, 3600, 30);
         manager.register_system_token(&sys_a).unwrap();
         manager.register_system_token(&sys_b).unwrap();
 
-        let token_read = make_file_token("reader", "session-reader", &sys_a.id, "**", FileMode::Read);
-        let token_write = make_file_token("writer", "session-writer", &sys_b.id, "**", FileMode::Write);
+        let token_read =
+            make_file_token("reader", "session-reader", &sys_a.id, "**", FileMode::Read);
+        let token_write =
+            make_file_token("writer", "session-writer", &sys_b.id, "**", FileMode::Write);
 
         // Agent A acquires READ lock
         manager.acquire_lock(&token_read, "main.rs").await.unwrap();
@@ -734,15 +903,33 @@ mod tests {
         manager.acquire_lock(&token_write, "main.rs").await.unwrap();
 
         // Both locks are active
-        assert_eq!(manager.get_locks_by_token(token_read.id.as_str()).unwrap().len(), 1);
-        assert_eq!(manager.get_locks_by_token(token_write.id.as_str()).unwrap().len(), 1);
+        assert_eq!(
+            manager
+                .get_locks_by_token(token_read.id.as_str())
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            manager
+                .get_locks_by_token(token_write.id.as_str())
+                .unwrap()
+                .len(),
+            1
+        );
 
         // is_file_locked only checks WRITE locks (not READ)
         assert!(manager.is_file_locked("main.rs").unwrap());
 
         // Release both
-        manager.release_lock(token_read.id.as_str(), "main.rs").await.unwrap();
-        manager.release_lock(token_write.id.as_str(), "main.rs").await.unwrap();
+        manager
+            .release_lock(token_read.id.as_str(), "main.rs")
+            .await
+            .unwrap();
+        manager
+            .release_lock(token_write.id.as_str(), "main.rs")
+            .await
+            .unwrap();
     }
 
     // ================================================================
@@ -762,7 +949,13 @@ mod tests {
         let mut tokens = Vec::new();
 
         for (agent_id, session_id) in &agents {
-            let sys = SystemToken::new(agent_id.to_string(), session_id.to_string(), root.clone(), 3600, 30);
+            let sys = SystemToken::new(
+                agent_id.to_string(),
+                session_id.to_string(),
+                root.clone(),
+                3600,
+                30,
+            );
             manager.register_system_token(&sys).unwrap();
             let token = make_file_token(agent_id, session_id, &sys.id, "**", FileMode::Read);
             tokens.push((token, sys));
@@ -775,7 +968,10 @@ mod tests {
 
         // All locks are active
         for (token, _) in &tokens {
-            assert_eq!(manager.get_locks_by_token(token.id.as_str()).unwrap().len(), 1);
+            assert_eq!(
+                manager.get_locks_by_token(token.id.as_str()).unwrap().len(),
+                1
+            );
         }
 
         // is_file_locked returns false (only checks WRITE)
@@ -783,7 +979,10 @@ mod tests {
 
         // Release all
         for (token, _) in &tokens {
-            manager.release_lock(token.id.as_str(), "main.rs").await.unwrap();
+            manager
+                .release_lock(token.id.as_str(), "main.rs")
+                .await
+                .unwrap();
         }
     }
 
@@ -844,8 +1043,20 @@ mod tests {
         // (because Agent B already has WRITE lock)
         // This would be tested via LockModeManager.upgrade_lock()
         // For now, just verify the state
-        assert_eq!(manager.get_locks_by_token(token_a.id.as_str()).unwrap().len(), 1);
-        assert_eq!(manager.get_locks_by_token(token_b.id.as_str()).unwrap().len(), 1);
+        assert_eq!(
+            manager
+                .get_locks_by_token(token_a.id.as_str())
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            manager
+                .get_locks_by_token(token_b.id.as_str())
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     // ================================================================
@@ -880,8 +1091,9 @@ mod tests {
         // READ_LATEST should complete successfully after WRITE is released
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            manager.read_latest("main.rs")
-        ).await;
+            manager.read_latest("main.rs"),
+        )
+        .await;
 
         assert!(result.is_ok(), "READ_LATEST should complete within timeout");
         assert!(result.unwrap().is_ok(), "READ_LATEST should succeed");
@@ -910,8 +1122,20 @@ mod tests {
         manager.acquire_lock(&token_b, "main.rs").await.unwrap();
 
         // Verify both have READ locks
-        assert_eq!(manager.get_locks_by_token(token_a.id.as_str()).unwrap().len(), 1);
-        assert_eq!(manager.get_locks_by_token(token_b.id.as_str()).unwrap().len(), 1);
+        assert_eq!(
+            manager
+                .get_locks_by_token(token_a.id.as_str())
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            manager
+                .get_locks_by_token(token_b.id.as_str())
+                .unwrap()
+                .len(),
+            1
+        );
 
         // Both locks should be READ mode
         let locks_a = manager.get_locks_by_token(token_a.id.as_str()).unwrap();
@@ -945,7 +1169,8 @@ mod tests {
         for i in 0..num_agents {
             let agent_id = format!("agent-{}", i);
             let session_id = format!("session-{}", i);
-            let sys = SystemToken::new(agent_id.clone(), session_id.clone(), root.clone(), 3600, 30);
+            let sys =
+                SystemToken::new(agent_id.clone(), session_id.clone(), root.clone(), 3600, 30);
             manager.register_system_token(&sys).unwrap();
 
             let token = make_file_token(&agent_id, &session_id, &sys.id, "**", FileMode::Write);
@@ -966,17 +1191,15 @@ mod tests {
                 let rt = tokio::runtime::Runtime::new().unwrap();
 
                 // Acquire lock
-                let acquire_result = rt.block_on(async {
-                    mgr.acquire_lock(&token_clone, &file).await
-                });
+                let acquire_result =
+                    rt.block_on(async { mgr.acquire_lock(&token_clone, &file).await });
                 if acquire_result.is_ok() {
                     // Hold lock briefly
                     std::thread::sleep(std::time::Duration::from_millis(10));
 
                     // Release lock
-                    rt.block_on(async {
-                        mgr.release_lock(token_clone.id.as_str(), &file).await
-                    }).unwrap();
+                    rt.block_on(async { mgr.release_lock(token_clone.id.as_str(), &file).await })
+                        .unwrap();
                 }
             });
 
@@ -990,7 +1213,11 @@ mod tests {
 
         // Verify all locks are released
         for file in &files {
-            assert!(!manager.is_file_locked(file).unwrap(), "Lock on {} should be released", file);
+            assert!(
+                !manager.is_file_locked(file).unwrap(),
+                "Lock on {} should be released",
+                file
+            );
         }
     }
 
@@ -1053,8 +1280,8 @@ mod tests {
     // ================================================================
     #[tokio::test]
     async fn test_concurrent_acquire_exact_same_timestamp() {
-        use std::thread;
         use std::sync::Barrier;
+        use std::thread;
 
         let (_temp, manager) = setup_test_env();
         let root = test_project_root();
@@ -1103,9 +1330,7 @@ mod tests {
                 // Wait for all threads to be ready
                 barrier.wait();
                 // All threads try to acquire at exactly the same time
-                rt.block_on(async {
-                    mgr.acquire_lock(&token, "main.rs").await
-                })
+                rt.block_on(async { mgr.acquire_lock(&token, "main.rs").await })
             });
 
             handles.push(handle);
@@ -1247,16 +1472,11 @@ mod tests {
             let file_path = format!("file_{}.rs", i);
 
             // Create the file first
-            std::fs::write(
-                manager.project_root().join(&file_path),
-                "test content",
-            ).unwrap();
+            std::fs::write(manager.project_root().join(&file_path), "test content").unwrap();
 
             let handle = thread::spawn(move || {
                 let rt = tokio::runtime::Runtime::new().unwrap();
-                rt.block_on(async {
-                    mgr.acquire_lock(&token, &file_path).await
-                })
+                rt.block_on(async { mgr.acquire_lock(&token, &file_path).await })
             });
 
             handles.push(handle);
@@ -1267,7 +1487,10 @@ mod tests {
         let successes = results.iter().filter(|r| r.is_ok()).count();
 
         // All 20 should succeed (different files, no contention)
-        assert_eq!(successes, num_agents, "All agents should acquire locks on different files");
+        assert_eq!(
+            successes, num_agents,
+            "All agents should acquire locks on different files"
+        );
     }
 
     // ================================================================
@@ -1309,7 +1532,10 @@ mod tests {
         }
 
         // First agent acquires lock
-        manager.acquire_lock(&file_tokens[0], "main.rs").await.unwrap();
+        manager
+            .acquire_lock(&file_tokens[0], "main.rs")
+            .await
+            .unwrap();
 
         // All other agents try to acquire - should all fail immediately
         let mut handles = vec![];
@@ -1319,9 +1545,7 @@ mod tests {
 
             let handle = thread::spawn(move || {
                 let rt = tokio::runtime::Runtime::new().unwrap();
-                rt.block_on(async {
-                    mgr.acquire_lock(&token, "main.rs").await
-                })
+                rt.block_on(async { mgr.acquire_lock(&token, "main.rs").await })
             });
 
             handles.push(handle);
@@ -1331,17 +1555,27 @@ mod tests {
         let failures = results.iter().filter(|r| r.is_err()).count();
 
         // All should fail since lock is held
-        assert_eq!(failures, num_agents - 1, "All agents should fail to acquire lock");
+        assert_eq!(
+            failures,
+            num_agents - 1,
+            "All agents should fail to acquire lock"
+        );
 
         // Release the lock
-        manager.release_lock(file_tokens[0].id.as_str(), "main.rs").await.unwrap();
+        manager
+            .release_lock(file_tokens[0].id.as_str(), "main.rs")
+            .await
+            .unwrap();
 
         // Now one agent can acquire
         let result = manager.acquire_lock(&file_tokens[1], "main.rs").await;
         assert!(result.is_ok(), "Should be able to acquire after release");
 
         // Cleanup
-        manager.release_lock(file_tokens[1].id.as_str(), "main.rs").await.unwrap();
+        manager
+            .release_lock(file_tokens[1].id.as_str(), "main.rs")
+            .await
+            .unwrap();
     }
 
     // ================================================================
@@ -1359,12 +1593,19 @@ mod tests {
 
         // Agent A acquires READ lock
         let read_token_a = make_file_token("agent-a", "session-a", &sys_a.id, "**", FileMode::Read);
-        manager.acquire_lock(&read_token_a, "main.rs").await.unwrap();
+        manager
+            .acquire_lock(&read_token_a, "main.rs")
+            .await
+            .unwrap();
 
         // Agent B acquires WRITE lock (READ doesn't block WRITE)
-        let write_token_b = make_file_token("agent-b", "session-b", &sys_b.id, "**", FileMode::Write);
+        let write_token_b =
+            make_file_token("agent-b", "session-b", &sys_b.id, "**", FileMode::Write);
         let result = manager.acquire_lock(&write_token_b, "main.rs").await;
-        assert!(result.is_ok(), "WRITE should succeed even with READ holder (optimistic concurrency)");
+        assert!(
+            result.is_ok(),
+            "WRITE should succeed even with READ holder (optimistic concurrency)"
+        );
 
         // Both locks should exist
         let active_locks = manager.get_all_active_locks().unwrap();
@@ -1375,8 +1616,14 @@ mod tests {
         assert_eq!(main_rs_locks, 2, "Both READ and WRITE locks should coexist");
 
         // Cleanup
-        manager.release_lock(read_token_a.id.as_str(), "main.rs").await.unwrap();
-        manager.release_lock(write_token_b.id.as_str(), "main.rs").await.unwrap();
+        manager
+            .release_lock(read_token_a.id.as_str(), "main.rs")
+            .await
+            .unwrap();
+        manager
+            .release_lock(write_token_b.id.as_str(), "main.rs")
+            .await
+            .unwrap();
     }
 
     // ================================================================
@@ -1393,23 +1640,34 @@ mod tests {
         manager.register_system_token(&sys_b).unwrap();
 
         // Agent A has WRITE lock
-        let write_token_a = make_file_token("agent-a", "session-a", &sys_a.id, "**", FileMode::Write);
-        manager.acquire_lock(&write_token_a, "main.rs").await.unwrap();
+        let write_token_a =
+            make_file_token("agent-a", "session-a", &sys_a.id, "**", FileMode::Write);
+        manager
+            .acquire_lock(&write_token_a, "main.rs")
+            .await
+            .unwrap();
 
         // Agent B tries to acquire WRITE - should fail
-        let write_token_b = make_file_token("agent-b", "session-b", &sys_b.id, "**", FileMode::Write);
+        let write_token_b =
+            make_file_token("agent-b", "session-b", &sys_b.id, "**", FileMode::Write);
         let result = manager.acquire_lock(&write_token_b, "main.rs").await;
         assert!(result.is_err(), "B should not get WRITE while A has WRITE");
 
         // Agent A releases WRITE lock
-        manager.release_lock(write_token_a.id.as_str(), "main.rs").await.unwrap();
+        manager
+            .release_lock(write_token_a.id.as_str(), "main.rs")
+            .await
+            .unwrap();
 
         // Now B can acquire WRITE
         let result = manager.acquire_lock(&write_token_b, "main.rs").await;
         assert!(result.is_ok(), "B should get WRITE after A releases");
 
         // Cleanup
-        manager.release_lock(write_token_b.id.as_str(), "main.rs").await.unwrap();
+        manager
+            .release_lock(write_token_b.id.as_str(), "main.rs")
+            .await
+            .unwrap();
     }
 
     // ================================================================
@@ -1478,9 +1736,7 @@ mod tests {
 
             let handle = thread::spawn(move || {
                 let rt = tokio::runtime::Runtime::new().unwrap();
-                rt.block_on(async {
-                    mgr.acquire_lock(&token, "main.rs").await
-                })
+                rt.block_on(async { mgr.acquire_lock(&token, "main.rs").await })
             });
 
             handles.push(handle);
@@ -1488,14 +1744,8 @@ mod tests {
 
         let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
 
-        let read_successes = results[0..num_readers]
-            .iter()
-            .filter(|r| r.is_ok())
-            .count();
-        let write_successes = results[num_readers..]
-            .iter()
-            .filter(|r| r.is_ok())
-            .count();
+        let read_successes = results[0..num_readers].iter().filter(|r| r.is_ok()).count();
+        let write_successes = results[num_readers..].iter().filter(|r| r.is_ok()).count();
 
         // All readers should succeed (READ locks coexist)
         assert_eq!(read_successes, num_readers, "All READ locks should succeed");

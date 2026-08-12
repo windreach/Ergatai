@@ -10,10 +10,10 @@ use napi_derive::napi;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot, RwLock};
 
-use crate::acp::manager::{SessionCommand, SessionEvent, event_tx, manager as session_manager};
+use crate::acp::manager::{event_tx, manager as session_manager, SessionCommand, SessionEvent};
 use crate::agent::config::AgentConfig;
 use crate::error::{ErgataiError, ErgataiResult};
-use crate::nats::{NatsTaskQueue, get_nats_connection};
+use crate::nats::{get_nats_connection, NatsTaskQueue};
 
 /// Global task ID counter.
 static TASK_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -128,11 +128,7 @@ fn pool_manager() -> &'static GlobalPoolManager {
 
 /// Create an agent pool with N concurrent SDK session instances.
 #[napi]
-pub async fn acp_pool_create(
-    agent_name: String,
-    pool_size: u32,
-    cwd: String,
-) -> napi::Result<()> {
+pub async fn acp_pool_create(agent_name: String, pool_size: u32, cwd: String) -> napi::Result<()> {
     let config = crate::agent::config::get_agent_config(&agent_name)
         .map_err(|e| napi::Error::from_reason(format!("Failed to load agent config: {}", e)))?;
 
@@ -290,11 +286,7 @@ async fn spawn_pool_agent(
 
     // Spawn a new SDK session — use the pool's cwd so each task runs in the
     // directory the caller requested at pool-creation time.
-    crate::acp::sdk_session::spawn_session_task(
-        config.clone(),
-        cwd.to_string(),
-        session_id_tx,
-    );
+    crate::acp::sdk_session::spawn_session_task(config.clone(), cwd.to_string(), session_id_tx);
 
     // Wait for session creation
     let session_id = session_id_rx
@@ -306,7 +298,9 @@ async fn spawn_pool_agent(
     let cmd_tx = session_manager()
         .get_cmd_tx(&session_id)
         .await
-        .ok_or_else(|| ErgataiError::internal(format!("Session {} not found in manager", session_id)))?;
+        .ok_or_else(|| {
+            ErgataiError::internal(format!("Session {} not found in manager", session_id))
+        })?;
 
     tracing::info!(
         agent = %agent_name,

@@ -144,7 +144,10 @@ mod tests {
     #[test]
     fn test_empty_braces() {
         let context = ctx(&[]);
-        assert_eq!(render_template("text {{}} more", &context), "text {{}} more");
+        assert_eq!(
+            render_template("text {{}} more", &context),
+            "text {{}} more"
+        );
     }
 
     #[test]

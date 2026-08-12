@@ -69,9 +69,8 @@ fn global_config_path() -> Result<PathBuf, ErgataiError> {
         .join("ergatai")
         .join("agents");
 
-    fs::create_dir_all(&app_data).map_err(|e| {
-        ErgataiError::ConfigError(ConfigError::ReadFailed { source: e })
-    })?;
+    fs::create_dir_all(&app_data)
+        .map_err(|e| ErgataiError::ConfigError(ConfigError::ReadFailed { source: e }))?;
 
     Ok(app_data.join("global-agent-config.json"))
 }
@@ -86,13 +85,11 @@ pub fn load_global_agent_config() -> Result<GlobalAgentConfig, ErgataiError> {
         return Ok(GlobalAgentConfig::default());
     }
 
-    let content = fs::read_to_string(&path).map_err(|e| {
-        ErgataiError::ConfigError(ConfigError::ReadFailed { source: e })
-    })?;
+    let content = fs::read_to_string(&path)
+        .map_err(|e| ErgataiError::ConfigError(ConfigError::ReadFailed { source: e }))?;
 
-    let config: GlobalAgentConfig = serde_json::from_str(&content).map_err(|e| {
-        ErgataiError::ConfigError(ConfigError::ParseFailed { source: e })
-    })?;
+    let config: GlobalAgentConfig = serde_json::from_str(&content)
+        .map_err(|e| ErgataiError::ConfigError(ConfigError::ParseFailed { source: e }))?;
 
     Ok(config)
 }
@@ -135,12 +132,18 @@ pub fn validate_global_config(config: &GlobalAgentConfig) -> Result<(), ErgataiE
     for (key, value) in &non_empty {
         // Check for well-formed key
         if !is_well_formed_env_key(key) {
-            return Err(ErgataiError::InvalidArgument(format!("invalid env var key: {}", key)));
+            return Err(ErgataiError::InvalidArgument(format!(
+                "invalid env var key: {}",
+                key
+            )));
         }
 
         // Check for NUL bytes
         if key.contains('\0') || value.contains('\0') {
-            return Err(ErgataiError::InvalidArgument(format!("env var contains NUL byte: {}", key)));
+            return Err(ErgataiError::InvalidArgument(format!(
+                "env var contains NUL byte: {}",
+                key
+            )));
         }
 
         // Check size limit
@@ -156,7 +159,9 @@ pub fn validate_global_config(config: &GlobalAgentConfig) -> Result<(), ErgataiE
     for (field, value) in [("provider", &config.provider), ("model", &config.model)] {
         if let Some(v) = value {
             if v.contains('\0') {
-                return Err(ErgataiError::InvalidArgument(format!("global config `{field}` must not contain NUL bytes")));
+                return Err(ErgataiError::InvalidArgument(format!(
+                    "global config `{field}` must not contain NUL bytes"
+                )));
             }
             if v.len() > MAX_ENV_VALUE_BYTES {
                 return Err(ErgataiError::InvalidArgument(format!(
@@ -183,9 +188,15 @@ fn is_well_formed_env_key(key: &str) -> bool {
 /// Save the global agent configuration to disk.
 ///
 /// Validates the config, strips empty values, and writes with restricted permissions (0o600).
-pub fn save_global_agent_config(config: &GlobalAgentConfig) -> Result<GlobalAgentConfigSaveResult, ErgataiError> {
+pub fn save_global_agent_config(
+    config: &GlobalAgentConfig,
+) -> Result<GlobalAgentConfigSaveResult, ErgataiError> {
     // Validate first
-    validate_global_config(config).map_err(|e| ErgataiError::ConfigError(ConfigError::ValidationFailed { reason: e.to_string() }))?;
+    validate_global_config(config).map_err(|e| {
+        ErgataiError::ConfigError(ConfigError::ValidationFailed {
+            reason: e.to_string(),
+        })
+    })?;
 
     // Strip empty values
     let mut cleaned = config.clone();
@@ -209,9 +220,8 @@ pub fn save_global_agent_config(config: &GlobalAgentConfig) -> Result<GlobalAgen
     }
 
     let path = global_config_path()?;
-    let content = serde_json::to_string_pretty(&cleaned).map_err(|e| {
-        ErgataiError::ConfigError(ConfigError::ParseFailed { source: e })
-    })?;
+    let content = serde_json::to_string_pretty(&cleaned)
+        .map_err(|e| ErgataiError::ConfigError(ConfigError::ParseFailed { source: e }))?;
 
     // Write with restricted permissions
     #[cfg(unix)]
@@ -220,21 +230,19 @@ pub fn save_global_agent_config(config: &GlobalAgentConfig) -> Result<GlobalAgen
         let mut options = fs::OpenOptions::new();
         options.write(true).create(true).truncate(true).mode(0o600);
 
-        let mut file = options.open(&path).map_err(|e| {
-            ErgataiError::ConfigError(ConfigError::ReadFailed { source: e })
-        })?;
+        let mut file = options
+            .open(&path)
+            .map_err(|e| ErgataiError::ConfigError(ConfigError::ReadFailed { source: e }))?;
 
         use std::io::Write;
-        file.write_all(content.as_bytes()).map_err(|e| {
-            ErgataiError::ConfigError(ConfigError::ReadFailed { source: e })
-        })?;
+        file.write_all(content.as_bytes())
+            .map_err(|e| ErgataiError::ConfigError(ConfigError::ReadFailed { source: e }))?;
     }
 
     #[cfg(not(unix))]
     {
-        fs::write(&path, &content).map_err(|e| {
-            ErgataiError::ConfigError(ConfigError::ReadFailed { source: e })
-        })?;
+        fs::write(&path, &content)
+            .map_err(|e| ErgataiError::ConfigError(ConfigError::ReadFailed { source: e }))?;
     }
 
     Ok(GlobalAgentConfigSaveResult { config: cleaned })
@@ -247,7 +255,9 @@ mod tests {
     #[test]
     fn test_validate_global_config_rejects_derived_keys() {
         let mut config = GlobalAgentConfig::default();
-        config.env_vars.insert("GOOSE_MODEL".to_string(), "test".to_string());
+        config
+            .env_vars
+            .insert("GOOSE_MODEL".to_string(), "test".to_string());
 
         let result = validate_global_config(&config);
         assert!(result.is_err());
@@ -257,7 +267,9 @@ mod tests {
     #[test]
     fn test_validate_global_config_rejects_nul_bytes() {
         let mut config = GlobalAgentConfig::default();
-        config.env_vars.insert("TEST_KEY".to_string(), "test\0value".to_string());
+        config
+            .env_vars
+            .insert("TEST_KEY".to_string(), "test\0value".to_string());
 
         let result = validate_global_config(&config);
         assert!(result.is_err());
@@ -267,11 +279,16 @@ mod tests {
     #[test]
     fn test_validate_global_config_rejects_invalid_keys() {
         let mut config = GlobalAgentConfig::default();
-        config.env_vars.insert("INVALID KEY".to_string(), "value".to_string());
+        config
+            .env_vars
+            .insert("INVALID KEY".to_string(), "value".to_string());
 
         let result = validate_global_config(&config);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("invalid env var key"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("invalid env var key"));
     }
 
     #[test]
