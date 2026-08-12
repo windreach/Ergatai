@@ -778,4 +778,199 @@ mod tests {
         };
         assert_eq!(avatar_path(&config_none), None);
     }
+
+    #[test]
+    fn test_multiple_hosted_agents_independent_config() {
+        // Test that multiple hosted agents with the same agentBase can have independent configurations
+        use tempfile::tempdir;
+
+        let temp_dir = tempdir().unwrap();
+
+        // Set HOME to temp directory so hosted_agents_dir() uses it
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", temp_dir.path());
+
+        let agents_dir = temp_dir.path().join(".config/ergatai/agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+
+        // Create 3 OpenCode agents with different configurations
+        let configs = vec![
+            (
+                "opencode-prod",
+                "gpt-4",
+                "openai",
+                "sk-prod-key",
+                "https://api.openai.com/v1",
+            ),
+            (
+                "opencode-dev",
+                "gpt-3.5-turbo",
+                "openai",
+                "sk-dev-key",
+                "https://api.openai.com/v1",
+            ),
+            (
+                "opencode-test",
+                "claude-3-sonnet",
+                "anthropic",
+                "sk-ant-test-key",
+                "https://api.anthropic.com",
+            ),
+        ];
+
+        let mut hosted_configs = Vec::new();
+
+        for (name, model, provider, api_key, base_url) in configs {
+            let agent_dir = agents_dir.join(name);
+            std::fs::create_dir_all(&agent_dir).unwrap();
+
+            let settings = json!({
+                "ergatai": {
+                    "agentBase": "opencode",
+                    "displayName": format!("OpenCode {}", name),
+                },
+                "model": model,
+                "provider": provider,
+                "api_key": api_key,
+                "base_url": base_url,
+            });
+
+            let settings_path = agent_dir.join("settings.json");
+            std::fs::write(&settings_path, serde_json::to_string_pretty(&settings).unwrap())
+                .unwrap();
+
+            // Load the hosted agent config
+            let config = load_hosted_agent(name).unwrap();
+            assert_eq!(config.name, name);
+            assert_eq!(config.meta.agent_base, "opencode");
+
+            // Convert to AgentConfig
+            let agent_config = to_agent_config(&config).unwrap();
+            assert_eq!(agent_config.command, "opencode");
+
+            // Verify that the config directory isolation is set up
+            let expected_config_dir = agent_dir.join(".config");
+            assert!(
+                agent_config.env.contains_key("OPENCODE_CONFIG_DIR"),
+                "Agent {} should have OPENCODE_CONFIG_DIR set",
+                name
+            );
+            let actual_config_dir = agent_config.env.get("OPENCODE_CONFIG_DIR").unwrap();
+            assert_eq!(
+                actual_config_dir,
+                expected_config_dir.to_string_lossy().as_ref(),
+                "Agent {} config dir mismatch",
+                name
+            );
+
+            hosted_configs.push((name.to_string(), agent_config));
+        }
+
+        // Verify that each agent has its own isolated config directory
+        for (name, config) in &hosted_configs {
+            let config_dir = config.env.get("OPENCODE_CONFIG_DIR").unwrap();
+
+            // Each agent should have a unique config directory
+            for (other_name, other_config) in &hosted_configs {
+                if name != other_name {
+                    let other_config_dir = other_config.env.get("OPENCODE_CONFIG_DIR").unwrap();
+                    assert_ne!(
+                        config_dir, other_config_dir,
+                        "Agents {} and {} should have different config directories",
+                        name, other_name
+                    );
+                }
+            }
+
+            // Verify the config directory exists
+            assert!(
+                std::path::Path::new(config_dir).exists(),
+                "Config directory for {} should exist: {}",
+                name,
+                config_dir
+            );
+        }
+
+        // Verify that all 3 agents can coexist
+        let all_agents = list_hosted_agents().unwrap();
+        assert_eq!(all_agents.len(), 3);
+        assert!(all_agents.contains(&"opencode-prod".to_string()));
+        assert!(all_agents.contains(&"opencode-dev".to_string()));
+        assert!(all_agents.contains(&"opencode-test".to_string()));
+
+        // Restore original HOME
+        if let Some(home) = original_home {
+            std::env::set_var("HOME", home);
+        }
+    }
+
+    #[test]
+    fn test_hosted_agent_env_var_isolation() {
+        // Test that environment variables are correctly isolated between hosted agents
+        // This test creates configs directly in memory to avoid HOME env var race conditions
+
+        // Create two Claude agent configs directly
+        let config1 = HostedAgentConfig {
+            name: "claude-agent1".to_string(),
+            dir_path: PathBuf::from("/tmp/test/claude-agent1"),
+            meta: ErgataiAgentMeta {
+                agent_base: "claude".to_string(),
+                display_name: Some("Claude Agent 1".to_string()),
+                proxy: None,
+                avatar: None,
+            },
+            agent_config: json!({
+                "api_key": "sk-ant-agent1",
+                "base_url": "https://api.anthropic.com",
+            }),
+        };
+
+        let config2 = HostedAgentConfig {
+            name: "claude-agent2".to_string(),
+            dir_path: PathBuf::from("/tmp/test/claude-agent2"),
+            meta: ErgataiAgentMeta {
+                agent_base: "claude".to_string(),
+                display_name: Some("Claude Agent 2".to_string()),
+                proxy: None,
+                avatar: None,
+            },
+            agent_config: json!({
+                "api_key": "sk-ant-agent2",
+                "base_url": "https://custom.anthropic.com",
+            }),
+        };
+
+        // Convert both to AgentConfig
+        let agent_config1 = to_agent_config(&config1).unwrap();
+        let agent_config2 = to_agent_config(&config2).unwrap();
+
+        // Verify both use claude-agent-acp command
+        assert_eq!(agent_config1.command, "claude-agent-acp");
+        assert_eq!(agent_config2.command, "claude-agent-acp");
+
+        // Verify config directories are set and different
+        assert!(agent_config1.env.contains_key("CLAUDE_CONFIG_DIR"));
+        assert!(agent_config2.env.contains_key("CLAUDE_CONFIG_DIR"));
+
+        let config_dir1 = agent_config1.env.get("CLAUDE_CONFIG_DIR").unwrap();
+        let config_dir2 = agent_config2.env.get("CLAUDE_CONFIG_DIR").unwrap();
+
+        assert_ne!(config_dir1, config_dir2, "Config directories should be different");
+
+        // Verify the paths contain the agent names
+        assert!(config_dir1.contains("claude-agent1"), "Config dir 1 should contain agent name");
+        assert!(config_dir2.contains("claude-agent2"), "Config dir 2 should contain agent name");
+
+        // Verify the paths are as expected
+        assert_eq!(
+            config_dir1,
+            "/tmp/test/claude-agent1/.config",
+            "Config dir 1 path mismatch"
+        );
+        assert_eq!(
+            config_dir2,
+            "/tmp/test/claude-agent2/.config",
+            "Config dir 2 path mismatch"
+        );
+    }
 }
