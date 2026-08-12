@@ -4,7 +4,7 @@
 //! Similar to NatsManager, this provides a central point for file access control.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::OnceLock;
 
@@ -186,6 +186,7 @@ pub async fn shutdown_file_access(project_id: &str) -> ErgataiResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
     use tempfile::TempDir;
 
     /// Helper: create a temp directory that is also a git repo (SnapshotManager needs it).
