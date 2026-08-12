@@ -1194,6 +1194,51 @@ impl FileLockManager {
 
         Ok(())
     }
+
+    /// Test helper: Get all file tokens for a given system token ID
+    #[cfg(test)]
+    pub fn get_file_tokens_by_system_token(&self, system_token_id: &str) -> Result<Vec<FileToken>, ErgataiError> {
+        let conn = self.conn.lock().map_err(|e| {
+            ErgataiError::internal(format!("Failed to acquire lock: {}", e))
+        })?;
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, agent_id, session_id, system_token_id, scope, mode, reason,
+                        approved_by, issued_at, expires_at, heartbeat_interval_secs,
+                        heartbeat_at, status
+                 FROM file_tokens
+                 WHERE system_token_id = ?1 AND status = 'ACTIVE'",
+            )
+            .map_err(|e| ErgataiError::internal(format!("Failed to prepare query: {}", e)))?;
+
+        let tokens = stmt
+            .query_map(params![system_token_id], |row| {
+                Ok(FileToken {
+                    id: TokenId::from_string(row.get::<_, String>(0)?),
+                    agent_id: row.get::<_, String>(1)?,
+                    session_id: row.get::<_, String>(2)?,
+                    system_token_id: TokenId::from_string(row.get::<_, String>(3)?),
+                    scope: row.get::<_, String>(4)?,
+                    mode: parse_file_mode(&row.get::<_, String>(5)?),
+                    reason: row.get::<_, Option<String>>(6)?,
+                    approved_by: row.get::<_, String>(7)?,
+                    issued_at: parse_datetime(&row.get::<_, String>(8)?),
+                    expires_at: parse_datetime(&row.get::<_, String>(9)?),
+                    heartbeat_interval_secs: row.get::<_, i64>(10)? as u64,
+                    heartbeat_at: parse_datetime(&row.get::<_, String>(11)?),
+                    status: parse_token_status(&row.get::<_, String>(12)?),
+                })
+            })
+            .map_err(|e| ErgataiError::internal(format!("Failed to query file tokens: {}", e)))?;
+
+        let mut result = Vec::new();
+        for token in tokens {
+            result.push(token.map_err(|e| ErgataiError::internal(format!("Failed to parse file token: {}", e)))?);
+        }
+
+        Ok(result)
+    }
 }
 
 // Helper functions for parsing database values

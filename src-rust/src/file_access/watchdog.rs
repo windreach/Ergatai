@@ -373,61 +373,72 @@ impl Watchdog {
         token_id: &str,
         session_id: &str,
     ) -> ErgataiResult<()> {
-        // Get all locks held by this token
-        let locks = lock_manager.get_locks_by_token(token_id)?;
+        // Get all file tokens for this system token
+        let file_tokens = lock_manager.get_file_tokens_by_system_token(token_id)?;
 
-        info!(
-            token_id = token_id,
-            session_id = session_id,
-            lock_count = locks.len(),
-            "Reclaiming locks for expired token"
-        );
+        let mut total_locks = 0;
 
-        // Release each lock and broadcast error event
-        for lock in &locks {
-            let file_path = &lock.file_path;
+        // Reclaim locks for each file token
+        for file_token in &file_tokens {
+            let locks = lock_manager.get_locks_by_token(file_token.id.as_str())?;
 
-            // Release the lock
-            if let Err(e) = lock_manager.release_lock(token_id, file_path).await {
-                error!(
-                    token_id = token_id,
-                    file_path = file_path,
-                    error = %e,
-                    "Failed to release lock"
-                );
-            }
+            info!(
+                token_id = token_id,
+                file_token_id = file_token.id.as_str(),
+                session_id = session_id,
+                lock_count = locks.len(),
+                "Reclaiming locks for expired token"
+            );
 
-            // Broadcast file.error event (Phase 5: v1.1 fix #2)
-            // This unblocks READ_LATEST waiters
-            if let Some(bus) = event_bus {
-                let payload = FileErrorPayload {
-                    file_path: file_path.clone(),
-                    agent_id: lock.agent_id.clone(),
-                    reason: format!("Token {} expired or ACP disconnected", token_id),
-                    timestamp: Utc::now().timestamp() as u64,
-                };
+            // Release each lock and broadcast error event
+            for lock in &locks {
+                let file_path = &lock.file_path;
 
-                if let Err(e) = bus.publish_file_error(&payload).await {
+                // Release the lock
+                if let Err(e) = lock_manager.release_lock(file_token.id.as_str(), file_path).await {
                     error!(
                         token_id = token_id,
+                        file_token_id = file_token.id.as_str(),
                         file_path = file_path,
                         error = %e,
-                        "Failed to broadcast file.error event"
-                    );
-                } else {
-                    info!(
-                        token_id = token_id,
-                        file_path = file_path,
-                        "Broadcast file.error event"
+                        "Failed to release lock"
                     );
                 }
-            } else {
-                warn!(
-                    token_id = token_id,
-                    file_path = file_path,
-                    session_id = session_id,
-                    "Event bus not configured, cannot broadcast file.error event"
-                );
+
+                // Broadcast file.error event (Phase 5: v1.1 fix #2)
+                // This unblocks READ_LATEST waiters
+                if let Some(bus) = event_bus {
+                    let payload = FileErrorPayload {
+                        file_path: file_path.clone(),
+                        agent_id: lock.agent_id.clone(),
+                        reason: format!("Token {} expired or ACP disconnected", token_id),
+                        timestamp: Utc::now().timestamp() as u64,
+                    };
+
+                    if let Err(e) = bus.publish_file_error(&payload).await {
+                        error!(
+                            token_id = token_id,
+                            file_path = file_path,
+                            error = %e,
+                            "Failed to broadcast file.error event"
+                        );
+                    } else {
+                        info!(
+                            token_id = token_id,
+                            file_path = file_path,
+                            "Broadcast file.error event"
+                        );
+                    }
+                } else {
+                    warn!(
+                        token_id = token_id,
+                        file_path = file_path,
+                        session_id = session_id,
+                        "Event bus not configured, cannot broadcast file.error event"
+                    );
+                }
+
+                total_locks += 1;
             }
         }
 
@@ -436,6 +447,7 @@ impl Watchdog {
 
         info!(
             token_id = token_id,
+            total_locks = total_locks,
             "Token expired and locks reclaimed"
         );
 
