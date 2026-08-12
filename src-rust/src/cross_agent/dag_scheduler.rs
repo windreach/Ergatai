@@ -75,6 +75,10 @@ impl DagScheduler {
     /// Submit the DAG for execution
     /// Extracts all ready tasks and submits them to the scheduler
     pub async fn submit_graph(&self) -> ErgataiResult<Vec<String>> {
+        // Clear completed/failed agents from previous DAG runs (M14 fix)
+        let launcher = super::agent_launcher::AgentLauncher::new(self.project_root.clone());
+        launcher.clear_stale_agents().await?;
+
         // Collect ready nodes while holding lock, then release it
         let ready_nodes: Vec<TaskNode> = {
             let graph = self.graph.lock().await;

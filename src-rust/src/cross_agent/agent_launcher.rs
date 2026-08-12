@@ -409,6 +409,7 @@ Write your results in markdown:
         instruction: &str,
         node_id: Option<String>,
     ) -> ErgataiResult<()> {
+        // Load agent config (handles both legacy and hosted formats internally)
         let mut config = crate::agent::config::get_agent_config(agent_name)
             .with_context(|| format!("Failed to load config for agent '{}'", agent_name))?;
         crate::agent::config::normalize_agent_config(&mut config);
@@ -420,10 +421,21 @@ Write your results in markdown:
             "Spawning ACP session for agent"
         );
 
-        // Create ACP session
+        // Create ACP session with MCP config for sub-agent tools
         let (session_id_tx, session_id_rx) = oneshot::channel();
         let cwd = worktree_path.to_string_lossy().to_string();
-        crate::acp::sdk_session::spawn_session_task_with_kind(config, cwd, SessionKind::Dag, session_id_tx);
+
+        let mcp_config = crate::acp::sdk_session::McpServerConfig {
+            session_mode: crate::acp::sdk_session::SessionMode::Sub,
+            agent_id: Some(agent_id.to_string()),
+            node_id: node_id.clone(),
+            dag_id: None, // Will be set by DagScheduler if available
+            available_agents: None, // Will use fallback list
+        };
+
+        crate::acp::sdk_session::spawn_session_task_with_mcp(
+            config, cwd, SessionKind::Dag, Some(mcp_config), session_id_tx,
+        );
 
         // Wait for session creation
         let session_id = session_id_rx
@@ -695,6 +707,57 @@ Write your results in markdown:
                 }
             }
         }
+        Ok(())
+    }
+
+    /// Remove completed/failed agents from tracking.
+    ///
+    /// Called at the start of each new DAG run to prevent ghost agents
+    /// from previous runs appearing in `get_all_status()` results.
+    pub async fn clear_stale_agents(&self) -> ErgataiResult<()> {
+        // Collect stale agent info while holding lock, then release lock before sending Close
+        let stale_sessions: Vec<(String, String)> = {
+            let mut agents = self.running_agents.lock().await;
+            let stale: Vec<String> = agents
+                .iter()
+                .filter(|(_, a)| {
+                    a.status == AgentStatus::Completed || a.status == AgentStatus::Failed
+                })
+                .map(|(id, _)| id.clone())
+                .collect();
+
+            let mut sessions = Vec::new();
+            for id in &stale {
+                if let Some(agent) = agents.remove(id) {
+                    // Collect session IDs for closing after releasing lock
+                    if let Some(session_id) = agent.session_id {
+                        sessions.push((id.clone(), session_id));
+                    }
+                }
+            }
+
+            if !stale.is_empty() {
+                tracing::info!(count = stale.len(), "Cleared stale agents from registry");
+            }
+
+            sessions
+            // Lock released here
+        };
+
+        // Now send Close commands without holding the lock
+        for (agent_id, session_id) in &stale_sessions {
+            if let Some(cmd_tx) = session_manager().get_cmd_tx(session_id).await {
+                if let Err(e) = cmd_tx.send(SessionCommand::Close) {
+                    tracing::warn!(
+                        agent_id = %agent_id,
+                        session_id = %session_id,
+                        error = %e,
+                        "Failed to close lingering ACP session for stale agent"
+                    );
+                }
+            }
+        }
+
         Ok(())
     }
 

@@ -402,18 +402,34 @@ pub struct AgentConfig {
 }
 
 /// 获取 agent 配置
+///
+/// 查找顺序：
+/// 1. 旧路径: `~/.config/ergatai/agents/{name}.json`
+/// 2. 新路径: `~/.config/ergatai/agents/{name}/settings.json` (hosted agent)
 pub fn get_agent_config(name: &str) -> ErgataiResult<AgentConfig> {
+    // 1. Try legacy path first (backward compatibility)
     let config_path = get_config_path(name)?;
-    if !config_path.exists() {
-        return Err(ErgataiError::AgentNotFound(format!("Agent config not found: {}", name)));
+    if config_path.exists() {
+        let content = std::fs::read_to_string(&config_path)?;
+        let mut config: AgentConfig = serde_json::from_str(&content)?;
+        normalize_agent_config(&mut config);
+        return Ok(config);
     }
-    let content = std::fs::read_to_string(&config_path)?;
-    let mut config: AgentConfig = serde_json::from_str(&content)?;
 
-    // Apply agent normalization
-    normalize_agent_config(&mut config);
-
-    Ok(config)
+    // 2. Try hosted agent path
+    match crate::agent::hosted_config::load_hosted_agent(name) {
+        Ok(hosted_config) => {
+            let mut config = crate::agent::hosted_config::to_agent_config(&hosted_config)
+                .map_err(|e| ErgataiError::AgentNotFound(format!(
+                    "Failed to convert hosted agent config for '{}': {}", name, e
+                )))?;
+            normalize_agent_config(&mut config);
+            Ok(config)
+        }
+        Err(_) => {
+            Err(ErgataiError::AgentNotFound(format!("Agent config not found: {}", name)))
+        }
+    }
 }
 
 /// Apply agent normalization to an agent config.
@@ -484,7 +500,7 @@ fn get_config_dir() -> ErgataiResult<PathBuf> {
     Ok(config_dir.join("ergatai").join("agents"))
 }
 
-fn get_config_path(name: &str) -> ErgataiResult<PathBuf> {
+pub fn get_config_path(name: &str) -> ErgataiResult<PathBuf> {
     // Prevent path traversal: reject names with separators or ".."
     if name.is_empty()
         || name.contains('/')

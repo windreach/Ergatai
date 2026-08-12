@@ -7,6 +7,7 @@
 // - SDK's RequestPermissionRequest handler for permission bridging
 // - Custom idle timeout + usage tracking wrappers
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -15,10 +16,10 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 
 use agent_client_protocol::schema::v1::{
-    CloseSessionRequest, ContentBlock, InitializeRequest, NewSessionRequest, PromptRequest,
-    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SelectedPermissionOutcome, SessionId, SetSessionConfigOptionRequest, SessionConfigId,
-    SessionConfigValueId, TextContent,
+    CloseSessionRequest, ContentBlock, EnvVariable, InitializeRequest, McpServer,
+    McpServerStdio, NewSessionRequest, PromptRequest, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome, SessionId,
+    SetSessionConfigOptionRequest, SessionConfigId, SessionConfigValueId, TextContent,
 };
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::{AcpAgent, Agent, Client, ConnectionTo};
@@ -77,6 +78,21 @@ pub fn spawn_session_task_with_kind(
     kind: SessionKind,
     session_id_tx: oneshot::Sender<ErgataiResult<String>>,
 ) {
+    spawn_session_task_with_mcp(config, cwd, kind, None, session_id_tx);
+}
+
+/// Spawn a session task with explicit MCP server config.
+///
+/// This is the most flexible variant — callers can pass additional MCP
+/// configuration (e.g. agent_id, node_id for sub-agent DAG sessions).
+/// If `mcp_override` is None, the config is derived from `kind`.
+pub fn spawn_session_task_with_mcp(
+    config: AgentConfig,
+    cwd: String,
+    kind: SessionKind,
+    mcp_override: Option<McpServerConfig>,
+    session_id_tx: oneshot::Sender<ErgataiResult<String>>,
+) {
     let agent_name = config.name.clone();
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<SessionCommand>();
     let evt_tx = event_tx().clone();
@@ -96,6 +112,7 @@ pub fn spawn_session_task_with_kind(
                 agent_config,
                 cwd,
                 kind,
+                mcp_override,
                 cmd_rx,
                 evt_tx.clone(),
                 pending_perms.clone(),
@@ -278,6 +295,7 @@ async fn run_sdk_session(
     agent_config: agent_client_protocol::AcpAgentConfig,
     cwd: String,
     kind: SessionKind,
+    mcp_override: Option<McpServerConfig>,
     mut cmd_rx: mpsc::UnboundedReceiver<SessionCommand>,
     evt_tx: mpsc::UnboundedSender<SessionEvent>,
     pending_perms: PendingPermissions,
@@ -490,8 +508,18 @@ async fn run_sdk_session(
 
                 tracing::info!("Agent initialized: {:?}", init_result);
 
-                // Create session
-                let new_session_request = NewSessionRequest::new(&cwd_clone);
+                // Create session — inject Ergatai MCP server for system tools
+                let mcp_config = mcp_override.clone().unwrap_or_else(|| build_mcp_config_for_session(kind));
+                let mcp_servers = build_ergatai_mcp_servers(&cwd_clone, &mcp_config);
+                let new_session_request = NewSessionRequest::new(&cwd_clone)
+                    .mcp_servers(mcp_servers.clone());
+                if !mcp_servers.is_empty() {
+                    tracing::info!(
+                        mcp_count = mcp_servers.len(),
+                        mode = %mcp_config.session_mode,
+                        "Injecting Ergatai MCP server into agent session"
+                    );
+                }
                 let session_response = timeout(SESSION_TIMEOUT, connection
                     .send_request(new_session_request)
                     .block_task())
@@ -654,4 +682,180 @@ async fn run_sdk_session(
         .ok_or_else(|| ErgataiError::internal("Session ID not captured"))?;
 
     Ok(session_id)
+}
+
+// ---------------------------------------------------------------------------
+// Ergatai MCP Server injection
+// ---------------------------------------------------------------------------
+// Builds MCP server configuration to inject into ACP sessions.
+// This exposes system tools to the agent's LLM via the standard MCP protocol.
+//
+// Two modes:
+// - "main": orchestration tools (submit_orchestration, check_dag_status, list_agents)
+// - "sub": task execution tools (report_result, request_help, list_agents)
+// ---------------------------------------------------------------------------
+
+/// Session mode for MCP server injection.
+///
+/// Determines which tools are exposed to the agent:
+/// - Main: orchestration tools (submit_orchestration, check_dag_status, list_agents)
+/// - Sub: task execution tools (report_result, request_help, list_agents)
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SessionMode {
+    #[default]
+    Main,
+    Sub,
+}
+
+impl std::fmt::Display for SessionMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SessionMode::Main => write!(f, "main"),
+            SessionMode::Sub => write!(f, "sub"),
+        }
+    }
+}
+
+/// Configuration for MCP server injection into an agent session.
+#[derive(Debug, Clone, Default)]
+pub struct McpServerConfig {
+    /// Session mode (Main or Sub)
+    pub session_mode: SessionMode,
+    /// Agent ID (for sub-agent sessions)
+    pub agent_id: Option<String>,
+    /// Node/task ID (for sub-agent sessions)
+    pub node_id: Option<String>,
+    /// DAG ID (for sub-agent sessions)
+    pub dag_id: Option<String>,
+    /// Available agents (JSON array string, e.g. '["claude","codex"]')
+    pub available_agents: Option<String>,
+}
+
+/// Build MCP config based on session kind.
+///
+/// - Chat sessions → Main mode (orchestration tools)
+/// - Dag sessions → Sub mode (task execution tools)
+///
+/// For sub-agent (Dag) sessions, additional context (agent_id, node_id, dag_id)
+/// should be set by the caller via `McpServerConfig` fields.
+pub fn build_mcp_config_for_session(kind: SessionKind) -> McpServerConfig {
+    match kind {
+        SessionKind::Chat => McpServerConfig {
+            session_mode: SessionMode::Main,
+            ..Default::default()
+        },
+        SessionKind::Dag => McpServerConfig {
+            session_mode: SessionMode::Sub,
+            ..Default::default()
+        },
+    }
+}
+
+/// Build the list of Ergatai MCP servers to inject into an agent session.
+///
+/// Returns an empty vec if the MCP server script is not found (graceful degradation).
+pub fn build_ergatai_mcp_servers(cwd: &str, config: &McpServerConfig) -> Vec<McpServer> {
+    let mcp_script = match find_mcp_server_script() {
+        Some(p) => p,
+        None => {
+            tracing::debug!("Ergatai MCP server script not found, skipping tool injection");
+            return vec![];
+        }
+    };
+
+    let native_binding = find_native_binding();
+
+    let mut env_vars = vec![
+        EnvVariable::new("ERGATAI_NATIVE_BINDING", &native_binding),
+        EnvVariable::new("ERGATAI_PROJECT_ROOT", cwd),
+        EnvVariable::new("ERGATAI_SESSION_MODE", &config.session_mode.to_string()),
+    ];
+
+    // Sub-agent specific env vars
+    if let Some(ref agent_id) = config.agent_id {
+        env_vars.push(EnvVariable::new("ERGATAI_AGENT_ID", agent_id));
+    }
+    if let Some(ref node_id) = config.node_id {
+        env_vars.push(EnvVariable::new("ERGATAI_NODE_ID", node_id));
+    }
+    if let Some(ref dag_id) = config.dag_id {
+        env_vars.push(EnvVariable::new("ERGATAI_DAG_ID", dag_id));
+    }
+    if let Some(ref agents) = config.available_agents {
+        env_vars.push(EnvVariable::new("ERGATAI_AVAILABLE_AGENTS", agents));
+    }
+
+    let stdio_server = McpServerStdio::new("ergatai", &mcp_script)
+        .args(vec![])
+        .env(env_vars);
+
+    vec![McpServer::Stdio(stdio_server)]
+}
+
+/// Find the MCP server JavaScript bundle.
+///
+/// Search order:
+/// 1. Development: `src-rust/mcp-server/dist/index.js` (relative to CARGO_MANIFEST_DIR)
+/// 2. Development: `src-rust/mcp-server/dist/index.js` (relative to current exe)
+/// 3. Packaged: `resources/mcp-server/index.js` (relative to current exe)
+fn find_mcp_server_script() -> Option<PathBuf> {
+    let candidates = vec![
+        // Dev: relative to Cargo manifest (src-rust/)
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("mcp-server/dist/index.js"),
+        // Dev: relative to current executable
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+            .map(|d| d.join("../../src-rust/mcp-server/dist/index.js"))
+            .unwrap_or_default(),
+        // Packaged: relative to current executable
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+            .map(|d| d.join("../resources/mcp-server/index.js"))
+            .unwrap_or_default(),
+    ];
+
+    for path in &candidates {
+        if path.exists() {
+            tracing::debug!(path = ?path, "Found MCP server script");
+            return Some(path.clone());
+        }
+    }
+
+    tracing::warn!(
+        "MCP server script not found in any candidate location: {:?}",
+        candidates
+    );
+    None
+}
+
+/// Find the native binding (NAPI module) path.
+///
+/// The native binding is a Node.js module that provides access to Rust functions.
+/// In development, it's loaded via `src/native-binding.js` which in turn loads
+/// the compiled .node binary.
+fn find_native_binding() -> String {
+    // In development, the native-binding.js is at the project root's src/ directory.
+    // When running from cargo test or dev, CARGO_MANIFEST_DIR is src-rust/.
+    let dev_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../src/native-binding.js");
+
+    if dev_path.exists() {
+        return dev_path.to_string_lossy().to_string();
+    }
+
+    // Packaged: look relative to executable
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let packaged = dir.join("../Resources/src/native-binding.js");
+            if packaged.exists() {
+                return packaged.to_string_lossy().to_string();
+            }
+        }
+    }
+
+    // Fallback: just the name and hope it's in NODE_PATH
+    tracing::warn!("native-binding.js not found, MCP server may fail to load NAPI");
+    dev_path.to_string_lossy().to_string()
 }
