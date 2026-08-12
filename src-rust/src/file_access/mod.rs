@@ -29,7 +29,7 @@ pub mod config;
 #[cfg(test)]
 mod multi_agent_tests;
 
-pub use lock_waiter::{LockWaitRequest, LockReleaseNotification, LockGrantedNotification};
+pub use lock_waiter::{LockWaitRequest, LockReleaseNotification, LockGrantedNotification, LockCancelRequest, LockPriority};
 pub use lock_wait_consumer::LockWaitConsumer;
 pub use config::{ConfigManager, FileAccessConfig};
 pub use lock_manager::FileLockManager;

@@ -43,14 +43,23 @@ impl NatsServer {
     pub async fn start() -> ErgataiResult<Self> {
         let binary_path = Self::find_binary()?;
         let port = Self::find_available_port().await?;
+        let store_dir = Self::get_store_dir()?;
 
-        info!(port = port, binary = %binary_path.display(), "Starting nats-server");
+        // Ensure store directory exists
+        std::fs::create_dir_all(&store_dir).map_err(|e| {
+            ErgataiError::internal(format!("Failed to create NATS store directory: {}", e))
+        })?;
+
+        info!(port = port, binary = %binary_path.display(), store = %store_dir.display(), "Starting nats-server");
 
         let child = Command::new(&binary_path)
             .args([
                 "-p", &port.to_string(),
                 "-a", "127.0.0.1",  // Bind to localhost only
                 "--jetstream",       // Enable JetStream
+                "-sd", store_dir.to_str().ok_or_else(|| {
+                    ErgataiError::internal("Invalid NATS store directory path")
+                })?,  // Store directory for persistence
             ])
             .spawn()?;
 
@@ -73,6 +82,22 @@ impl NatsServer {
     /// Get the connection URL for this server
     pub fn url(&self) -> String {
         format!("127.0.0.1:{}", self.port)
+    }
+
+    /// Get the NATS JetStream store directory
+    ///
+    /// Uses platform-specific data directory:
+    /// - Linux: ~/.local/share/ergatai/nats-store
+    /// - macOS: ~/Library/Application Support/ergatai/nats-store
+    /// - Windows: C:/Users/{user}/AppData/Roaming/ergatai/nats-store
+    ///
+    /// Falls back to current directory if dirs crate fails.
+    fn get_store_dir() -> ErgataiResult<PathBuf> {
+        let base_dir = dirs::data_dir()
+            .or_else(|| dirs::home_dir().map(|h| h.join(".local").join("share")))
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+        Ok(base_dir.join("ergatai").join("nats-store"))
     }
 
     /// Locate the nats-server binary

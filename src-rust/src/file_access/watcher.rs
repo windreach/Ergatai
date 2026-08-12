@@ -228,7 +228,7 @@ mod tests {
         fs::create_dir_all(project_root.join("src")).unwrap();
         fs::write(project_root.join("src/lib.rs"), "pub fn lib() {}").unwrap();
 
-        let manager = Arc::new(FileLockManager::new(&db_path, project_root.clone()).unwrap());
+        let manager = Arc::new(FileLockManager::new(&db_path, project_root.clone(), None).unwrap());
         (temp_dir, manager, project_root)
     }
 
@@ -390,7 +390,7 @@ mod tests {
             "**",
             FileMode::Write,
         );
-        manager.acquire_lock(&token, "main.rs").unwrap();
+        manager.acquire_lock(&token, "main.rs").await.unwrap();
 
         let event = make_event(
             EventKind::Modify(notify::event::ModifyKind::Data(

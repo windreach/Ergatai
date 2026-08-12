@@ -4,7 +4,7 @@
 //! Similar to NatsManager, this provides a central point for file access control.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::OnceLock;
 

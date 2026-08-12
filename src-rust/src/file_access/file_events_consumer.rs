@@ -118,11 +118,7 @@ impl FileEventsConsumer {
                             }
                         };
 
-                        // Acknowledge before processing
-                        if let Err(e) = msg.ack().await {
-                            warn!(error = %e, "Failed to ack file event");
-                        }
-
+                        // Process event first, then ack (to avoid message loss on crash)
                         match event {
                             FileEvent::Ready(payload) => {
                                 info!(
@@ -153,6 +149,11 @@ impl FileEventsConsumer {
                                     );
                                 }
                             }
+                        }
+
+                        // Acknowledge after successful processing
+                        if let Err(e) = msg.ack().await {
+                            warn!(error = %e, "Failed to ack file event");
                         }
                     }
                     Ok(Some(Err(e))) => {

@@ -935,6 +935,7 @@ mod tests {
 
         lock_manager
             .acquire_lock(&file_token, file_path.to_str().unwrap())
+            .await
             .unwrap();
 
         // Verify lock exists

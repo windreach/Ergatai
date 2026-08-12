@@ -815,8 +815,10 @@ impl FileLockManager {
                     "WRITE lock preempted via arbitration"
                 );
 
-                // Rollback since we'll re-acquire in the caller
-                conn.execute_batch("ROLLBACK").ok();
+                // Commit the transaction to persist the EXPIRED status
+                conn.execute_batch("COMMIT").map_err(|e| {
+                    ErgataiError::internal(format!("Failed to commit arbitration on {}: {}", normalized_path, e))
+                })?;
                 Ok(true) // Continue with lock acquisition
             }
             crate::file_access::conflict_arbitration::ArbitrationDecision::RejectBoth => {
@@ -917,6 +919,8 @@ impl FileLockManager {
         // Notify waiters after releasing the mutex
         release_result?;
         self.notify_file_ready(&normalized_path).await?;
+        // Publish lock release notification to trigger active wake-up in LockWaitConsumer
+        self.publish_lock_release_notification(&normalized_path, token_id).await?;
 
         Ok(())
     }
@@ -1833,8 +1837,81 @@ impl FileLockManager {
         Ok(())
     }
 
+    /// Publish a lock release notification to NATS for the lock waiting queue.
+    ///
+    /// This triggers the active wake-up mechanism in LockWaitConsumer, which
+    /// immediately tries to grant the lock to the next waiter in the queue.
+    pub async fn publish_lock_release_notification(
+        &self,
+        file_path: &str,
+        token_id: &str,
+    ) -> Result<(), ErgataiError> {
+        let nats_client = match &self.nats_client {
+            Some(client) => client,
+            None => {
+                debug!("NATS not available, skipping lock release notification");
+                return Ok(());
+            }
+        };
+
+        use crate::file_access::lock_waiter::LockReleaseNotification;
+        let notification = LockReleaseNotification::new(file_path, token_id);
+
+        let payload = serde_json::to_vec(&notification)
+            .map_err(|e| ErgataiError::internal(format!("Failed to serialize notification: {}", e)))?;
+
+        let subject = notification.subject();
+        nats_client.publish(subject, payload.into()).await
+            .map_err(|e| ErgataiError::NatsError(format!("Failed to publish lock release: {}", e)))?;
+
+        info!(
+            file_path = %file_path,
+            token_id = %token_id,
+            "Published lock release notification to NATS"
+        );
+
+        Ok(())
+    }
+
+    /// Publish a lock cancel request to NATS to remove a waiting request from the queue.
+    pub async fn publish_lock_cancel_request(
+        &self,
+        request_id: &str,
+        agent_id: &str,
+        reason: Option<&str>,
+    ) -> Result<(), ErgataiError> {
+        let nats_client = match &self.nats_client {
+            Some(client) => client,
+            None => {
+                debug!("NATS not available, skipping lock cancel request");
+                return Ok(());
+            }
+        };
+
+        use crate::file_access::lock_waiter::LockCancelRequest;
+        let cancel = LockCancelRequest::new(request_id, agent_id, reason);
+
+        let payload = serde_json::to_vec(&cancel)
+            .map_err(|e| ErgataiError::internal(format!("Failed to serialize cancel request: {}", e)))?;
+
+        let subject = cancel.subject();
+        nats_client.publish(subject, payload.into()).await
+            .map_err(|e| ErgataiError::NatsError(format!("Failed to publish lock cancel: {}", e)))?;
+
+        info!(
+            request_id = %request_id,
+            agent_id = %agent_id,
+            "Published lock cancel request to NATS"
+        );
+
+        Ok(())
+    }
+
     /// Check if a file is locked for writing.
     pub fn is_file_locked_for_write(&self, file_path: &str) -> Result<bool, ErgataiError> {
+        // Normalize path to match database storage format
+        let normalized_path = self.validate_and_normalize_path(file_path)?;
+
         let conn = self.conn.lock().map_err(|e| {
             ErgataiError::internal(format!("Failed to acquire lock: {}", e))
         })?;
@@ -1843,7 +1920,7 @@ impl FileLockManager {
             .query_row(
                 "SELECT COUNT(*) > 0 FROM file_locks
                  WHERE file_path = ?1 AND mode = 'WRITE' AND status = 'ACTIVE'",
-                params![file_path],
+                params![normalized_path],
                 |row| row.get(0),
             )
             .map_err(|e| ErgataiError::internal(format!("Failed to check lock: {}", e)))?;
@@ -1871,45 +1948,48 @@ impl FileLockManager {
     /// waiter registration, the waiter blocks up to 30s timeout. This is safe
     /// (not a deadlock) and rare in practice.
     pub async fn read_latest(&self, file_path: &str) -> Result<Vec<u8>, ErgataiError> {
+        // Validate and normalize path to prevent path traversal attacks
+        let normalized_path = self.validate_and_normalize_path(file_path)?;
+
         // Check if file is locked for WRITE (acquires/releases conn lock)
-        if self.is_file_locked_for_write(file_path)? {
+        if self.is_file_locked_for_write(&normalized_path)? {
             // Register waiter (acquires waiters lock — no conn lock held, avoids deadlock)
-            let rx = self.add_waiter(file_path).await?;
+            let rx = self.add_waiter(&normalized_path).await?;
             // Wait for notification or timeout (30 seconds)
             match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
                 Ok(Ok(Ok(()))) => {
                     // File is ready, proceed to read
-                    debug!("File {} is ready, reading", file_path);
+                    debug!("File {} is ready, reading", normalized_path);
                 }
                 Ok(Ok(Err(reason))) => {
                     // File has error
                     return Err(ErgataiError::internal(format!(
                         "File {} has error: {}",
-                        file_path, reason
+                        normalized_path, reason
                     )));
                 }
                 Ok(Err(_)) => {
                     // Channel closed (sender dropped)
                     return Err(ErgataiError::internal(format!(
                         "Waiter channel closed for file {}",
-                        file_path
+                        normalized_path
                     )));
                 }
                 Err(_) => {
                     // Timeout
                     return Err(ErgataiError::internal(format!(
                         "Timeout waiting for file {} to become ready",
-                        file_path
+                        normalized_path
                     )));
                 }
             }
         }
 
-        // Read the file
-        let full_path = self.project_root.join(file_path);
+        // Read the file using normalized path
+        let full_path = self.project_root.join(&normalized_path);
         tokio::fs::read(&full_path)
             .await
-            .map_err(|e| ErgataiError::internal(format!("Failed to read file {}: {}", file_path, e)))
+            .map_err(|e| ErgataiError::internal(format!("Failed to read file {}: {}", normalized_path, e)))
     }
 
     // ─── Single-agent mode detection ─────────────────────────────────────
@@ -2678,7 +2758,7 @@ mod tests {
         assert!(manager.is_file_locked("test.txt").unwrap());
 
         // Release lock
-        manager.release_lock(file_token.id.as_str(), "test.txt").unwrap();
+        manager.release_lock(file_token.id.as_str(), "test.txt").await.unwrap();
 
         // Check lock released
         assert!(!manager.is_file_locked("test.txt").unwrap());

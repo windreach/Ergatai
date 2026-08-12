@@ -32,7 +32,7 @@ mod tests {
         std::fs::write(project_root.join("src/util.rs"), "fn util() {}").unwrap();
 
         let manager = Arc::new(
-            FileLockManager::new(&db_path, project_root).unwrap()
+            FileLockManager::new(&db_path, project_root, None).unwrap()
         );
         (temp_dir, manager)
     }
@@ -82,27 +82,31 @@ mod tests {
         let token_b = make_file_token("agent-b", "session-b", &sys_b.id, "**", FileMode::Write);
 
         // Agent A acquires WRITE lock
-        manager.acquire_lock(&token_a, "main.rs").unwrap();
+        manager.acquire_lock(&token_a, "main.rs").await.unwrap();
         assert!(manager.is_file_locked("main.rs").unwrap());
 
         // Agent B tries same file → should fail
-        let result = manager.acquire_lock(&token_b, "main.rs");
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), ErgataiError::LockConflict(_)));
+        let result = manager.acquire_lock(&token_b, "main.rs").await;
+        assert!(result.is_err(), "Expected error, got: {:?}", result);
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, ErgataiError::LockConflict(_)) || matches!(err, ErgataiError::LockConflictWithRetry { .. }),
+            "Expected LockConflict or LockConflictWithRetry, got: {:?}", err
+        );
 
         // Agent A releases → Agent B can now acquire
         manager.release_lock(token_a.id.as_str(), "main.rs").await.unwrap();
         assert!(!manager.is_file_locked("main.rs").unwrap());
 
-        manager.acquire_lock(&token_b, "main.rs").unwrap();
+        manager.acquire_lock(&token_b, "main.rs").await.unwrap();
         assert!(manager.is_file_locked("main.rs").unwrap());
     }
 
     // ================================================================
     // Test 2: Multiple READ locks coexist
     // ================================================================
-    #[test]
-    fn test_multiple_read_locks_coexist() {
+    #[tokio::test]
+    async fn test_multiple_read_locks_coexist() {
         let (_temp, manager) = setup_test_env();
         let root = test_project_root();
 
@@ -114,8 +118,8 @@ mod tests {
         let token_a = make_file_token("agent-a", "session-a", &sys_a.id, "**", FileMode::Read);
         let token_b = make_file_token("agent-b", "session-b", &sys_b.id, "**", FileMode::Read);
 
-        manager.acquire_lock(&token_a, "main.rs").unwrap();
-        manager.acquire_lock(&token_b, "main.rs").unwrap();
+        manager.acquire_lock(&token_a, "main.rs").await.unwrap();
+        manager.acquire_lock(&token_b, "main.rs").await.unwrap();
 
         // is_file_locked checks WRITE only
         assert!(!manager.is_file_locked("main.rs").unwrap());
@@ -133,7 +137,7 @@ mod tests {
         manager.register_system_token(&sys).unwrap();
         let token = make_file_token("agent-a", "session-a", &sys.id, "**", FileMode::Write);
 
-        manager.acquire_lock(&token, "lib.rs").unwrap();
+        manager.acquire_lock(&token, "lib.rs").await.unwrap();
         assert!(manager.is_file_locked("lib.rs").unwrap());
 
         manager.update_heartbeat(token.id.as_str()).unwrap();
@@ -144,7 +148,7 @@ mod tests {
         let sys_b = SystemToken::new("agent-b".into(), "session-b".into(), root, 3600, 30);
         manager.register_system_token(&sys_b).unwrap();
         let token_b = make_file_token("agent-b", "session-b", &sys_b.id, "**", FileMode::Write);
-        manager.acquire_lock(&token_b, "lib.rs").unwrap();
+        manager.acquire_lock(&token_b, "lib.rs").await.unwrap();
         assert!(manager.is_file_locked("lib.rs").unwrap());
     }
 
@@ -161,10 +165,10 @@ mod tests {
 
         let token = make_file_token("agent-a", "session-a", &sys.id, "src/**", FileMode::Write);
 
-        manager.acquire_lock(&token, "src/app.rs").unwrap();
+        manager.acquire_lock(&token, "src/app.rs").await.unwrap();
         manager.release_lock(token.id.as_str(), "src/app.rs").await.unwrap();
 
-        let result = manager.acquire_lock(&token, "main.rs");
+        let result = manager.acquire_lock(&token, "main.rs").await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), ErgataiError::PermissionDenied(_)));
     }
@@ -172,8 +176,8 @@ mod tests {
     // ================================================================
     // Test 5: Sensitive path requires ADMIN mode
     // ================================================================
-    #[test]
-    fn test_sensitive_path_requires_admin() {
+    #[tokio::test]
+    async fn test_sensitive_path_requires_admin() {
         let (_temp, manager) = setup_test_env();
         let root = test_project_root();
 
@@ -181,7 +185,7 @@ mod tests {
         manager.register_system_token(&sys).unwrap();
 
         let token_write = make_file_token("agent-a", "session-a", &sys.id, "**", FileMode::Write);
-        let result = manager.acquire_lock(&token_write, ".env");
+        let result = manager.acquire_lock(&token_write, ".env").await;
         assert!(result.is_err());
         match result.unwrap_err() {
             ErgataiError::PermissionDenied(msg) => {
@@ -192,14 +196,14 @@ mod tests {
 
         // ADMIN → accepted
         let token_admin = make_file_token("agent-a", "session-a", &sys.id, "**", FileMode::Admin);
-        manager.acquire_lock(&token_admin, ".env").unwrap();
+        manager.acquire_lock(&token_admin, ".env").await.unwrap();
     }
 
     // ================================================================
     // Test 6: Path traversal rejected
     // ================================================================
-    #[test]
-    fn test_path_traversal_rejected() {
+    #[tokio::test]
+    async fn test_path_traversal_rejected() {
         let (_temp, manager) = setup_test_env();
         let root = test_project_root();
 
@@ -207,7 +211,7 @@ mod tests {
         manager.register_system_token(&sys).unwrap();
         let token = make_file_token("agent-a", "session-a", &sys.id, "**", FileMode::Write);
 
-        let result = manager.acquire_lock(&token, "../../../etc/passwd");
+        let result = manager.acquire_lock(&token, "../../../etc/passwd").await;
         assert!(result.is_err());
     }
 
@@ -230,9 +234,9 @@ mod tests {
         let token_b = make_file_token("agent-b", "session-b", &sys_b.id, "**", FileMode::Write);
         let token_c = make_file_token("agent-c", "session-c", &sys_c.id, "**", FileMode::Write);
 
-        manager.acquire_lock(&token_a, "main.rs").unwrap();
-        manager.acquire_lock(&token_b, "lib.rs").unwrap();
-        manager.acquire_lock(&token_c, "config.rs").unwrap();
+        manager.acquire_lock(&token_a, "main.rs").await.unwrap();
+        manager.acquire_lock(&token_b, "lib.rs").await.unwrap();
+        manager.acquire_lock(&token_c, "config.rs").await.unwrap();
 
         assert!(manager.is_file_locked("main.rs").unwrap());
         assert!(manager.is_file_locked("lib.rs").unwrap());
@@ -259,7 +263,7 @@ mod tests {
         manager.register_system_token(&sys).unwrap();
         let token = make_file_token("agent-a", "session-a", &sys.id, "**", FileMode::Write);
 
-        manager.acquire_lock(&token, "main.rs").unwrap();
+        manager.acquire_lock(&token, "main.rs").await.unwrap();
         manager.release_lock(token.id.as_str(), "main.rs").await.unwrap();
 
         manager.log_audit("agent-a", "session-a", "TEST_CHECK", Some("main.rs"), Some("WRITE"), Some("test")).unwrap();
@@ -268,8 +272,8 @@ mod tests {
     // ================================================================
     // Test 9: Expired token removed from active list
     // ================================================================
-    #[test]
-    fn test_expired_token_not_active() {
+    #[tokio::test]
+    async fn test_expired_token_not_active() {
         let (_temp, manager) = setup_test_env();
         let root = test_project_root();
 
@@ -286,10 +290,8 @@ mod tests {
     // ================================================================
     // Test 10: Thread-based concurrent WRITE competition
     // ================================================================
-    #[test]
-    fn test_thread_concurrent_write_competition() {
-        use std::thread;
-
+    #[tokio::test]
+    async fn test_thread_concurrent_write_competition() {
         let (_temp, manager) = setup_test_env();
         let root = test_project_root();
 
@@ -303,15 +305,17 @@ mod tests {
 
         let mgr_a = Arc::clone(&manager);
         let mgr_b = Arc::clone(&manager);
+        let token_a_clone = token_a.clone();
+        let token_b_clone = token_b.clone();
 
-        let handle_a = thread::spawn(move || mgr_a.acquire_lock(&token_a, "main.rs"));
-        let handle_b = thread::spawn(move || {
-            thread::sleep(std::time::Duration::from_millis(10));
-            mgr_b.acquire_lock(&token_b, "main.rs")
+        let handle_a = tokio::spawn(async move { mgr_a.acquire_lock(&token_a_clone, "main.rs").await });
+        let handle_b = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            mgr_b.acquire_lock(&token_b_clone, "main.rs").await
         });
 
-        let result_a = handle_a.join().unwrap();
-        let result_b = handle_b.join().unwrap();
+        let result_a = handle_a.await.unwrap();
+        let result_b = handle_b.await.unwrap();
 
         let a_ok = result_a.is_ok();
         let b_ok = result_b.is_ok();
@@ -334,7 +338,7 @@ mod tests {
         let token_a = make_file_token("agent-a", "session-a", &sys_a.id, "**", FileMode::Write);
         let token_b = make_file_token("agent-b", "session-b", &sys_b.id, "**", FileMode::Write);
 
-        manager.acquire_lock(&token_a, "main.rs").unwrap();
+        manager.acquire_lock(&token_a, "main.rs").await.unwrap();
 
         let result = manager.release_lock(token_b.id.as_str(), "main.rs").await;
         assert!(result.is_err());
@@ -354,9 +358,9 @@ mod tests {
         manager.register_system_token(&sys).unwrap();
         let token = make_file_token("agent-a", "session-a", &sys.id, "**", FileMode::Write);
 
-        manager.acquire_lock(&token, "main.rs").unwrap();
-        manager.acquire_lock(&token, "lib.rs").unwrap();
-        manager.acquire_lock(&token, "config.rs").unwrap();
+        manager.acquire_lock(&token, "main.rs").await.unwrap();
+        manager.acquire_lock(&token, "lib.rs").await.unwrap();
+        manager.acquire_lock(&token, "config.rs").await.unwrap();
 
         assert_eq!(manager.get_locks_by_token(token.id.as_str()).unwrap().len(), 3);
 
@@ -367,8 +371,8 @@ mod tests {
     // ================================================================
     // Test 13: get_tokens_by_session
     // ================================================================
-    #[test]
-    fn test_get_tokens_by_session() {
+    #[tokio::test]
+    async fn test_get_tokens_by_session() {
         let (_temp, manager) = setup_test_env();
         let root = test_project_root();
 
@@ -399,20 +403,20 @@ mod tests {
 
         // Phase 1: Analyzer reads
         let token_a = make_file_token("analyzer", "session-analyze", &sys_a.id, "src/**", FileMode::Read);
-        manager.acquire_lock(&token_a, "src/app.rs").unwrap();
-        manager.acquire_lock(&token_a, "src/util.rs").unwrap();
+        manager.acquire_lock(&token_a, "src/app.rs").await.unwrap();
+        manager.acquire_lock(&token_a, "src/util.rs").await.unwrap();
         manager.release_lock(token_a.id.as_str(), "src/app.rs").await.unwrap();
         manager.release_lock(token_a.id.as_str(), "src/util.rs").await.unwrap();
 
         // Phase 2: Modifier writes
         let token_b = make_file_token("modifier", "session-modify", &sys_b.id, "src/**", FileMode::Write);
-        manager.acquire_lock(&token_b, "src/app.rs").unwrap();
+        manager.acquire_lock(&token_b, "src/app.rs").await.unwrap();
         manager.release_lock(token_b.id.as_str(), "src/app.rs").await.unwrap();
 
         // Phase 3: Tester reads
         let token_c = make_file_token("tester", "session-test", &sys_c.id, "src/**", FileMode::Read);
-        manager.acquire_lock(&token_c, "src/app.rs").unwrap();
-        manager.acquire_lock(&token_c, "src/util.rs").unwrap();
+        manager.acquire_lock(&token_c, "src/app.rs").await.unwrap();
+        manager.acquire_lock(&token_c, "src/util.rs").await.unwrap();
         manager.release_lock(token_c.id.as_str(), "src/app.rs").await.unwrap();
         manager.release_lock(token_c.id.as_str(), "src/util.rs").await.unwrap();
 
@@ -423,15 +427,15 @@ mod tests {
     // ================================================================
     // Test 15: Heartbeat keeps token active
     // ================================================================
-    #[test]
-    fn test_heartbeat_keeps_token_active() {
+    #[tokio::test]
+    async fn test_heartbeat_keeps_token_active() {
         let (_temp, manager) = setup_test_env();
         let root = test_project_root();
 
         let sys = SystemToken::new("agent-a".into(), "session-a".into(), root, 3600, 30);
         manager.register_system_token(&sys).unwrap();
         let token = make_file_token("agent-a", "session-a", &sys.id, "**", FileMode::Write);
-        manager.acquire_lock(&token, "main.rs").unwrap();
+        manager.acquire_lock(&token, "main.rs").await.unwrap();
 
         manager.update_heartbeat(sys.id.as_str()).unwrap();
 
@@ -441,8 +445,8 @@ mod tests {
     // ================================================================
     // Test 16: Cleanup old audit logs (fresh logs not deleted)
     // ================================================================
-    #[test]
-    fn test_cleanup_old_audit_logs_no_fresh_delete() {
+    #[tokio::test]
+    async fn test_cleanup_old_audit_logs_no_fresh_delete() {
         let (_temp, manager) = setup_test_env();
 
         manager.log_audit("agent-a", "session-a", "LOCK_ACQUIRED", Some("main.rs"), Some("WRITE"), Some("test")).unwrap();
@@ -455,8 +459,8 @@ mod tests {
     // ================================================================
     // Test 17: READ lock doesn't show as "locked" in WRITE check
     // ================================================================
-    #[test]
-    fn test_read_not_counted_as_write_locked() {
+    #[tokio::test]
+    async fn test_read_not_counted_as_write_locked() {
         let (_temp, manager) = setup_test_env();
         let root = test_project_root();
 
@@ -464,7 +468,7 @@ mod tests {
         manager.register_system_token(&sys).unwrap();
         let token = make_file_token("agent-a", "session-a", &sys.id, "**", FileMode::Read);
 
-        manager.acquire_lock(&token, "main.rs").unwrap();
+        manager.acquire_lock(&token, "main.rs").await.unwrap();
         assert!(!manager.is_file_locked("main.rs").unwrap());
     }
 
@@ -509,7 +513,7 @@ mod tests {
         }
 
         for (i, (agent_id, _, file)) in agents.iter().enumerate() {
-            manager.acquire_lock(&tokens[i].0, file).unwrap();
+            manager.acquire_lock(&tokens[i].0, file).await.unwrap();
             assert!(manager.is_file_locked(file).unwrap(), "{} should have locked {}", agent_id, file);
         }
 
@@ -525,8 +529,8 @@ mod tests {
     // ================================================================
     // Test 20: WRITE blocks WRITE even when not checking is_file_locked first
     // ================================================================
-    #[test]
-    fn test_write_blocks_write_at_db_level() {
+    #[tokio::test]
+    async fn test_write_blocks_write_at_db_level() {
         let (_temp, manager) = setup_test_env();
         let root = test_project_root();
 
@@ -538,9 +542,9 @@ mod tests {
         let token_a = make_file_token("agent-a", "session-a", &sys_a.id, "**", FileMode::Write);
         let token_b = make_file_token("agent-b", "session-b", &sys_b.id, "**", FileMode::Write);
 
-        manager.acquire_lock(&token_a, "main.rs").unwrap();
+        manager.acquire_lock(&token_a, "main.rs").await.unwrap();
 
-        let result = manager.acquire_lock(&token_b, "main.rs");
+        let result = manager.acquire_lock(&token_b, "main.rs").await;
         assert!(result.is_err());
     }
 
@@ -629,8 +633,8 @@ mod tests {
         manager.register_system_token(&sys).unwrap();
 
         let token = make_file_token("agent-a", "session-a", &sys.id, "**", FileMode::Write);
-        manager.acquire_lock(&token, "main.rs").unwrap();
-        manager.acquire_lock(&token, "lib.rs").unwrap();
+        manager.acquire_lock(&token, "main.rs").await.unwrap();
+        manager.acquire_lock(&token, "lib.rs").await.unwrap();
 
         // Verify locks are held
         assert!(manager.is_file_locked("main.rs").unwrap());
@@ -652,7 +656,7 @@ mod tests {
         let sys_b = SystemToken::new("agent-b".into(), "session-b".into(), test_project_root(), 3600, 30);
         manager.register_system_token(&sys_b).unwrap();
         let token_b = make_file_token("agent-b", "session-b", &sys_b.id, "**", FileMode::Write);
-        manager.acquire_lock(&token_b, "main.rs").unwrap();
+        manager.acquire_lock(&token_b, "main.rs").await.unwrap();
         assert!(manager.is_file_locked("main.rs").unwrap());
     }
 
@@ -673,8 +677,8 @@ mod tests {
         let token_a = make_file_token("agent-a", "session-a", &sys_a.id, "**", FileMode::Write);
         let token_b = make_file_token("agent-b", "session-b", &sys_b.id, "**", FileMode::Write);
 
-        manager.acquire_lock(&token_a, "main.rs").unwrap();
-        manager.acquire_lock(&token_b, "lib.rs").unwrap();
+        manager.acquire_lock(&token_a, "main.rs").await.unwrap();
+        manager.acquire_lock(&token_b, "lib.rs").await.unwrap();
 
         let config = WatchdogConfig::default();
         let watchdog = Watchdog::new(Arc::clone(&manager), config);
@@ -723,11 +727,11 @@ mod tests {
         let token_write = make_file_token("writer", "session-writer", &sys_b.id, "**", FileMode::Write);
 
         // Agent A acquires READ lock
-        manager.acquire_lock(&token_read, "main.rs").unwrap();
+        manager.acquire_lock(&token_read, "main.rs").await.unwrap();
 
         // Agent B can acquire WRITE lock even while READ is held (optimistic locking)
         // This tests that READ doesn't block WRITE
-        manager.acquire_lock(&token_write, "main.rs").unwrap();
+        manager.acquire_lock(&token_write, "main.rs").await.unwrap();
 
         // Both locks are active
         assert_eq!(manager.get_locks_by_token(token_read.id.as_str()).unwrap().len(), 1);
@@ -766,7 +770,7 @@ mod tests {
 
         // All three agents can acquire READ locks on the same file
         for (token, _) in &tokens {
-            manager.acquire_lock(token, "main.rs").unwrap();
+            manager.acquire_lock(token, "main.rs").await.unwrap();
         }
 
         // All locks are active
@@ -786,8 +790,8 @@ mod tests {
     // ================================================================
     // Test 29: Lock upgrade READ→WRITE with no conflict
     // ================================================================
-    #[test]
-    fn test_lock_upgrade_read_to_write_no_conflict() {
+    #[tokio::test]
+    async fn test_lock_upgrade_read_to_write_no_conflict() {
         use crate::file_access::LockModeManager;
         use std::sync::Arc;
 
@@ -798,7 +802,7 @@ mod tests {
         manager.register_system_token(&sys).unwrap();
 
         let token = make_file_token("agent-a", "session-a", &sys.id, "**", FileMode::Read);
-        manager.acquire_lock(&token, "main.rs").unwrap();
+        manager.acquire_lock(&token, "main.rs").await.unwrap();
 
         // Verify initial lock is READ
         let locks = manager.get_locks_by_token(token.id.as_str()).unwrap();
@@ -818,8 +822,8 @@ mod tests {
     // ================================================================
     // Test 30: Lock upgrade READ→WRITE fails with WRITE conflict
     // ================================================================
-    #[test]
-    fn test_lock_upgrade_read_to_write_with_conflict() {
+    #[tokio::test]
+    async fn test_lock_upgrade_read_to_write_with_conflict() {
         let (_temp, manager) = setup_test_env();
         let root = test_project_root();
 
@@ -830,11 +834,11 @@ mod tests {
 
         // Agent A has READ lock
         let token_a = make_file_token("agent-a", "session-a", &sys_a.id, "**", FileMode::Read);
-        manager.acquire_lock(&token_a, "main.rs").unwrap();
+        manager.acquire_lock(&token_a, "main.rs").await.unwrap();
 
         // Agent B has WRITE lock on the same file
         let token_b = make_file_token("agent-b", "session-b", &sys_b.id, "**", FileMode::Write);
-        manager.acquire_lock(&token_b, "main.rs").unwrap();
+        manager.acquire_lock(&token_b, "main.rs").await.unwrap();
 
         // Now if Agent A tries to upgrade to WRITE, it should fail
         // (because Agent B already has WRITE lock)
@@ -856,7 +860,7 @@ mod tests {
         manager.register_system_token(&sys).unwrap();
 
         let token = make_file_token("writer", "session-writer", &sys.id, "**", FileMode::Write);
-        manager.acquire_lock(&token, "main.rs").unwrap();
+        manager.acquire_lock(&token, "main.rs").await.unwrap();
 
         // File is locked for WRITE
         assert!(manager.is_file_locked_for_write("main.rs").unwrap());
@@ -887,8 +891,8 @@ mod tests {
     // Test 32: Concurrent lock upgrade conflict
     // Two agents with READ locks, both try to upgrade to WRITE
     // ================================================================
-    #[test]
-    fn test_concurrent_lock_upgrade_conflict() {
+    #[tokio::test]
+    async fn test_concurrent_lock_upgrade_conflict() {
         let (_temp, manager) = setup_test_env();
         let root = test_project_root();
 
@@ -902,8 +906,8 @@ mod tests {
         let token_b = make_file_token("agent-b", "session-b", &sys_b.id, "**", FileMode::Read);
 
         // Both acquire READ locks
-        manager.acquire_lock(&token_a, "main.rs").unwrap();
-        manager.acquire_lock(&token_b, "main.rs").unwrap();
+        manager.acquire_lock(&token_a, "main.rs").await.unwrap();
+        manager.acquire_lock(&token_b, "main.rs").await.unwrap();
 
         // Verify both have READ locks
         assert_eq!(manager.get_locks_by_token(token_a.id.as_str()).unwrap().len(), 1);
@@ -958,14 +962,18 @@ mod tests {
             let file = files[i % files.len()].to_string();
 
             let handle = thread::spawn(move || {
+                // Create runtime for async operations
+                let rt = tokio::runtime::Runtime::new().unwrap();
+
                 // Acquire lock
-                let acquire_result = mgr.acquire_lock(&token_clone, &file);
+                let acquire_result = rt.block_on(async {
+                    mgr.acquire_lock(&token_clone, &file).await
+                });
                 if acquire_result.is_ok() {
                     // Hold lock briefly
                     std::thread::sleep(std::time::Duration::from_millis(10));
 
                     // Release lock
-                    let rt = tokio::runtime::Runtime::new().unwrap();
                     rt.block_on(async {
                         mgr.release_lock(token_clone.id.as_str(), &file).await
                     }).unwrap();
@@ -999,7 +1007,7 @@ mod tests {
         manager.register_system_token(&sys).unwrap();
 
         let token = make_file_token("agent-a", "session-a", &sys.id, "**", FileMode::Write);
-        manager.acquire_lock(&token, "main.rs").unwrap();
+        manager.acquire_lock(&token, "main.rs").await.unwrap();
 
         // Verify token and lock are active
         assert_eq!(manager.get_active_tokens().unwrap().len(), 1);
@@ -1017,8 +1025,8 @@ mod tests {
     // ================================================================
     // Test 35: Multiple locks on same file by same agent (should fail)
     // ================================================================
-    #[test]
-    fn test_same_agent_duplicate_lock() {
+    #[tokio::test]
+    async fn test_same_agent_duplicate_lock() {
         let (_temp, manager) = setup_test_env();
         let root = test_project_root();
 
@@ -1028,11 +1036,11 @@ mod tests {
         let token = make_file_token("agent-a", "session-a", &sys.id, "**", FileMode::Write);
 
         // First lock should succeed
-        manager.acquire_lock(&token, "main.rs").unwrap();
+        manager.acquire_lock(&token, "main.rs").await.unwrap();
         assert!(manager.is_file_locked("main.rs").unwrap());
 
         // Second lock on same file by same agent should fail (WRITE blocks WRITE)
-        let result = manager.acquire_lock(&token, "main.rs");
+        let result = manager.acquire_lock(&token, "main.rs").await;
         assert!(result.is_err(), "Duplicate WRITE lock should fail");
     }
 
@@ -1043,8 +1051,8 @@ mod tests {
     // ================================================================
     // Test 36: Multiple agents racing with no delay (exact same timestamp)
     // ================================================================
-    #[test]
-    fn test_concurrent_acquire_exact_same_timestamp() {
+    #[tokio::test]
+    async fn test_concurrent_acquire_exact_same_timestamp() {
         use std::thread;
         use std::sync::Barrier;
 
@@ -1090,10 +1098,14 @@ mod tests {
             let barrier = Arc::clone(&barrier);
 
             let handle = thread::spawn(move || {
+                // Create runtime for async operations
+                let rt = tokio::runtime::Runtime::new().unwrap();
                 // Wait for all threads to be ready
                 barrier.wait();
                 // All threads try to acquire at exactly the same time
-                mgr.acquire_lock(&token, "main.rs")
+                rt.block_on(async {
+                    mgr.acquire_lock(&token, "main.rs").await
+                })
             });
 
             handles.push(handle);
@@ -1114,8 +1126,8 @@ mod tests {
     // ================================================================
     // Test 37: Heartbeat at exact expiration boundary
     // ================================================================
-    #[test]
-    fn test_heartbeat_at_expiration_boundary() {
+    #[tokio::test]
+    async fn test_heartbeat_at_expiration_boundary() {
         let (_temp, manager) = setup_test_env();
         let root = test_project_root();
 
@@ -1124,7 +1136,7 @@ mod tests {
         manager.register_system_token(&sys).unwrap();
         let token = make_file_token("agent-a", "session-a", &sys.id, "**", FileMode::Write);
 
-        manager.acquire_lock(&token, "main.rs").unwrap();
+        manager.acquire_lock(&token, "main.rs").await.unwrap();
 
         // Set heartbeat to exactly 3x interval (90 seconds) in the past
         // This is the exact boundary where timeout should trigger
@@ -1160,7 +1172,7 @@ mod tests {
         let token_b = make_file_token("agent-b", "session-b", &sys_b.id, "**", FileMode::Write);
 
         // Agent A acquires lock
-        manager.acquire_lock(&token_a, "main.rs").unwrap();
+        manager.acquire_lock(&token_a, "main.rs").await.unwrap();
 
         let mgr_a = Arc::clone(&manager);
         let mgr_b = Arc::clone(&manager);
@@ -1177,7 +1189,7 @@ mod tests {
         });
 
         // Try to acquire lock (should succeed after release)
-        let acquire_result = manager.acquire_lock(&token_b, "main.rs");
+        let acquire_result = manager.acquire_lock(&token_b, "main.rs").await;
 
         release_handle.join().unwrap().unwrap();
 
@@ -1191,8 +1203,8 @@ mod tests {
     // ================================================================
     // Test 39: High concurrency DB transaction conflicts
     // ================================================================
-    #[test]
-    fn test_high_concurrency_db_transactions() {
+    #[tokio::test]
+    async fn test_high_concurrency_db_transactions() {
         use std::thread;
 
         let (_temp, manager) = setup_test_env();
@@ -1241,7 +1253,10 @@ mod tests {
             ).unwrap();
 
             let handle = thread::spawn(move || {
-                mgr.acquire_lock(&token, &file_path)
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(async {
+                    mgr.acquire_lock(&token, &file_path).await
+                })
             });
 
             handles.push(handle);
@@ -1294,7 +1309,7 @@ mod tests {
         }
 
         // First agent acquires lock
-        manager.acquire_lock(&file_tokens[0], "main.rs").unwrap();
+        manager.acquire_lock(&file_tokens[0], "main.rs").await.unwrap();
 
         // All other agents try to acquire - should all fail immediately
         let mut handles = vec![];
@@ -1303,7 +1318,10 @@ mod tests {
             let token = file_tokens[i].clone();
 
             let handle = thread::spawn(move || {
-                mgr.acquire_lock(&token, "main.rs")
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(async {
+                    mgr.acquire_lock(&token, "main.rs").await
+                })
             });
 
             handles.push(handle);
@@ -1319,7 +1337,7 @@ mod tests {
         manager.release_lock(file_tokens[0].id.as_str(), "main.rs").await.unwrap();
 
         // Now one agent can acquire
-        let result = manager.acquire_lock(&file_tokens[1], "main.rs");
+        let result = manager.acquire_lock(&file_tokens[1], "main.rs").await;
         assert!(result.is_ok(), "Should be able to acquire after release");
 
         // Cleanup
@@ -1341,11 +1359,11 @@ mod tests {
 
         // Agent A acquires READ lock
         let read_token_a = make_file_token("agent-a", "session-a", &sys_a.id, "**", FileMode::Read);
-        manager.acquire_lock(&read_token_a, "main.rs").unwrap();
+        manager.acquire_lock(&read_token_a, "main.rs").await.unwrap();
 
         // Agent B acquires WRITE lock (READ doesn't block WRITE)
         let write_token_b = make_file_token("agent-b", "session-b", &sys_b.id, "**", FileMode::Write);
-        let result = manager.acquire_lock(&write_token_b, "main.rs");
+        let result = manager.acquire_lock(&write_token_b, "main.rs").await;
         assert!(result.is_ok(), "WRITE should succeed even with READ holder (optimistic concurrency)");
 
         // Both locks should exist
@@ -1376,18 +1394,18 @@ mod tests {
 
         // Agent A has WRITE lock
         let write_token_a = make_file_token("agent-a", "session-a", &sys_a.id, "**", FileMode::Write);
-        manager.acquire_lock(&write_token_a, "main.rs").unwrap();
+        manager.acquire_lock(&write_token_a, "main.rs").await.unwrap();
 
         // Agent B tries to acquire WRITE - should fail
         let write_token_b = make_file_token("agent-b", "session-b", &sys_b.id, "**", FileMode::Write);
-        let result = manager.acquire_lock(&write_token_b, "main.rs");
+        let result = manager.acquire_lock(&write_token_b, "main.rs").await;
         assert!(result.is_err(), "B should not get WRITE while A has WRITE");
 
         // Agent A releases WRITE lock
         manager.release_lock(write_token_a.id.as_str(), "main.rs").await.unwrap();
 
         // Now B can acquire WRITE
-        let result = manager.acquire_lock(&write_token_b, "main.rs");
+        let result = manager.acquire_lock(&write_token_b, "main.rs").await;
         assert!(result.is_ok(), "B should get WRITE after A releases");
 
         // Cleanup
@@ -1397,8 +1415,8 @@ mod tests {
     // ================================================================
     // Test 43: Concurrent acquire on same file with mixed READ/WRITE
     // ================================================================
-    #[test]
-    fn test_concurrent_mixed_read_write_locks() {
+    #[tokio::test]
+    async fn test_concurrent_mixed_read_write_locks() {
         use std::thread;
 
         let (_temp, manager) = setup_test_env();
@@ -1459,7 +1477,10 @@ mod tests {
             let token = file_tokens[i].clone();
 
             let handle = thread::spawn(move || {
-                mgr.acquire_lock(&token, "main.rs")
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(async {
+                    mgr.acquire_lock(&token, "main.rs").await
+                })
             });
 
             handles.push(handle);

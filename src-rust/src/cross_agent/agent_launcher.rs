@@ -607,15 +607,14 @@ Write your results in markdown:
                     }
                 } else if let Some(scheduler) = super::dag_scheduler::get_dag_scheduler() {
                     // Fallback: direct function call (NATS unavailable)
-                    // Note: on_node_completed/on_node_failed return !Send futures (they internally
-                    // call spawn_acp_session which holds non-Send state across await points).
-                    // We use spawn_blocking + block_on to bridge from the current async context.
-                    // This is safe because DAG node count is small (<50) and won't exhaust the
-                    // blocking thread pool (default 512 threads).
+                    // Use block_in_place instead of spawn_blocking to avoid exhausting
+                    // the blocking thread pool under high concurrency.
+                    // block_in_place temporarily converts the current worker to a blocking worker,
+                    // which is safer than spawning new blocking tasks.
                     let agent_c = agent_id_owned.clone();
                     if completed_ok {
                         let nid_c = nid.clone();
-                        tokio::task::spawn_blocking(move || {
+                        tokio::task::block_in_place(|| {
                             let rt = tokio::runtime::Handle::current();
                             match rt.block_on(scheduler.on_node_completed(&nid_c, None)) {
                                 Ok(newly_submitted) => {
@@ -636,7 +635,7 @@ Write your results in markdown:
                         });
                     } else {
                         let err_msg = format!("ACP session failed for agent {}", agent_c);
-                        tokio::task::spawn_blocking(move || {
+                        tokio::task::block_in_place(|| {
                             let rt = tokio::runtime::Handle::current();
                             if let Err(e) = rt.block_on(scheduler.on_node_failed(&nid, &err_msg)) {
                                 tracing::error!(

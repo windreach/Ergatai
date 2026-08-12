@@ -6,6 +6,53 @@
 use serde::{Deserialize, Serialize};
 use crate::file_access::FileMode;
 
+/// Lock priority levels for queue ordering
+///
+/// Higher priority requests are granted first when multiple agents
+/// are waiting for the same file lock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LockPriority {
+    /// System-critical operations (e.g., recovery, cleanup)
+    Critical,
+    /// High-priority user operations
+    High,
+    /// Normal operations (default)
+    Normal,
+    /// Background tasks, low-priority operations
+    Low,
+}
+
+impl Default for LockPriority {
+    fn default() -> Self {
+        Self::Normal
+    }
+}
+
+impl std::fmt::Display for LockPriority {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Critical => write!(f, "critical"),
+            Self::High => write!(f, "high"),
+            Self::Normal => write!(f, "normal"),
+            Self::Low => write!(f, "low"),
+        }
+    }
+}
+
+impl LockPriority {
+    /// Parse from string (case-insensitive)
+    pub fn from_str_opt(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "critical" => Some(Self::Critical),
+            "high" => Some(Self::High),
+            "normal" => Some(Self::Normal),
+            "low" => Some(Self::Low),
+            _ => None,
+        }
+    }
+}
+
 /// Lock wait request published to ergatai.lock.request.{file_hash}
 ///
 /// When an agent tries to acquire a lock that is already held,
@@ -27,8 +74,8 @@ pub struct LockWaitRequest {
     pub mode: FileMode,
     /// Timestamp when request was created (RFC3339)
     pub timestamp: String,
-    /// Optional priority for conflict arbitration
-    pub priority: Option<String>,
+    /// Optional priority for queue ordering (higher priority granted first)
+    pub priority: Option<LockPriority>,
     /// Subject to receive grant notification (ergatai.lock.granted.{session_id})
     pub reply_subject: String,
 }
@@ -71,7 +118,7 @@ impl LockWaitRequest {
         session_id: String,
         file_path: String,
         mode: FileMode,
-        priority: Option<String>,
+        priority: Option<LockPriority>,
     ) -> Self {
         let request_id = uuid::Uuid::new_v4().to_string();
         let timestamp = chrono::Utc::now().to_rfc3339();
@@ -90,6 +137,19 @@ impl LockWaitRequest {
         }
     }
 
+    /// Create with string priority (backward compatibility)
+    pub fn with_string_priority(
+        token_id: String,
+        agent_id: String,
+        session_id: String,
+        file_path: String,
+        mode: FileMode,
+        priority: Option<String>,
+    ) -> Self {
+        let parsed_priority = priority.as_deref().and_then(LockPriority::from_str_opt);
+        Self::new(token_id, agent_id, session_id, file_path, mode, parsed_priority)
+    }
+
     /// Get the NATS subject for this request
     pub fn subject(&self) -> String {
         let file_hash = md5_hash(&self.file_path);
@@ -99,12 +159,12 @@ impl LockWaitRequest {
 
 impl LockReleaseNotification {
     /// Create a new lock release notification
-    pub fn new(file_path: String, released_by_token_id: String) -> Self {
+    pub fn new(file_path: impl Into<String>, released_by_token_id: impl Into<String>) -> Self {
         let released_at = chrono::Utc::now().to_rfc3339();
 
         Self {
-            file_path,
-            released_by_token_id,
+            file_path: file_path.into(),
+            released_by_token_id: released_by_token_id.into(),
             released_at,
         }
     }
@@ -137,6 +197,43 @@ impl LockGrantedNotification {
     }
 }
 
+/// Lock cancel request published to ergatai.lock.cancel.{request_id}
+///
+/// When an agent no longer needs a lock (e.g., task cancelled or completed),
+/// it publishes this to remove its request from the waiting queue.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LockCancelRequest {
+    /// Request ID to cancel
+    pub request_id: String,
+    /// Agent ID requesting cancellation
+    pub agent_id: String,
+    /// Reason for cancellation
+    pub reason: Option<String>,
+    /// Timestamp (RFC3339)
+    pub timestamp: String,
+}
+
+impl LockCancelRequest {
+    /// Create a new cancel request
+    pub fn new(
+        request_id: impl Into<String>,
+        agent_id: impl Into<String>,
+        reason: Option<impl Into<String>>,
+    ) -> Self {
+        Self {
+            request_id: request_id.into(),
+            agent_id: agent_id.into(),
+            reason: reason.map(|r| r.into()),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+        }
+    }
+
+    /// Get the NATS subject for this cancel request
+    pub fn subject(&self) -> String {
+        format!("ergatai.lock.cancel.{}", self.request_id)
+    }
+}
+
 /// Compute a simple hash of file path for NATS subject
 /// Uses FNV-1a hash algorithm (fast, simple, no external dependencies)
 fn md5_hash(input: &str) -> String {
@@ -160,7 +257,7 @@ mod tests {
             "session-a".to_string(),
             "src/main.rs".to_string(),
             FileMode::Write,
-            Some("high".to_string()),
+            Some(LockPriority::High),
         );
 
         assert!(!request.request_id.is_empty());
@@ -170,6 +267,7 @@ mod tests {
         assert_eq!(request.file_path, "src/main.rs");
         assert_eq!(request.reply_subject, "ergatai.lock.granted.session-a");
         assert!(request.timestamp.contains("T")); // RFC3339 format
+        assert_eq!(request.priority, Some(LockPriority::High));
     }
 
     #[test]
@@ -227,7 +325,7 @@ mod tests {
             "session-a".to_string(),
             "src/main.rs".to_string(),
             FileMode::Write,
-            Some("high".to_string()),
+            Some(LockPriority::High),
         );
 
         let json = serde_json::to_string(&request).unwrap();
@@ -236,5 +334,32 @@ mod tests {
         assert_eq!(deserialized.request_id, request.request_id);
         assert_eq!(deserialized.token_id, request.token_id);
         assert_eq!(deserialized.agent_id, request.agent_id);
+        assert_eq!(deserialized.priority, Some(LockPriority::High));
+    }
+
+    #[test]
+    fn test_priority_from_string() {
+        assert_eq!(LockPriority::from_str_opt("critical"), Some(LockPriority::Critical));
+        assert_eq!(LockPriority::from_str_opt("HIGH"), Some(LockPriority::High));
+        assert_eq!(LockPriority::from_str_opt("Normal"), Some(LockPriority::Normal));
+        assert_eq!(LockPriority::from_str_opt("low"), Some(LockPriority::Low));
+        assert_eq!(LockPriority::from_str_opt("invalid"), None);
+    }
+
+    #[test]
+    fn test_lock_cancel_request() {
+        let cancel = LockCancelRequest::new(
+            "req-123".to_string(),
+            "agent-a".to_string(),
+            Some("Task completed".to_string()),
+        );
+
+        assert_eq!(cancel.request_id, "req-123");
+        assert_eq!(cancel.agent_id, "agent-a");
+        assert_eq!(cancel.reason, Some("Task completed".to_string()));
+        assert!(cancel.timestamp.contains("T"));
+
+        let subject = cancel.subject();
+        assert!(subject.starts_with("ergatai.lock.cancel."));
     }
 }
