@@ -20,7 +20,7 @@ function loadNativeBinding(): any {
 }
 
 const nativeBinding = loadNativeBinding()
-const { dagSubmit, dagProgress, dagIsComplete, dagStatus, dagGetState } = nativeBinding
+const { dagSubmit, dagProgress, dagIsComplete, dagStatus, dagGetState, taskGetAgentsStatus } = nativeBinding
 
 /**
  * DAG orchestration router — wraps the Rust DagScheduler NAPI bindings.
@@ -61,5 +61,22 @@ export const dagRouter = router({
   getState: publicProcedure.query(async () => {
     const raw: string = await dagGetState()
     return JSON.parse(raw)
+  }),
+
+  /** Get status of all running agents (includes task_id → session_id mapping) */
+  getAgentsStatus: publicProcedure.query(async () => {
+    try {
+      const raw: string = await taskGetAgentsStatus()
+      return JSON.parse(raw) as Array<{
+        task_id: string
+        agent_name: string
+        session_id: string | null
+        status: string
+      }>
+    } catch (error) {
+      // If no agents are running, return empty array
+      console.log("[dag.getAgentsStatus] No agents running:", error)
+      return []
+    }
   }),
 })

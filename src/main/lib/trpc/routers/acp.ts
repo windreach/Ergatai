@@ -4,6 +4,7 @@ import { publicProcedure, router } from "../index"
 import { join } from "path"
 import { app } from "electron"
 import { dagDetector } from "../../dag-detector"
+import { prependSystemInstruction } from "../../ergatai-system-instruction"
 
 // Load native binding — resolve from app root
 function loadNativeBinding(): any {
@@ -368,8 +369,16 @@ export const acpRouter = router({
             sessionMap.set(subChatId, acpSessionId)
             acpSaveSessionMeta(acpSessionId, agent, cwd)
 
-            console.log(`[ACP] Sending prompt (length=${prompt.length}): ${prompt.slice(0, 100)}...`)
-            await acpSendPrompt(acpSessionId, prompt)
+            // Inject system instruction for new sessions (not resumed)
+            // This tells the main agent how to use DAG multi-agent collaboration
+            console.log('[ACP] Session ID:', sessionId ? 'resumed' : 'new')
+            const finalPrompt = sessionId
+              ? prompt // Resumed session, don't inject again
+              : prependSystemInstruction(prompt) // New session, inject instructions
+
+            console.log(`[ACP] Final prompt length: ${finalPrompt.length} (original: ${prompt.length})`)
+            console.log(`[ACP] Sending prompt (first 200 chars): ${finalPrompt.slice(0, 200)}...`)
+            await acpSendPrompt(acpSessionId, finalPrompt)
             console.log(`[ACP] Prompt sent successfully`)
 
             console.log(`[ACP] Session ready: ${acpSessionId}`)

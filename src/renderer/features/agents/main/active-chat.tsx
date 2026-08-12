@@ -120,6 +120,8 @@ function AgentStatusPanel({ isOpen, onClose }: { isOpen: boolean; onClose: () =>
     </div>
   )
 }
+
+
 import { getTerminalScopeKey } from "../../terminal/utils"
 import {
   agentsChangesPanelCollapsedAtom,
@@ -7708,7 +7710,8 @@ Make sure to preserve all functionality from both branches when resolving confli
 
           {/* Chat Content - Keep-alive: render all open tabs, hide inactive with CSS */}
           {tabsToRender.length > 0 && agentChat ? (
-            <div className="relative flex-1 min-h-0">
+            <div className="relative flex-1 min-h-0 flex flex-col">
+              <div className="flex-1 min-h-0">
               {/* Loading gate: prevent getOrCreateChat() from caching empty messages before data is ready */}
               {isLocalChatLoading ? (
                 <div className="flex items-center justify-center h-full">
@@ -7882,6 +7885,7 @@ Make sure to preserve all functionality from both branches when resolving confli
                 )
               })
               )}
+              </div>
             </div>
           ) : (
             <>

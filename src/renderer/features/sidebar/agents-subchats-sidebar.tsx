@@ -92,6 +92,8 @@ import { useHotkeys } from "react-hotkeys-hook"
 import { useSubChatDraftsCache, getSubChatDraftKey } from "../agents/lib/drafts"
 import { Checkbox } from "../../components/ui/checkbox"
 import { TypewriterText } from "../../components/ui/typewriter-text"
+import { AgentsPanel, type AgentInfo } from "../agents/ui/agents-panel"
+import { useAgents } from "../agents/hooks/use-agents"
 
 // Isolated Search History Popover for sidebar - prevents parent re-renders when popover opens/closes
 interface SidebarSearchHistoryPopoverProps {
@@ -229,6 +231,8 @@ export function AgentsSubChatsSidebar({
       addToSplit: state.addToSplit,
       removeFromSplit: state.removeFromSplit,
       closeSplit: state.closeSplit,
+      setActiveSubChat: state.setActiveSubChat,
+      addToOpenSubChats: state.addToOpenSubChats,
     }))
   )
   const [loadingSubChats] = useAtom(loadingSubChatsAtom)
@@ -242,6 +246,9 @@ export function AgentsSubChatsSidebar({
     { teamId: selectedTeamId! },
     { enabled: !!selectedTeamId },
   )
+
+  // Fetch DAG agent states (sub-agents from multi-agent collaboration)
+  const { agents, hasActiveAgents, counts } = useAgents()
 
   const utils = trpc.useUtils()
 
@@ -1208,6 +1215,57 @@ export function AgentsSubChatsSidebar({
           </Tooltip>
           </div>
         </div>
+      </div>
+
+      {/* Agents Panel - Collapsible multi-agent status panel */}
+      <div
+        className="px-2 pb-2 flex-shrink-0 relative z-10"
+        style={{
+          // @ts-expect-error - WebKit-specific property
+          WebkitAppRegion: "no-drag",
+        }}
+      >
+        <AgentsPanel
+          agents={agents}
+          selectedAgentId="main"
+          onSelectAgent={(agentId) => {
+            console.log("[AgentsPanel] Selected agent:", agentId)
+
+            // Find the agent in the agents list
+            const agent = agents.find((a) => a.agentId === agentId)
+            if (!agent) {
+              console.warn("[AgentsPanel] Agent not found:", agentId)
+              return
+            }
+
+            // If it's the main agent or no sessionId, do nothing
+            if (!agent.sessionId) {
+              console.log("[AgentsPanel] No session ID for agent:", agentId)
+              return
+            }
+
+            // Find the SubChat with matching acpSessionId
+            const targetSubChat = allSubChats.find(
+              (subChat) => subChat.acpSessionId === agent.sessionId
+            )
+
+            if (targetSubChat) {
+              console.log("[AgentsPanel] Switching to SubChat:", targetSubChat.id)
+              setActiveSubChat(targetSubChat.id)
+
+              // Also add to open sub-chats if not already open
+              if (!openSubChatIds.includes(targetSubChat.id)) {
+                addToOpenSubChats(targetSubChat.id)
+              }
+            } else {
+              console.warn(
+                "[AgentsPanel] No SubChat found with acpSessionId:",
+                agent.sessionId
+              )
+            }
+          }}
+          defaultExpanded={hasActiveAgents}
+        />
       </div>
 
       {/* Scrollable Sub-Chats List */}
