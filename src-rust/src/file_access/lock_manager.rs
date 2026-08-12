@@ -1177,6 +1177,23 @@ impl FileLockManager {
     pub fn audit_manager(&self) -> AuditManager {
         AuditManager::new(Arc::clone(&self.conn))
     }
+
+    /// Test helper: Set heartbeat to a past time for testing timeout scenarios
+    #[cfg(test)]
+    pub fn set_heartbeat_past(&self, token_id: &str, seconds_ago: i64) -> Result<(), ErgataiError> {
+        let conn = self.conn.lock().map_err(|e| {
+            ErgataiError::internal(format!("Failed to acquire lock: {}", e))
+        })?;
+
+        // Use strftime to format as RFC3339 (ISO 8601 with timezone)
+        conn.execute(
+            "UPDATE system_tokens SET heartbeat_at = strftime('%Y-%m-%dT%H:%M:%S+00:00', 'now', ?1) WHERE id = ?2",
+            rusqlite::params![format!("-{} seconds", seconds_ago), token_id],
+        )
+        .map_err(|e| ErgataiError::internal(format!("Failed to update heartbeat: {}", e)))?;
+
+        Ok(())
+    }
 }
 
 // Helper functions for parsing database values
