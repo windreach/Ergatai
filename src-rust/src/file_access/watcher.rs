@@ -182,12 +182,13 @@ impl FileSystemWatcher {
 
     /// Log a violation to the audit log
     async fn log_violation(
-        _lock_manager: &Arc<FileLockManager>,
+        lock_manager: &Arc<FileLockManager>,
         file_path: &str,
         action: &str,
     ) -> ErgataiResult<()> {
-        // For now, just log the violation
-        // TODO: Add audit_log table methods to FileLockManager
+        // Persist the violation in the audit_log table via FileLockManager
+        lock_manager.record_violation(file_path, action)?;
+
         warn!(
             file_path = file_path,
             action = action,
@@ -344,16 +345,11 @@ mod tests {
     }
 
     // ─── Lock-based violation detection ────────────────────────────
-    //
-    // NOTE: `log_violation()` is currently a no-op stub (only emits warn!),
-    // so these tests verify that handle_event returns Ok for both locked and
-    // unlocked files. Once log_violation writes to audit_log (see TODO in
-    // watcher.rs:190), these tests should be extended to assert on audit entries.
 
     #[tokio::test]
-    async fn test_handle_event_unlocked_file_returns_ok() {
+    async fn test_handle_event_unlocked_file_records_violation() {
         let (_temp, manager, root) = setup();
-        // main.rs is not locked — handle_event returns Ok (violation logged via warn!)
+        // main.rs is not locked — should record a violation in audit_log
         let event = make_event(
             EventKind::Modify(notify::event::ModifyKind::Data(
                 notify::event::DataChange::Content,
@@ -362,10 +358,19 @@ mod tests {
         );
         let result = FileSystemWatcher::handle_event(&manager, &root, event).await;
         assert!(result.is_ok());
+
+        // Verify audit_log has an entry for the violation
+        let entries = manager
+            .audit_manager()
+            .query_audit_log(None, Some("unauthorized_modification"), None, None, None, 10)
+            .unwrap();
+        assert_eq!(entries.len(), 1, "expected one violation audit entry");
+        assert_eq!(entries[0].file_path.as_deref(), Some("main.rs"));
+        assert_eq!(entries[0].agent_id, "unknown");
     }
 
     #[tokio::test]
-    async fn test_handle_event_locked_file_returns_ok() {
+    async fn test_handle_event_locked_file_no_violation() {
         let (_temp, manager, root) = setup();
 
         // Create a token and acquire a lock on main.rs

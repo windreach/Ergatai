@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::oneshot;
 use tracing::{debug, info, warn};
 
+use super::audit::AuditManager;
 use super::token::{FileLock, FileMode, FileToken, SystemToken, TokenId, TokenStatus};
 
 /// File lock manager backed by SQLite.
@@ -26,6 +27,16 @@ pub struct FileLockManager {
     project_root_canonical: PathBuf,
     /// Waiters for READ_LATEST (file_path → list of notification channels).
     waiters: Arc<Mutex<HashMap<String, Vec<oneshot::Sender<Result<(), String>>>>>>,
+}
+
+impl std::fmt::Debug for FileLockManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FileLockManager")
+            .field("project_root", &self.project_root)
+            .field("project_root_canonical", &self.project_root_canonical)
+            .field("waiters_count", &self.waiters.lock().map(|w| w.len()).unwrap_or(0))
+            .finish_non_exhaustive()
+    }
 }
 
 impl FileLockManager {
@@ -67,6 +78,11 @@ impl FileLockManager {
             project_root_canonical,
             waiters: Arc::new(Mutex::new(HashMap::new())),
         })
+    }
+
+    /// Get the project root directory this manager was initialized with.
+    pub fn project_root(&self) -> &Path {
+        &self.project_root
     }
 
     /// Create the lock database tables.
@@ -505,7 +521,15 @@ impl FileLockManager {
         Ok(())
     }
 
-    /// Check if a file is locked for writing.
+    /// Check if a file has an active WRITE lock.
+    ///
+    /// Returns `true` only when at least one WRITE lock with `status = 'ACTIVE'`
+    /// exists for the file. READ locks are intentionally ignored — multiple
+    /// readers can coexist, so the presence of a READ lock does not indicate
+    /// that the file is "locked" in the exclusive-access sense.
+    ///
+    /// Use [`is_file_locked_for_write`](Self::is_file_locked_for_write) when
+    /// you need the semantically-named alias.
     pub fn is_file_locked(&self, file_path: &str) -> Result<bool, ErgataiError> {
         let normalized_path = self.validate_and_normalize_path(file_path)?;
 
@@ -523,6 +547,31 @@ impl FileLockManager {
             .map_err(|e| ErgataiError::internal(format!("Failed to query lock: {}", e)))?;
 
         Ok(is_locked)
+    }
+
+    /// Record a file access violation in the audit log.
+    ///
+    /// Called by `FileSystemWatcher` when a file modification is detected
+    /// without a corresponding active lock. The agent/session are recorded
+    /// as "unknown" since the watcher cannot identify the modifier.
+    pub fn record_violation(
+        &self,
+        file_path: &str,
+        action: &str,
+    ) -> Result<(), ErgataiError> {
+        let normalized_path = self
+            .validate_and_normalize_path(file_path)
+            .unwrap_or_else(|_| file_path.to_string());
+
+        // Delegate to the shared audit logging method
+        self.log_audit(
+            "unknown",
+            "unknown",
+            action,
+            Some(&normalized_path),
+            None,
+            Some(action),
+        )
     }
 
     /// Update heartbeat for a token.
@@ -1119,6 +1168,14 @@ impl FileLockManager {
         tokio::fs::read(&full_path)
             .await
             .map_err(|e| ErgataiError::internal(format!("Failed to read file {}: {}", file_path, e)))
+    }
+
+    /// Get an AuditManager sharing this manager's database connection.
+    ///
+    /// Useful for querying audit log entries after lock operations without
+    /// requiring a separate connection.
+    pub fn audit_manager(&self) -> AuditManager {
+        AuditManager::new(Arc::clone(&self.conn))
     }
 }
 

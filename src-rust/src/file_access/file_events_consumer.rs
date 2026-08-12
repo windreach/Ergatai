@@ -13,7 +13,7 @@ use tracing::{info, debug, warn, error};
 use crate::error::{ErgataiError, ErgataiResult};
 use crate::file_access::lock_manager::FileLockManager;
 use crate::nats::connection::NatsConnection;
-use crate::nats::events::FileErrorPayload;
+use crate::nats::events::{FileErrorPayload, FileReadyPayload};
 
 /// Consumer for file events (ready/error)
 pub struct FileEventsConsumer {
@@ -279,17 +279,6 @@ fn parse_file_event(subject: &str, payload: &[u8]) -> Result<Option<FileEvent>, 
     }
 }
 
-/// File ready payload
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct FileReadyPayload {
-    /// File path
-    pub file_path: String,
-    /// Agent that completed the WRITE
-    pub agent_id: String,
-    /// Timestamp (Unix epoch seconds)
-    pub timestamp: u64,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -301,6 +290,7 @@ mod tests {
         let payload = FileReadyPayload {
             file_path: "/path/to/file.txt".to_string(),
             agent_id: "agent-1".to_string(),
+            token_id: "token-abc".to_string(),
             timestamp: 1234567890,
         };
 
@@ -309,6 +299,7 @@ mod tests {
 
         assert_eq!(deserialized.file_path, payload.file_path);
         assert_eq!(deserialized.agent_id, payload.agent_id);
+        assert_eq!(deserialized.token_id, payload.token_id);
         assert_eq!(deserialized.timestamp, payload.timestamp);
     }
 
@@ -337,6 +328,7 @@ mod tests {
         let payload = FileReadyPayload {
             file_path: "src/main.rs".to_string(),
             agent_id: "agent-42".to_string(),
+            token_id: "token-42".to_string(),
             timestamp: 1_700_000_000,
         };
         let bytes = serde_json::to_vec(&payload).unwrap();
@@ -346,6 +338,7 @@ mod tests {
             Some(FileEvent::Ready(p)) => {
                 assert_eq!(p.file_path, "src/main.rs");
                 assert_eq!(p.agent_id, "agent-42");
+                assert_eq!(p.token_id, "token-42");
                 assert_eq!(p.timestamp, 1_700_000_000);
             }
             other => panic!("expected Some(FileEvent::Ready(..)), got {:?}", other),
@@ -380,6 +373,7 @@ mod tests {
         let payload = serde_json::to_vec(&FileReadyPayload {
             file_path: "x".to_string(),
             agent_id: "a".to_string(),
+            token_id: "t".to_string(),
             timestamp: 0,
         })
         .unwrap();
@@ -394,6 +388,7 @@ mod tests {
         let payload = serde_json::to_vec(&FileReadyPayload {
             file_path: "x".to_string(),
             agent_id: "a".to_string(),
+            token_id: "t".to_string(),
             timestamp: 0,
         })
         .unwrap();
@@ -446,6 +441,7 @@ mod tests {
         let payload = FileReadyPayload {
             file_path: "src/路径/файл.rs".to_string(),
             agent_id: "agent-中文".to_string(),
+            token_id: "token-unicode".to_string(),
             timestamp: 0,
         };
         let bytes = serde_json::to_vec(&payload).unwrap();
@@ -464,6 +460,7 @@ mod tests {
         let payload = FileReadyPayload {
             file_path: "".to_string(),
             agent_id: "".to_string(),
+            token_id: "".to_string(),
             timestamp: 0,
         };
         let bytes = serde_json::to_vec(&payload).unwrap();
@@ -476,6 +473,7 @@ mod tests {
         let payload = FileReadyPayload {
             file_path: "x".to_string(),
             agent_id: "a".to_string(),
+            token_id: "t".to_string(),
             timestamp: u64::MAX,
         };
         let bytes = serde_json::to_vec(&payload).unwrap();
@@ -489,7 +487,7 @@ mod tests {
     #[test]
     fn test_parse_file_event_extra_fields_ignored() {
         // JSON with extra fields should still deserialize (serde default)
-        let bytes = br#"{"file_path":"f.rs","agent_id":"a","timestamp":1,"extra":"ignored"}"#;
+        let bytes = br#"{"file_path":"f.rs","agent_id":"a","token_id":"t","timestamp":1,"extra":"ignored"}"#;
         let result = parse_file_event("ergatai.file.ready.h", bytes).unwrap();
         assert!(matches!(result, Some(FileEvent::Ready(_))));
     }
@@ -501,6 +499,7 @@ mod tests {
         let ready = FileEvent::Ready(FileReadyPayload {
             file_path: "a.rs".to_string(),
             agent_id: "ag".to_string(),
+            token_id: "tk".to_string(),
             timestamp: 1,
         });
         let debug_str = format!("{:?}", ready);

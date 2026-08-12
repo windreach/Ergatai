@@ -30,7 +30,8 @@ pub use token::{FileLock, FileMode, FileToken, SystemToken, TokenId, TokenStatus
 pub use snapshot::SnapshotManager;
 pub use watchdog::{Watchdog, WatchdogConfig};
 pub use watcher::FileSystemWatcher;
-pub use file_events_consumer::{FileEventsConsumer, FileEvent, FileReadyPayload};
+pub use file_events_consumer::{FileEventsConsumer, FileEvent};
+pub use crate::nats::events::FileReadyPayload;
 pub use lock_mode::LockModeManager;
 pub use renewal::RenewalManager;
 pub use audit::{AuditManager, AuditEntry, FileAccessStats, SecurityReport};
