@@ -480,6 +480,154 @@ impl AuditManager {
 
         Ok(summaries)
     }
+
+    /// Cleanup old audit logs (simple time-based deletion)
+    ///
+    /// # Arguments
+    /// * `days_to_keep` - Keep logs newer than this many days
+    ///
+    /// # Returns
+    /// Number of entries deleted
+    pub fn cleanup_old_audit_logs(&self, days_to_keep: u32) -> Result<usize, ErgataiError> {
+        let conn = self.conn.lock().map_err(|e| {
+            ErgataiError::internal(format!("Failed to acquire lock: {}", e))
+        })?;
+
+        let cutoff = (Utc::now() - Duration::days(days_to_keep as i64)).to_rfc3339();
+
+        let deleted = conn
+            .execute("DELETE FROM audit_log WHERE timestamp < ?1", params![cutoff])
+            .map_err(|e| {
+                ErgataiError::internal(format!("Failed to cleanup old audit logs: {}", e))
+            })?;
+
+        info!(
+            deleted = deleted,
+            days_to_keep = days_to_keep,
+            "Cleaned up old audit logs"
+        );
+
+        Ok(deleted)
+    }
+
+    /// Archive audit logs older than specified months
+    ///
+    /// Exports old logs to a file, then deletes them from the database.
+    /// This implements monthly partitioning strategy.
+    ///
+    /// # Arguments
+    /// * `months_to_keep` - Keep logs newer than this many months
+    /// * `export_path` - Path to export archived logs (JSON format)
+    ///
+    /// # Returns
+    /// Number of entries archived and deleted
+    pub fn archive_old_audit_logs(
+        &self,
+        months_to_keep: u32,
+        export_path: &str,
+    ) -> Result<usize, ErgataiError> {
+        let conn = self.conn.lock().map_err(|e| {
+            ErgataiError::internal(format!("Failed to acquire lock: {}", e))
+        })?;
+
+        let cutoff = (Utc::now() - Duration::days(months_to_keep as i64 * 30)).to_rfc3339();
+
+        // Query logs to archive
+        // L5 fix: added map_err for consistent error handling
+        let mut stmt = conn.prepare(
+            "SELECT timestamp, agent_id, session_id, action, file_path, mode, reason
+             FROM audit_log WHERE timestamp < ?1 ORDER BY timestamp ASC"
+        ).map_err(|e| ErgataiError::internal(format!("Failed to prepare archive query: {}", e)))?;
+
+        let entries: Vec<AuditEntry> = stmt
+            .query_map(params![cutoff], |row| {
+                Ok(AuditEntry {
+                    timestamp: row.get(0)?,
+                    agent_id: row.get(1)?,
+                    session_id: row.get(2)?,
+                    action: row.get(3)?,
+                    file_path: row.get(4)?,
+                    mode: row.get(5)?,
+                    reason: row.get(6)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| ErgataiError::internal(format!("Failed to collect entries: {}", e)))?;
+
+        let count = entries.len();
+        if count == 0 {
+            info!("No audit logs to archive");
+            return Ok(0);
+        }
+
+        // Export to file
+        let json = serde_json::to_string_pretty(&entries)
+            .map_err(|e| ErgataiError::internal(format!("Failed to serialize audit logs: {}", e)))?;
+
+        std::fs::write(export_path, json)
+            .map_err(|e| ErgataiError::internal(format!("Failed to write archive file: {}", e)))?;
+
+        // Delete archived logs
+        conn.execute("DELETE FROM audit_log WHERE timestamp < ?1", params![cutoff])
+            .map_err(|e| {
+                ErgataiError::internal(format!("Failed to delete archived logs: {}", e))
+            })?;
+
+        info!(
+            archived = count,
+            export_path = export_path,
+            months_to_keep = months_to_keep,
+            "Archived old audit logs"
+        );
+
+        Ok(count)
+    }
+
+    /// Enforce maximum row count on audit log table
+    ///
+    /// Deletes oldest entries when the table exceeds the row limit.
+    ///
+    /// # Arguments
+    /// * `max_rows` - Maximum number of rows to keep
+    ///
+    /// # Returns
+    /// Number of entries deleted
+    pub fn enforce_row_limit(&self, max_rows: u64) -> Result<usize, ErgataiError> {
+        let conn = self.conn.lock().map_err(|e| {
+            ErgataiError::internal(format!("Failed to acquire lock: {}", e))
+        })?;
+
+        // Count current rows
+        let count: u64 = conn.query_row(
+            "SELECT COUNT(*) FROM audit_log",
+            [],
+            |row| row.get(0),
+        )?;
+
+        if count <= max_rows {
+            return Ok(0);
+        }
+
+        // Calculate how many to delete
+        let to_delete = count - max_rows;
+
+        // Delete oldest entries
+        let deleted = conn.execute(
+            "DELETE FROM audit_log WHERE timestamp IN (
+                SELECT timestamp FROM audit_log ORDER BY timestamp ASC LIMIT ?1
+            )",
+            params![to_delete as i64],
+        )?;
+
+        info!(
+            deleted = deleted,
+            max_rows = max_rows,
+            previous_count = count,
+            "Enforced audit log row limit"
+        );
+
+        Ok(deleted)
+    }
 }
 
 #[cfg(test)]

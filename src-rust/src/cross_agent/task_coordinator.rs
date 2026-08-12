@@ -48,6 +48,10 @@ pub struct AgentAssignment {
     // DAG support: dependencies (ID is auto-generated UUID)
     #[serde(default)]
     pub depends_on: Vec<String>,
+
+    /// Task priority from DAG node ("high", "medium", "low")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority: Option<String>,
 }
 
 /// Type of task (determines file access level)
@@ -292,6 +296,13 @@ fn parse_assignments(content: &str) -> ErgataiResult<Vec<AgentAssignment>> {
                 if let Some(deps) = line.split(':').nth(1).or_else(|| line.split('：').nth(1)) {
                     builder.depends_on = parse_depends_on(deps.trim());
                 }
+            } else if line.contains("**priority**:") || line.contains("**优先级**:") {
+                if let Some(pri) = line.split(':').nth(1).or_else(|| line.split('：').nth(1)) {
+                    let pri = pri.trim().to_lowercase();
+                    if ["high", "medium", "low"].contains(&pri.as_str()) {
+                        builder.priority = Some(pri);
+                    }
+                }
             }
         }
     }
@@ -425,6 +436,7 @@ struct AgentAssignmentBuilder {
     files_to_read: Vec<PathBuf>,
     task_type: Option<TaskType>,
     depends_on: Vec<String>,
+    priority: Option<String>,
 }
 
 impl AgentAssignmentBuilder {
@@ -437,6 +449,7 @@ impl AgentAssignmentBuilder {
             files_to_read: Vec::new(),
             task_type: None,
             depends_on: Vec::new(),
+            priority: None,
         }
     }
 
@@ -452,6 +465,7 @@ impl AgentAssignmentBuilder {
             files_to_read: self.files_to_read,
             task_type,
             depends_on: self.depends_on,
+            priority: self.priority,
         })
     }
 }

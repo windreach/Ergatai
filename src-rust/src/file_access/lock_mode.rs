@@ -270,7 +270,6 @@ impl LockModeManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
     use tempfile::TempDir;
 
     fn setup_test_db() -> (TempDir, LockModeManager) {

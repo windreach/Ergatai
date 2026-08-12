@@ -156,7 +156,8 @@ impl AgentLauncher {
         };
 
         // Request File Token
-        let file_token = FileToken::new(
+        let priority = crate::file_access::conflict_arbitration::priority_to_number(&assignment.priority);
+        let file_token = FileToken::with_priority(
             assignment.agent_name.clone(),
             session_id.clone(),
             system_token.id.clone(),
@@ -166,6 +167,7 @@ impl AgentLauncher {
             "system".to_string(), // System auto-approves for now
             3600, // 1 hour TTL
             30,   // 30 second heartbeat
+            priority,
         );
 
         info!(
@@ -863,6 +865,7 @@ mod tests {
             files_to_read: vec![],
             task_type: TaskType::CreateNew,
             depends_on: vec![],
+            priority: None,
         };
 
         let worktree_path = project_root.join("worktree");
@@ -903,6 +906,7 @@ mod tests {
             files_to_read: vec![],
             task_type: TaskType::CreateNew,
             depends_on: vec![],
+            priority: None,
         };
 
         let instruction = launcher
@@ -945,6 +949,7 @@ mod tests {
             files_to_read: vec![],
             task_type: TaskType::CreateNew,
             depends_on: vec![],
+            priority: None,
         };
 
         let instruction = launcher

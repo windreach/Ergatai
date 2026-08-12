@@ -51,35 +51,6 @@ function registerIpcHandlers(): void {
   ipcMain.handle("app:version", () => app.getVersion())
   ipcMain.handle("app:isPackaged", () => app.isPackaged)
 
-  // Windows: Frame preference persistence
-  ipcMain.handle("window:set-frame-preference", (_event, useNativeFrame: boolean) => {
-    try {
-      const settingsPath = join(app.getPath("userData"), "window-settings.json")
-      const settingsDir = app.getPath("userData")
-      mkdirSync(settingsDir, { recursive: true })
-      writeFileSync(settingsPath, JSON.stringify({ useNativeFrame }, null, 2))
-      return true
-    } catch (error) {
-      console.error("[Main] Failed to save frame preference:", error)
-      return false
-    }
-  })
-
-  // Windows: Get current window frame state
-  ipcMain.handle("window:get-frame-state", () => {
-    if (process.platform !== "win32") return false
-    try {
-      const settingsPath = join(app.getPath("userData"), "window-settings.json")
-      if (existsSync(settingsPath)) {
-        const settings = JSON.parse(readFileSync(settingsPath, "utf-8"))
-        return settings.useNativeFrame === true
-      }
-      return false // Default: frameless
-    } catch {
-      return false
-    }
-  })
-
   // Note: Update checking is now handled by auto-updater module (lib/auto-updater.ts)
   ipcMain.handle("app:set-badge", (event, count: number | null) => {
     const win = getWindowFromEvent(event)
@@ -164,6 +135,12 @@ function registerIpcHandlers(): void {
       win?.maximize()
     }
   })
+  ipcMain.handle("window:restore", (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    if (win) {
+      win.restore()
+    }
+  })
   ipcMain.handle("window:close", (event) => {
     getWindowFromEvent(event)?.close()
   })
@@ -178,6 +155,11 @@ function registerIpcHandlers(): void {
   })
   ipcMain.handle("window:is-fullscreen", (event) => {
     return getWindowFromEvent(event)?.isFullScreen() ?? false
+  })
+
+  ipcMain.handle('window:is-focused', (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    return win ? win.isFocused() : false
   })
 
   // Traffic light visibility control (for hybrid native/custom approach)
@@ -590,25 +572,6 @@ export function getAllWindows(): BrowserWindow[] {
 }
 
 /**
- * Read window frame preference from settings file (Windows only)
- * Returns true if native frame should be used, false for frameless
- */
-function getUseNativeFramePreference(): boolean {
-  if (process.platform !== "win32") return false
-
-  try {
-    const settingsPath = join(app.getPath("userData"), "window-settings.json")
-    if (existsSync(settingsPath)) {
-      const settings = JSON.parse(readFileSync(settingsPath, "utf-8"))
-      return settings.useNativeFrame === true
-    }
-    return false // Default: frameless (dark title bar)
-  } catch {
-    return false
-  }
-}
-
-/**
  * Create a new application window
  * @param options Optional settings for the new window
  * @param options.chatId Open this chat in the new window
@@ -618,34 +581,34 @@ export function createWindow(options?: { chatId?: string; subChatId?: string }):
   // Register IPC handlers before creating first window
   registerIpcHandlers()
 
-  // Read Windows frame preference
-  const useNativeFrame = getUseNativeFramePreference()
-
   const window = new BrowserWindow({
     width: 1400,
     height: 900,
-    minWidth: 500, // Allow narrow mobile-like mode
+    minWidth: 500,
     minHeight: 600,
     show: false,
-    title: "1Code",
+    title: "Ergatai",
     backgroundColor: nativeTheme.shouldUseDarkColors ? "#09090b" : "#ffffff",
-    // hiddenInset shows native traffic lights inset in the window
-    // hiddenInset hides the native title bar but keeps traffic lights visible
-    titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "default",
-    trafficLightPosition:
-      process.platform === "darwin" ? { x: 15, y: 12 } : undefined,
-    // Windows: Use native frame or frameless based on user preference
-    ...(process.platform === "win32" && {
-      frame: useNativeFrame,
-      autoHideMenuBar: true,
+
+    // macOS: hiddenInset titlebar (unchanged)
+    ...(process.platform === "darwin" && {
+      titleBarStyle: "hiddenInset",
+      trafficLightPosition: { x: 15, y: 12 },
     }),
+
+    // Windows + Linux: frameless
+    ...(process.platform === "win32" || process.platform === "linux") && {
+      frame: false,
+      autoHideMenuBar: true,
+    },
+
     webPreferences: {
       preload: join(__dirname, "../preload/index.js"),
       nodeIntegration: false,
       contextIsolation: true,
-      sandbox: false, // Required for electron-trpc
+      sandbox: false,
       webSecurity: true,
-      partition: "persist:main", // Use persistent session for cookies
+      partition: "persist:main",
     },
   })
 
@@ -702,6 +665,14 @@ export function createWindow(options?: { chatId?: string; subChatId?: string }):
   })
   window.on("blur", () => {
     window.webContents.send("window:focus-change", false)
+  })
+
+  // Emit maximized state changes to renderer
+  window.on("maximize", () => {
+    window.webContents.send("window:maximized-change", true)
+  })
+  window.on("unmaximize", () => {
+    window.webContents.send("window:maximized-change", false)
   })
 
   // Disable Cmd+R / Ctrl+R to prevent accidental page refresh

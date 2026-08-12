@@ -535,6 +535,15 @@ impl Watchdog {
     }
 }
 
+// L8 fix: Ensure background task is stopped on drop
+impl Drop for Watchdog {
+    fn drop(&mut self) {
+        if let Err(e) = self.stop() {
+            tracing::warn!(error = %e, "Failed to stop watchdog on drop");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -546,7 +555,7 @@ mod tests {
         let project_root = temp_dir.path().to_path_buf();
 
         let lock_manager = Arc::new(
-            FileLockManager::new(&db_path, project_root).unwrap(),
+            FileLockManager::new(&db_path, project_root, None).unwrap(),
         );
 
         (temp_dir, lock_manager)

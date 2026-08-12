@@ -76,17 +76,13 @@ contextBridge.exposeInMainWorld("desktopApi", {
   // Window controls
   windowMinimize: () => ipcRenderer.invoke("window:minimize"),
   windowMaximize: () => ipcRenderer.invoke("window:maximize"),
+  windowRestore: () => ipcRenderer.invoke("window:restore"),
   windowClose: () => ipcRenderer.invoke("window:close"),
   windowIsMaximized: () => ipcRenderer.invoke("window:is-maximized"),
   windowToggleFullscreen: () => ipcRenderer.invoke("window:toggle-fullscreen"),
   windowIsFullscreen: () => ipcRenderer.invoke("window:is-fullscreen"),
   setTrafficLightVisibility: (visible: boolean) =>
     ipcRenderer.invoke("window:set-traffic-light-visibility", visible),
-
-  // Windows-specific: Frame preference (native vs frameless)
-  setWindowFramePreference: (useNativeFrame: boolean) =>
-    ipcRenderer.invoke("window:set-frame-preference", useNativeFrame),
-  getWindowFrameState: () => ipcRenderer.invoke("window:get-frame-state"),
 
   // Window events
   onFullscreenChange: (callback: (isFullscreen: boolean) => void) => {
@@ -99,6 +95,17 @@ contextBridge.exposeInMainWorld("desktopApi", {
     ipcRenderer.on("window:focus-change", handler)
     return () => ipcRenderer.removeListener("window:focus-change", handler)
   },
+
+  // Window state event listeners
+  onMaximizedChange: (callback: (isMaximized: boolean) => void) => {
+    const listener = (_event: any, isMaximized: boolean) => callback(isMaximized)
+    ipcRenderer.on('window:maximized-change', listener)
+    return () => ipcRenderer.removeListener('window:maximized-change', listener)
+  },
+
+  // Initial state queries
+  isFocused: () => ipcRenderer.invoke('window:is-focused'),
+  isFullscreen: () => ipcRenderer.invoke('window:is-fullscreen'),
 
   // Zoom controls
   zoomIn: () => ipcRenderer.invoke("window:zoom-in"),
@@ -305,16 +312,17 @@ export interface DesktopApi {
   // Window controls
   windowMinimize: () => Promise<void>
   windowMaximize: () => Promise<void>
+  windowRestore: () => Promise<void>
   windowClose: () => Promise<void>
   windowIsMaximized: () => Promise<boolean>
   windowToggleFullscreen: () => Promise<void>
   windowIsFullscreen: () => Promise<boolean>
   setTrafficLightVisibility: (visible: boolean) => Promise<void>
-  // Windows-specific frame preference
-  setWindowFramePreference: (useNativeFrame: boolean) => Promise<boolean>
-  getWindowFrameState: () => Promise<boolean>
   onFullscreenChange: (callback: (isFullscreen: boolean) => void) => () => void
   onFocusChange: (callback: (isFocused: boolean) => void) => () => void
+  onMaximizedChange: (callback: (isMaximized: boolean) => void) => () => void
+  isFocused: () => Promise<boolean>
+  isFullscreen: () => Promise<boolean>
   zoomIn: () => Promise<void>
   zoomOut: () => Promise<void>
   zoomReset: () => Promise<void>

@@ -97,6 +97,31 @@ import { FileSearchDialog } from "../../file-viewer/components/file-search-dialo
 import { terminalBottomHeightAtom, terminalDisplayModeAtom, terminalSidebarOpenAtomFamily } from "../../terminal/atoms"
 import { TerminalBottomPanelContent, TerminalSidebar } from "../../terminal/terminal-sidebar"
 import { ApprovalBottomPanel } from "@/components/file-access/ApprovalBottomPanel"
+import { AgentStatusDashboard } from "../ui/agent-status-dashboard"
+import { agentStatusPanelOpenAtom } from "../hooks/use-agent-status"
+import { X } from "lucide-react"
+
+/**
+ * Agent Status Panel wrapper with close button
+ */
+function AgentStatusPanel({ isOpen, onClose }: { isOpen: boolean; onClose: () => void }) {
+  if (!isOpen) return null
+
+  return (
+    <div className="border-t bg-background h-80 flex flex-col">
+      <div className="flex items-center justify-end px-2 py-1 border-b">
+        <Button variant="ghost" size="sm" onClick={onClose} className="h-6 w-6 p-0">
+          <X className="h-4 w-4" />
+        </Button>
+      </div>
+      <div className="flex-1 overflow-hidden">
+        <AgentStatusDashboard />
+      </div>
+    </div>
+  )
+}
+
+
 import { getTerminalScopeKey } from "../../terminal/utils"
 import {
   agentsChangesPanelCollapsedAtom,
@@ -4983,6 +5008,9 @@ export function ChatView({
   // File access approval panel state
   const [isApprovalPanelOpen, setIsApprovalPanelOpen] = useState(false)
 
+  // Agent status panel state
+  const [isAgentStatusPanelOpen, setIsAgentStatusPanelOpen] = useAtom(agentStatusPanelOpenAtom)
+
   // Query for pending approval requests
   const { data: pendingApprovals } = trpc.fileAccess.getApprovalRequests.useQuery(
     { chatId },
@@ -7682,7 +7710,8 @@ Make sure to preserve all functionality from both branches when resolving confli
 
           {/* Chat Content - Keep-alive: render all open tabs, hide inactive with CSS */}
           {tabsToRender.length > 0 && agentChat ? (
-            <div className="relative flex-1 min-h-0">
+            <div className="relative flex-1 min-h-0 flex flex-col">
+              <div className="flex-1 min-h-0">
               {/* Loading gate: prevent getOrCreateChat() from caching empty messages before data is ready */}
               {isLocalChatLoading ? (
                 <div className="flex items-center justify-center h-full">
@@ -7856,6 +7885,7 @@ Make sure to preserve all functionality from both branches when resolving confli
                 )
               })
               )}
+              </div>
             </div>
           ) : (
             <>
@@ -8234,6 +8264,14 @@ Make sure to preserve all functionality from both branches when resolving confli
           isOpen={isApprovalPanelOpen}
           onClose={() => setIsApprovalPanelOpen(false)}
           chatId={chatId}
+        />
+      )}
+
+      {/* Agent Status Dashboard Bottom Panel */}
+      {!isMobileFullscreen && (
+        <AgentStatusPanel
+          isOpen={isAgentStatusPanelOpen}
+          onClose={() => setIsAgentStatusPanelOpen(false)}
         />
       )}
     </div>

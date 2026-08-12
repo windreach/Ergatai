@@ -16,6 +16,18 @@ export interface SubChatMeta {
   created_at?: string
   updated_at?: string
   mode?: AgentMode
+  /** ACP runtime ID (claude, goose, codex, etc.) */
+  runtimeId?: string
+  /** Backend ACP session ID (Rust side) */
+  acpSessionId?: string
+  /** File access token ID (if acquired) */
+  fileTokenId?: string
+  /** Token expiration timestamp (ms) */
+  tokenExpiresAt?: number
+  /** Last heartbeat timestamp (ms) */
+  lastHeartbeatAt?: number
+  /** Whether this is a legacy sub-chat (pre-ACP integration) */
+  isLegacy?: boolean
 }
 
 interface AgentSubChatStore {
@@ -42,6 +54,10 @@ interface AgentSubChatStore {
   updateSubChatName: (subChatId: string, name: string) => void
   updateSubChatMode: (subChatId: string, mode: AgentMode) => void
   updateSubChatTimestamp: (subChatId: string) => void
+  updateSubChatAcpSession: (subChatId: string, acpSessionId: string) => void
+  updateSubChatFileToken: (subChatId: string, fileTokenId: string, expiresAt?: number) => void
+  updateSubChatHeartbeat: (subChatId: string) => void
+  markSubChatLegacy: (subChatId: string) => void
   addToSplit: (subChatId: string) => void
   removeFromSplit: (subChatId: string) => void
   closeSplit: () => void
@@ -301,6 +317,51 @@ export const useAgentSubChatStore = create<AgentSubChatStore>((set, get) => ({
       allSubChats: allSubChats.map((sc) =>
         sc.id === subChatId
           ? { ...sc, updated_at: newTimestamp }
+          : sc,
+      ),
+    })
+  },
+
+  updateSubChatAcpSession: (subChatId: string, acpSessionId: string) => {
+    const { allSubChats } = get()
+    set({
+      allSubChats: allSubChats.map((sc) =>
+        sc.id === subChatId
+          ? { ...sc, acpSessionId, isLegacy: false }
+          : sc,
+      ),
+    })
+  },
+
+  updateSubChatFileToken: (subChatId: string, fileTokenId: string, expiresAt?: number) => {
+    const { allSubChats } = get()
+    set({
+      allSubChats: allSubChats.map((sc) =>
+        sc.id === subChatId
+          ? { ...sc, fileTokenId, tokenExpiresAt: expiresAt }
+          : sc,
+      ),
+    })
+  },
+
+  updateSubChatHeartbeat: (subChatId: string) => {
+    const { allSubChats } = get()
+    const now = Date.now()
+    set({
+      allSubChats: allSubChats.map((sc) =>
+        sc.id === subChatId
+          ? { ...sc, lastHeartbeatAt: now }
+          : sc,
+      ),
+    })
+  },
+
+  markSubChatLegacy: (subChatId: string) => {
+    const { allSubChats } = get()
+    set({
+      allSubChats: allSubChats.map((sc) =>
+        sc.id === subChatId
+          ? { ...sc, isLegacy: true }
           : sc,
       ),
     })

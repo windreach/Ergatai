@@ -24,21 +24,12 @@ pub mod audit;
 pub mod performance;
 pub mod lock_waiter;
 pub mod lock_wait_consumer;
+pub mod config;
 
 #[cfg(test)]
 mod multi_agent_tests;
 
-pub use lock_manager::FileLockManager;
-pub use token::{FileLock, FileMode, FileToken, SystemToken, TokenId, TokenStatus};
-pub use snapshot::SnapshotManager;
-pub use watchdog::{Watchdog, WatchdogConfig};
-pub use watcher::FileSystemWatcher;
-pub use file_events_consumer::{FileEventsConsumer, FileEvent};
-pub use crate::nats::events::FileReadyPayload;
-pub use lock_mode::LockModeManager;
-pub use renewal::RenewalManager;
-pub use audit::{AuditManager, AuditEntry, FileAccessStats, SecurityReport};
-pub use performance::{LockCache, BatchOperations, AsyncLockQueue, AsyncLockRequest};
 pub use lock_waiter::{LockWaitRequest, LockReleaseNotification, LockGrantedNotification};
 pub use lock_wait_consumer::LockWaitConsumer;
+pub use config::{ConfigManager, FileAccessConfig};
 pub use manager::{init_file_access, get_lock_manager, get_snapshot_manager, get_watchdog, shutdown_file_access};

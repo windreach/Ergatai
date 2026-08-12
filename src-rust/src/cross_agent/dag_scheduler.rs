@@ -126,7 +126,9 @@ impl DagScheduler {
                     plan_content,
                     plan_file: plan_file.to_string_lossy().to_string(),
                     target_agent: node.agent.clone(),
-                    priority: 1,
+                    priority: crate::file_access::conflict_arbitration::priority_to_number(&node.priority)
+                        .map(|p| p as u32)
+                        .unwrap_or(2),
                     timeout_secs: node.timeout,
                     dag_id: Some(dag_id),
                 };

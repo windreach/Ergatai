@@ -179,6 +179,21 @@ pub enum ErgataiError {
     #[error("Lock conflict: {0}")]
     LockConflict(String),
 
+    /// File lock conflict with retry advice (livelock prevention)
+    ///
+    /// Includes structured retry information so the caller can back off
+    /// and retry with exponential delay. After `max_retries` the caller
+    /// should give up.
+    #[error("Lock conflict on {file_path}: {message} (retry after {retry_after_ms}ms, attempt {retry_count}/{max_retries})")]
+    LockConflictWithRetry {
+        file_path: String,
+        message: String,
+        retry_after_ms: u64,
+        retry_count: u32,
+        max_retries: u32,
+        priority_boosted: bool,
+    },
+
     /// Invalid file path (traversal, escaping project root, etc.)
     #[error("Invalid path: {0}")]
     InvalidPath(String),
@@ -321,6 +336,7 @@ impl ErgataiError {
             ErgataiError::SessionAlreadyExists(_) => ErrorCode::SessionExists,
             ErgataiError::InvalidSessionState(_) => ErrorCode::InvalidSessionState,
             ErgataiError::LockConflict(_) => ErrorCode::LockConflict,
+            ErgataiError::LockConflictWithRetry { .. } => ErrorCode::LockConflict,
             ErgataiError::InvalidPath(_) => ErrorCode::InvalidPath,
             ErgataiError::NotFound(_) => ErrorCode::NotFound,
 

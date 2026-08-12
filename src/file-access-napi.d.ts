@@ -104,3 +104,44 @@ export declare function fileAccessRespondApproval(
   approvedBy: string,
   reason: string | null
 ): Promise<void>
+
+/**
+ * Upgrade a lock from READ to WRITE (release-then-acquire for deadlock safety)
+ */
+export declare function fileAccessUpgradeLock(
+  projectId: string,
+  tokenId: string,
+  filePath: string
+): Promise<void>
+
+/**
+ * Downgrade a lock from WRITE to READ
+ */
+export declare function fileAccessDowngradeLock(
+  projectId: string,
+  tokenId: string,
+  filePath: string
+): Promise<void>
+
+/**
+ * Check if a path is sensitive (requires ADMIN permission)
+ */
+export declare function fileAccessIsSensitivePath(
+  projectId: string,
+  filePath: string
+): Promise<boolean>
+
+/**
+ * Check if a path is forbidden
+ */
+export declare function fileAccessIsForbiddenPath(
+  projectId: string,
+  filePath: string
+): Promise<boolean>
+
+/**
+ * Reload project configuration
+ */
+export declare function fileAccessReloadConfig(
+  projectId: string
+): Promise<void>

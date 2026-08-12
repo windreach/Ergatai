@@ -153,9 +153,9 @@ impl LockCache {
         } // cache lock released here
 
         // Phase 2: Update stats without holding cache lock
-        let _ = evictions; // eviction count is approximate; stats update is best-effort
         if let Ok(mut stats) = self.stats.lock() {
             stats.inserts += 1;
+            stats.evictions += evictions as u64;
         }
     }
 

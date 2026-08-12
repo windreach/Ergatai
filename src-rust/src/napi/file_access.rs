@@ -15,7 +15,8 @@ use tracing::{info, warn};
 
 use crate::error::ErgataiError;
 use crate::file_access::{
-    FileLockManager, FileMode, FileToken, SnapshotManager, SystemToken, Watchdog, WatchdogConfig,
+    ConfigManager, FileLockManager, FileMode, FileToken, SnapshotManager, SystemToken, Watchdog,
+    WatchdogConfig,
 };
 use crate::napi::to_napi;
 use crate::acp::sdk_session::{ApprovalResponse, approval_waiters};
@@ -26,6 +27,7 @@ struct ProjectFileAccessState {
     lock_manager: Arc<FileLockManager>,
     snapshot_manager: Arc<SnapshotManager>,
     watchdog: Arc<RwLock<Watchdog>>,
+    config_manager: Arc<ConfigManager>,
 }
 
 /// Global file access state: project_id → per-project state
@@ -94,9 +96,24 @@ pub async fn file_access_init(
         .await
         .map_err(|e| to_napi(ErgataiError::internal(format!("Failed to create .ergatai directory: {}", e))))?;
 
-    // Create FileLockManager
-    let lock_manager = FileLockManager::new(&lock_db_path, project_root_path.clone())
+    // Try to get NATS client (optional, None = degraded mode)
+    let nats_client = if let Some(conn) = crate::nats::get_nats_connection().await {
+        info!(project_id = %project_id, "NATS available for file access, enabling multi-agent approval flow");
+        Some(Arc::new(conn.client().clone()))
+    } else {
+        warn!(project_id = %project_id, "NATS not available for file access, running in degraded mode");
+        None
+    };
+
+    // Create FileLockManager with optional NATS client
+    let lock_manager = FileLockManager::new(&lock_db_path, project_root_path.clone(), nats_client)
         .map_err(to_napi)?;
+
+    // If NATS is available, subscribe to approval responses
+    if let Err(e) = lock_manager.subscribe_to_nats().await {
+        warn!(project_id = %project_id, error = %e, "Failed to subscribe to NATS approval subjects");
+    }
+
     let lock_manager = Arc::new(lock_manager);
 
     // Create SnapshotManager
@@ -110,11 +127,20 @@ pub async fn file_access_init(
     watchdog.start().map_err(to_napi)?;
     let watchdog = Arc::new(RwLock::new(watchdog));
 
+    // Create ConfigManager (loads .ergatai/config.json if present, with hot reload every 30s)
+    let config_manager = ConfigManager::new(
+        &project_root_path,
+        Some(std::time::Duration::from_secs(30)),
+    )
+    .map_err(to_napi)?;
+    let config_manager = Arc::new(config_manager);
+
     // Store in global state
     state.projects.insert(project_id.clone(), ProjectFileAccessState {
         lock_manager,
         snapshot_manager,
         watchdog,
+        config_manager,
     });
 
     info!(
@@ -172,6 +198,7 @@ pub async fn file_access_request_token(
     reason: Option<String>,
     ttl_secs: u32,
     heartbeat_interval_secs: u32,
+    priority: Option<String>,
 ) -> napi::Result<String> {
     crate::napi::guard();
 
@@ -192,7 +219,8 @@ pub async fn file_access_request_token(
         .map_err(to_napi)?;
 
     // Create FileToken
-    let file_token = FileToken::new(
+    let priority_num = crate::file_access::conflict_arbitration::priority_to_number(&priority);
+    let file_token = FileToken::with_priority(
         agent_id,
         session_id,
         system_token.id.clone(),
@@ -202,6 +230,7 @@ pub async fn file_access_request_token(
         "system".to_string(), // TODO: Implement approval flow
         ttl_secs as u64,
         heartbeat_interval_secs as u64,
+        priority_num,
     );
 
     // Register FileToken
@@ -252,6 +281,7 @@ pub async fn file_access_acquire_lock(
     project_state
         .lock_manager
         .acquire_lock(&file_token, &file_path)
+        .await
         .map_err(to_napi)?;
 
     info!(
@@ -287,6 +317,79 @@ pub async fn file_access_release_lock(
     Ok(())
 }
 
+/// Upgrade an existing READ lock to WRITE (deadlock-safe).
+///
+/// Follows the release-READ → acquire-WRITE pattern so the upgrade goes through
+/// proper conflict arbitration, single-agent bypass, and retry tracking.
+/// If the WRITE acquisition fails, the READ lock is restored.
+#[napi]
+pub async fn file_access_upgrade_lock(
+    project_id: String,
+    token_id: String,
+    file_path: String,
+) -> napi::Result<()> {
+    crate::napi::guard();
+
+    let project_state = get_project_state(&project_id).await.map_err(to_napi)?;
+
+    // Get the current READ FileToken (so we can construct a WRITE token for acquire_lock)
+    let read_token = project_state
+        .lock_manager
+        .find_active_file_token_by_id(&token_id)
+        .map_err(to_napi)?;
+
+    // Delegate to FileLockManager.upgrade_to_write which does:
+    // 1. Verify READ lock exists
+    // 2. Release READ
+    // 3. Acquire WRITE (through full arbitration path)
+    // 4. On failure → restore READ
+    project_state
+        .lock_manager
+        .upgrade_to_write(&read_token, &file_path)
+        .await
+        .map_err(to_napi)?;
+
+    info!(
+        project_id = project_id,
+        token_id = token_id,
+        file_path = file_path,
+        "Lock upgraded from READ to WRITE"
+    );
+
+    Ok(())
+}
+
+/// Downgrade an existing WRITE lock to READ.
+#[napi]
+pub async fn file_access_downgrade_lock(
+    project_id: String,
+    token_id: String,
+    file_path: String,
+) -> napi::Result<()> {
+    crate::napi::guard();
+
+    let project_state = get_project_state(&project_id).await.map_err(to_napi)?;
+
+    let write_token = project_state
+        .lock_manager
+        .find_active_file_token_by_id(&token_id)
+        .map_err(to_napi)?;
+
+    project_state
+        .lock_manager
+        .downgrade_to_read(&write_token, &file_path)
+        .map_err(to_napi)?;
+
+    info!(
+        project_id = project_id,
+        token_id = token_id,
+        file_path = file_path,
+        "Lock downgraded from WRITE to READ"
+    );
+
+    Ok(())
+}
+
 /// Read the latest version of a file (READ_LATEST semantics)
 ///
 /// Waits for any pending WRITE to complete before reading.
@@ -315,7 +418,17 @@ pub async fn file_access_create_snapshot(
 
     let project_state = get_project_state(&project_id).await.map_err(to_napi)?;
 
-    let git_hash = project_state.snapshot_manager.create_snapshot(&file_path, &agent_id).map_err(to_napi)?;
+    // M3 fix: Wrap blocking snapshot creation in spawn_blocking to avoid
+    // blocking the tokio runtime (fs::read + git blob creation are I/O-heavy)
+    let snapshot_manager = project_state.snapshot_manager.clone();
+    let fp = file_path.clone();
+    let aid = agent_id.clone();
+    let git_hash = tokio::task::spawn_blocking(move || {
+        snapshot_manager.create_snapshot(&fp, &aid)
+    })
+    .await
+    .map_err(|e| napi::Error::from_reason(format!("spawn_blocking join error: {}", e)))?
+    .map_err(to_napi)?;
 
     info!(
         project_id = project_id,
@@ -383,6 +496,9 @@ pub async fn file_access_shutdown(project_id: String) -> napi::Result<()> {
     let mut state = state.write().await;
 
     if let Some(project_state) = state.projects.remove(&project_id) {
+        // Stop NATS subscription first (prevents Arc<FileLockManager> leak)
+        project_state.lock_manager.shutdown_nats_subscription();
+
         // Stop watchdog
         let mut watchdog = project_state.watchdog.write().await;
         watchdog.stop().map_err(to_napi)?;
@@ -438,4 +554,52 @@ pub async fn file_access_respond_approval(
         );
         Ok(())
     }
+}
+
+/// Check if a file path is sensitive (requires ADMIN permission)
+///
+/// Checks both system defaults and project-level configuration.
+#[napi]
+pub async fn file_access_is_sensitive_path(
+    project_id: String,
+    file_path: String,
+) -> napi::Result<bool> {
+    crate::napi::guard();
+
+    let project_state = get_project_state(&project_id).await.map_err(to_napi)?;
+
+    let is_sensitive = project_state.config_manager.is_sensitive_path(&file_path);
+
+    Ok(is_sensitive)
+}
+
+/// Check if a file path is forbidden (completely blocked)
+///
+/// Uses project-level configuration only.
+#[napi]
+pub async fn file_access_is_forbidden_path(
+    project_id: String,
+    file_path: String,
+) -> napi::Result<bool> {
+    crate::napi::guard();
+
+    let project_state = get_project_state(&project_id).await.map_err(to_napi)?;
+
+    let is_forbidden = project_state.config_manager.is_forbidden_path(&file_path);
+
+    Ok(is_forbidden)
+}
+
+/// Manually reload the project configuration
+#[napi]
+pub async fn file_access_reload_config(project_id: String) -> napi::Result<()> {
+    crate::napi::guard();
+
+    let project_state = get_project_state(&project_id).await.map_err(to_napi)?;
+
+    project_state.config_manager.reload().map_err(to_napi)?;
+
+    info!(project_id = project_id, "Configuration reloaded");
+
+    Ok(())
 }

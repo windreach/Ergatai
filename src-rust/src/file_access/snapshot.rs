@@ -46,6 +46,8 @@ use tracing::{debug, info};
 pub struct SnapshotManager {
     /// Git repository path
     repo_path: PathBuf,
+    /// Cached canonical repo path (avoids repeated I/O on every snapshot)
+    canonical_repo_path: PathBuf,
     /// Git repository instance (wrapped in Mutex for thread safety)
     repo: Mutex<Repository>,
 }
@@ -60,8 +62,13 @@ impl SnapshotManager {
             ))
         })?;
 
+        let canonical_repo_path = repo_path.canonicalize().map_err(|e| {
+            ErgataiError::internal(format!("Failed to canonicalize repo path: {}", e))
+        })?;
+
         Ok(Self {
             repo_path: repo_path.to_path_buf(),
+            canonical_repo_path,
             repo: Mutex::new(repo),
         })
     }
@@ -83,27 +90,32 @@ impl SnapshotManager {
     pub fn create_snapshot(&self, file_path: &str, agent_id: &str) -> Result<String, ErgataiError> {
         let full_path = self.repo_path.join(file_path);
 
-        // Prevent path traversal: verify the resolved path is within repo_path
-        // canonicalize requires the path to exist, which we check next
-        if full_path.exists() {
-            let canonical_root = self.repo_path.canonicalize().map_err(|e| {
-                ErgataiError::internal(format!("Failed to canonicalize repo path: {}", e))
-            })?;
-            let canonical_file = full_path.canonicalize().map_err(|e| {
-                ErgataiError::internal(format!("Failed to canonicalize file path: {}", e))
-            })?;
-            if !canonical_file.starts_with(&canonical_root) {
+        // M4 fix: Reject symlinks explicitly to prevent symlink-based path traversal
+        if let Ok(metadata) = std::fs::symlink_metadata(&full_path) {
+            if metadata.file_type().is_symlink() {
                 return Err(ErgataiError::InvalidArgument(format!(
-                    "Path traversal detected: {:?} resolves outside project root",
+                    "Symlink not allowed in snapshot path: {:?}",
                     file_path
                 )));
             }
         }
 
-        // Check if file exists
-        if !full_path.exists() {
-            debug!(file_path = file_path, "File does not exist, skipping snapshot");
-            return Ok(String::new()); // Empty hash for non-existent files
+        // M4 fix: Canonicalize first (resolves any remaining traversal), then check existence
+        let canonical_file = match full_path.canonicalize() {
+            Ok(p) => p,
+            Err(_) => {
+                // File doesn't exist or is inaccessible
+                debug!(file_path = file_path, "File does not exist, skipping snapshot");
+                return Ok(String::new());
+            }
+        };
+
+        // Path traversal check using cached canonical repo path
+        if !canonical_file.starts_with(&self.canonical_repo_path) {
+            return Err(ErgataiError::InvalidArgument(format!(
+                "Path traversal detected: {:?} resolves outside project root",
+                file_path
+            )));
         }
 
         // Check file size (limit: 100MB) to prevent OOM
@@ -263,6 +275,13 @@ impl SnapshotManager {
         conn: &rusqlite::Connection,
         days_to_keep: u32,
     ) -> Result<usize, ErgataiError> {
+        // L7 fix: prevent accidental deletion of all snapshots
+        if days_to_keep == 0 {
+            return Err(ErgataiError::InvalidArgument(
+                "days_to_keep must be > 0 to prevent accidental deletion of all snapshots".to_string()
+            ));
+        }
+
         let cutoff = Utc::now() - chrono::Duration::days(days_to_keep as i64);
 
         let deleted = conn
@@ -281,6 +300,109 @@ impl SnapshotManager {
         );
 
         Ok(deleted)
+    }
+
+    /// Cleanup snapshots to enforce disk size limit
+    ///
+    /// Removes oldest snapshots until total size is under the limit.
+    /// This is a best-effort cleanup - git objects may not be immediately freed.
+    ///
+    /// # Arguments
+    /// * `conn` - SQLite connection
+    /// * `max_bytes` - Maximum total size in bytes (e.g., 500MB = 500_000_000)
+    ///
+    /// # Returns
+    /// Number of snapshots deleted
+    pub fn cleanup_snapshots_by_size(
+        conn: &rusqlite::Connection,
+        max_bytes: u64,
+    ) -> Result<usize, ErgataiError> {
+        // Get all snapshots ordered by creation date (oldest first)
+        let mut stmt = conn.prepare(
+            "SELECT id, file_path, created_at FROM snapshots ORDER BY created_at ASC"
+        )?;
+
+        let snapshots: Vec<(String, String, String)> = stmt.query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?.collect::<Result<Vec<_>, _>>()?;
+
+        // Estimate total size (approximate: 10KB per snapshot average)
+        // In production, this could be enhanced to query git object sizes
+        let estimated_size_per_snapshot = 10_000u64;
+        let total_estimated = snapshots.len() as u64 * estimated_size_per_snapshot;
+
+        if total_estimated <= max_bytes {
+            debug!(
+                snapshot_count = snapshots.len(),
+                estimated_bytes = total_estimated,
+                max_bytes = max_bytes,
+                "Snapshot size within limit, no cleanup needed"
+            );
+            return Ok(0);
+        }
+
+        // Calculate how many to delete
+        let target_count = (max_bytes / estimated_size_per_snapshot) as usize;
+        let to_delete = snapshots.len().saturating_sub(target_count);
+
+        if to_delete == 0 {
+            return Ok(0);
+        }
+
+        // Delete oldest snapshots
+        let ids_to_delete: Vec<String> = snapshots.iter()
+            .take(to_delete)
+            .map(|(id, _, _)| id.clone())
+            .collect();
+
+        let mut deleted = 0;
+        for id in &ids_to_delete {
+            let count = conn.execute(
+                "DELETE FROM snapshots WHERE id = ?1",
+                rusqlite::params![id],
+            )?;
+            deleted += count;
+        }
+
+        info!(
+            deleted = deleted,
+            estimated_bytes_before = total_estimated,
+            max_bytes = max_bytes,
+            "Cleaned up snapshots to enforce size limit"
+        );
+
+        Ok(deleted)
+    }
+
+    /// Run git garbage collection to free unreferenced objects
+    ///
+    /// This should be run periodically (e.g., daily) to reclaim disk space
+    /// from deleted snapshots.
+    pub fn run_git_gc(repo: &Repository) -> Result<(), ErgataiError> {
+        use std::process::Command;
+
+        let repo_path = repo.path().parent()
+            .ok_or_else(|| ErgataiError::internal("Failed to get repo path"))?;
+
+        // Run git gc --auto
+        let output = Command::new("git")
+            .arg("gc")
+            .arg("--auto")
+            .current_dir(repo_path)
+            .output()
+            .map_err(|e| {
+                ErgataiError::internal(format!("Failed to run git gc: {}", e))
+            })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(ErgataiError::internal(format!(
+                "git gc failed: {}", stderr
+            )));
+        }
+
+        info!("Git garbage collection completed");
+        Ok(())
     }
 }
 

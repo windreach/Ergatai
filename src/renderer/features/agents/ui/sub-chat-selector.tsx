@@ -52,6 +52,8 @@ import { toast } from "sonner"
 import { SearchCombobox } from "../../../components/ui/search-combobox"
 import { SubChatContextMenu } from "./sub-chat-context-menu"
 import { formatTimeAgo } from "../utils/format-time-ago"
+import { RuntimeIndicator, LegacyBadge } from "./runtime-indicator"
+import { useAgentSessionSyncStore } from "../stores/agent-session-sync"
 
 interface DiffStats {
   fileCount: number
@@ -811,6 +813,20 @@ export function SubChatSelector({
                               </>
                             )}
                           </div>
+                        )}
+
+                        {/* Runtime indicator - show for non-legacy sub-chats with ACP session */}
+                        {subChat.acpSessionId && !subChat.isLegacy && (
+                          <RuntimeIndicator
+                            runtime={subChat.runtimeId as any}
+                            status={useAgentSessionSyncStore.getState().sessions.get(subChat.id)?.status}
+                            className="flex-shrink-0"
+                          />
+                        )}
+
+                        {/* Legacy badge */}
+                        {subChat.isLegacy && (
+                          <LegacyBadge className="flex-shrink-0" />
                         )}
 
                         {editingSubChatId === subChat.id ? (

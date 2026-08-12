@@ -146,14 +146,21 @@ async fn acquire_file_locks_for_permission(
 
     // Check if this permission level requires human approval
     // Only ADMIN mode requires approval; READ and WRITE are auto-approved
-    let needs_approval = matches!(file_token.mode, FileMode::Admin);
+    // In single-agent mode, even ADMIN is auto-approved (no contention risk)
+    let single_agent = lock_manager.is_single_agent_mode();
+    let needs_approval = matches!(file_token.mode, FileMode::Admin) && !single_agent;
 
     let approved_by = if !needs_approval {
-        // READ or WRITE permission: auto-approve
+        let reason = if single_agent {
+            "single-agent mode (approval bypassed)"
+        } else {
+            "READ/WRITE mode"
+        };
         tracing::info!(
             session_id = %session_id,
             mode = ?file_token.mode,
-            "Auto-approving file access (READ/WRITE mode)"
+            single_agent = single_agent,
+            "Auto-approving file access ({})", reason
         );
         "auto".to_string()
     } else {
@@ -241,7 +248,7 @@ async fn acquire_file_locks_for_permission(
         }
 
         // Acquire the lock (log_audit is called internally by acquire_lock)
-        lock_manager.acquire_lock(&file_token, file_path)?;
+        lock_manager.acquire_lock(&file_token, file_path).await?;
 
         // Log approval in audit trail
         lock_manager.log_audit(
@@ -512,6 +519,13 @@ async fn run_sdk_session(
                     kind,
                 }).await;
 
+                // Register with file access control for single-agent mode detection.
+                // Uses cwd as project_id (same convention as acquire_file_locks_for_permission).
+                // If file access is not initialized for this project, this is a no-op.
+                if let Ok(lock_manager) = crate::file_access::get_lock_manager(&cwd_clone).await {
+                    lock_manager.register_session();
+                }
+
                 // Signal that session is ready (created + registered)
                 if let Some(tx) = session_ready_tx {
                     tracing::info!(session_id = %session_id, "Signaling session ready to caller");
@@ -594,6 +608,10 @@ async fn run_sdk_session(
                                 event_type: "closed".to_string(),
                                 data: serde_json::Value::Null,
                             });
+                            // Unregister from file access control (single-agent mode detection)
+                            if let Ok(lock_manager) = crate::file_access::get_lock_manager(&cwd_clone).await {
+                                lock_manager.unregister_session();
+                            }
                             manager().unregister(&session_id).await;
                             break;
                         }
@@ -607,6 +625,10 @@ async fn run_sdk_session(
                                 Ok(Ok(_)) => {}
                                 Ok(Err(e)) => tracing::warn!(error = %e, "CloseSession request failed"),
                                 Err(_) => tracing::warn!("CloseSession request timed out"),
+                            }
+                            // Unregister from file access control (single-agent mode detection)
+                            if let Ok(lock_manager) = crate::file_access::get_lock_manager(&cwd_clone).await {
+                                lock_manager.unregister_session();
                             }
                             manager().unregister(&session_id).await;
                             break;
