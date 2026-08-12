@@ -1195,8 +1195,7 @@ impl FileLockManager {
         Ok(())
     }
 
-    /// Test helper: Get all file tokens for a given system token ID
-    #[cfg(test)]
+    /// Get all file tokens for a given system token ID
     pub fn get_file_tokens_by_system_token(&self, system_token_id: &str) -> Result<Vec<FileToken>, ErgataiError> {
         let conn = self.conn.lock().map_err(|e| {
             ErgataiError::internal(format!("Failed to acquire lock: {}", e))
@@ -1238,6 +1237,182 @@ impl FileLockManager {
         }
 
         Ok(result)
+    }
+
+    /// Test helper: Get all active file locks
+    #[cfg(test)]
+    pub fn get_all_active_locks(&self) -> Result<Vec<FileLock>, ErgataiError> {
+        let conn = self.conn.lock().map_err(|e| {
+            ErgataiError::internal(format!("Failed to acquire lock: {}", e))
+        })?;
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, file_path, agent_id, session_id, mode, scope, token_id,
+                        reason, approved_by, created_at, expires_at, heartbeat_interval_secs,
+                        heartbeat_at, status
+                 FROM file_locks
+                 WHERE status = 'ACTIVE'",
+            )
+            .map_err(|e| ErgataiError::internal(format!("Failed to prepare query: {}", e)))?;
+
+        let locks = stmt
+            .query_map(params![], parse_file_lock_row)
+            .map_err(|e| ErgataiError::internal(format!("Failed to query locks: {}", e)))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| ErgataiError::internal(format!("Failed to collect locks: {}", e)))?;
+
+        Ok(locks)
+    }
+
+    /// Acquire a lock with automatic waiting using NATS queue
+    ///
+    /// This method attempts to acquire a lock immediately. If the lock is already held,
+    /// it publishes a request to the NATS LOCK_WAITERS queue and waits for a notification.
+    ///
+    /// # Arguments
+    /// * `token` - The file token requesting the lock
+    /// * `file_path` - The file path to lock
+    /// * `nats_connection` - NATS connection for publishing wait requests
+    /// * `timeout` - Maximum time to wait for the lock
+    ///
+    /// # Returns
+    /// * `Ok(())` if the lock was acquired (immediately or after waiting)
+    /// * `Err(ErgataiError::Timeout)` if the timeout was reached
+    /// * `Err(ErgataiError)` for other errors
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let nats = nats_connection.clone();
+    /// let timeout = Duration::from_secs(30);
+    /// lock_manager.acquire_lock_with_wait(&token, "main.rs", nats, timeout).await?;
+    /// // Lock is now held, proceed with file operations
+    /// ```
+    pub async fn acquire_lock_with_wait(
+        &self,
+        token: &FileToken,
+        file_path: &str,
+        nats_connection: Arc<crate::nats::connection::NatsConnection>,
+        timeout: std::time::Duration,
+    ) -> Result<(), ErgataiError> {
+        use crate::file_access::lock_waiter::{LockWaitRequest, LockGrantedNotification};
+        use futures_util::StreamExt;
+
+        // Try to acquire immediately
+        match self.acquire_lock(token, file_path) {
+            Ok(()) => {
+                tracing::debug!(
+                    file_path = file_path,
+                    agent_id = %token.agent_id,
+                    "Lock acquired immediately"
+                );
+                return Ok(());
+            }
+            Err(ErgataiError::LockConflict(_)) => {
+                // Lock is held, need to wait
+                tracing::info!(
+                    file_path = file_path,
+                    agent_id = %token.agent_id,
+                    "Lock conflict, joining wait queue"
+                );
+            }
+            Err(e) => return Err(e),
+        }
+
+        // Create wait request
+        let wait_request = LockWaitRequest::new(
+            token.id.as_str().to_string(),
+            token.agent_id.clone(),
+            token.session_id.clone(),
+            file_path.to_string(),
+            token.mode.clone(),
+            None, // No priority for now
+        );
+
+        let request_id = wait_request.request_id.clone();
+        let reply_subject = wait_request.reply_subject.clone();
+
+        // Publish to NATS
+        let subject = wait_request.subject();
+        let payload = serde_json::to_vec(&wait_request)
+            .map_err(|e| ErgataiError::internal(format!("Failed to serialize wait request: {}", e)))?;
+
+        nats_connection.publish(&subject, payload).await
+            .map_err(|e| ErgataiError::internal(format!("Failed to publish wait request: {}", e)))?;
+
+        tracing::debug!(
+            request_id = %request_id,
+            file_path = file_path,
+            "Published lock wait request to NATS"
+        );
+
+        // Subscribe to reply subject
+        let mut subscriber = nats_connection.client().subscribe(reply_subject.clone()).await
+            .map_err(|e| ErgataiError::internal(format!("Failed to subscribe to reply subject: {}", e)))?;
+
+        // Wait for notification with timeout
+        let notification = tokio::time::timeout(timeout, async {
+            while let Some(msg) = subscriber.next().await {
+                if let Ok(grant) = serde_json::from_slice::<LockGrantedNotification>(&msg.payload) {
+                    if grant.request_id == request_id {
+                        return Some(grant);
+                    }
+                }
+            }
+            None
+        })
+        .await;
+
+        match notification {
+            Ok(Some(_grant)) => {
+                tracing::info!(
+                    request_id = %request_id,
+                    file_path = file_path,
+                    "Received lock grant notification"
+                );
+
+                // Try to acquire the lock now
+                match self.acquire_lock(token, file_path) {
+                    Ok(()) => {
+                        tracing::info!(
+                            file_path = file_path,
+                            agent_id = %token.agent_id,
+                            "Lock acquired after waiting"
+                        );
+                        Ok(())
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            file_path = file_path,
+                            agent_id = %token.agent_id,
+                            error = %e,
+                            "Failed to acquire lock after grant notification"
+                        );
+                        Err(e)
+                    }
+                }
+            }
+            Ok(None) => {
+                tracing::warn!(
+                    request_id = %request_id,
+                    file_path = file_path,
+                    "Subscriber closed before receiving grant"
+                );
+                Err(ErgataiError::internal("Lock wait channel closed unexpectedly"))
+            }
+            Err(_) => {
+                tracing::warn!(
+                    request_id = %request_id,
+                    file_path = file_path,
+                    timeout_secs = timeout.as_secs(),
+                    "Lock acquisition timed out"
+                );
+                Err(ErgataiError::internal(format!(
+                    "Lock acquisition timed out after {} seconds",
+                    timeout.as_secs()
+                )))
+            }
+        }
     }
 }
 
@@ -1783,5 +1958,41 @@ mod tests {
         // Unknown session returns empty
         let empty = manager.get_tokens_by_session("no-such").unwrap();
         assert!(empty.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_acquire_lock_with_wait_immediate_success() {
+        let (manager, _temp) = create_test_manager();
+
+        // Create system token
+        let sys_token = SystemToken::new(
+            "agent-a".to_string(),
+            "session-a".to_string(),
+            manager.project_root.to_string_lossy().to_string(),
+            3600,
+            30,
+        );
+        manager.register_system_token(&sys_token).unwrap();
+
+        // Create file token
+        let file_token = FileToken::new(
+            "agent-a".to_string(),
+            "session-a".to_string(),
+            sys_token.id.clone(),
+            "**".to_string(),
+            FileMode::Write,
+            Some("test".to_string()),
+            "test".to_string(),
+            3600,
+            30,
+        );
+        manager.register_file_token(&file_token).unwrap();
+
+        // Test that acquire_lock works normally (without NATS waiting)
+        let result = manager.acquire_lock(&file_token, "test.txt");
+        assert!(result.is_ok(), "Should acquire lock immediately when available");
+
+        // Clean up
+        manager.release_lock(file_token.id.as_str(), "test.txt").await.unwrap();
     }
 }

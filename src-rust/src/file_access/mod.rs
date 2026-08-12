@@ -7,6 +7,7 @@
 //! Watchdog for token expiration and heartbeat monitoring (Phase 5).
 //! File system watcher for detecting unauthorized modifications (Phase 6).
 //! File events consumer for handling file.ready and file.error events (Phase 7).
+//! NATS-based lock waiting queue for blocking lock acquisition (Phase 8).
 
 pub mod lock_manager;
 pub mod token;
@@ -21,6 +22,8 @@ pub mod lock_mode;
 pub mod renewal;
 pub mod audit;
 pub mod performance;
+pub mod lock_waiter;
+pub mod lock_wait_consumer;
 
 #[cfg(test)]
 mod multi_agent_tests;
@@ -36,4 +39,6 @@ pub use lock_mode::LockModeManager;
 pub use renewal::RenewalManager;
 pub use audit::{AuditManager, AuditEntry, FileAccessStats, SecurityReport};
 pub use performance::{LockCache, BatchOperations, AsyncLockQueue, AsyncLockRequest};
+pub use lock_waiter::{LockWaitRequest, LockReleaseNotification, LockGrantedNotification};
+pub use lock_wait_consumer::LockWaitConsumer;
 pub use manager::{init_file_access, get_lock_manager, get_snapshot_manager, get_watchdog, shutdown_file_access};

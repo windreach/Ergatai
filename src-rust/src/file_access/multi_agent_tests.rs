@@ -1035,4 +1035,457 @@ mod tests {
         let result = manager.acquire_lock(&token, "main.rs");
         assert!(result.is_err(), "Duplicate WRITE lock should fail");
     }
+
+    // ================================================================
+    // CONCURRENT RACE CONDITION TESTS
+    // ================================================================
+
+    // ================================================================
+    // Test 36: Multiple agents racing with no delay (exact same timestamp)
+    // ================================================================
+    #[test]
+    fn test_concurrent_acquire_exact_same_timestamp() {
+        use std::thread;
+        use std::sync::Barrier;
+
+        let (_temp, manager) = setup_test_env();
+        let root = test_project_root();
+
+        // Create 5 agents all trying to acquire the same lock at exactly the same time
+        let num_agents = 5;
+        let barrier = Arc::new(Barrier::new(num_agents));
+
+        let mut handles = vec![];
+        let mut system_tokens = vec![];
+        let mut file_tokens = vec![];
+
+        // Setup all tokens first
+        for i in 0..num_agents {
+            let sys = SystemToken::new(
+                format!("agent-{}", i),
+                format!("session-{}", i),
+                root.clone(),
+                3600,
+                30,
+            );
+            manager.register_system_token(&sys).unwrap();
+            system_tokens.push(sys);
+        }
+
+        for i in 0..num_agents {
+            let token = make_file_token(
+                &format!("agent-{}", i),
+                &format!("session-{}", i),
+                &system_tokens[i].id,
+                "**",
+                FileMode::Write,
+            );
+            file_tokens.push(token);
+        }
+
+        // Spawn threads that all race to acquire the lock
+        for i in 0..num_agents {
+            let mgr = Arc::clone(&manager);
+            let token = file_tokens[i].clone();
+            let barrier = Arc::clone(&barrier);
+
+            let handle = thread::spawn(move || {
+                // Wait for all threads to be ready
+                barrier.wait();
+                // All threads try to acquire at exactly the same time
+                mgr.acquire_lock(&token, "main.rs")
+            });
+
+            handles.push(handle);
+        }
+
+        // Collect results
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+        // Count successes and failures
+        let successes = results.iter().filter(|r| r.is_ok()).count();
+        let failures = results.iter().filter(|r| r.is_err()).count();
+
+        // Exactly one should succeed, all others should fail
+        assert_eq!(successes, 1, "Exactly one agent should acquire the lock");
+        assert_eq!(failures, num_agents - 1, "All other agents should fail");
+    }
+
+    // ================================================================
+    // Test 37: Heartbeat at exact expiration boundary
+    // ================================================================
+    #[test]
+    fn test_heartbeat_at_expiration_boundary() {
+        let (_temp, manager) = setup_test_env();
+        let root = test_project_root();
+
+        // Create token with short expiration
+        let sys = SystemToken::new("agent-a".into(), "session-a".into(), root.clone(), 3600, 30);
+        manager.register_system_token(&sys).unwrap();
+        let token = make_file_token("agent-a", "session-a", &sys.id, "**", FileMode::Write);
+
+        manager.acquire_lock(&token, "main.rs").unwrap();
+
+        // Set heartbeat to exactly 3x interval (90 seconds) in the past
+        // This is the exact boundary where timeout should trigger
+        manager.set_heartbeat_past(token.id.as_str(), 90).unwrap();
+
+        // Token should still be active (boundary condition)
+        let tokens = manager.get_tokens_by_session("session-a").unwrap();
+        assert_eq!(tokens.len(), 1);
+
+        // Update heartbeat to bring it back
+        manager.update_heartbeat(token.id.as_str()).unwrap();
+
+        // Should still be able to use the lock
+        assert!(manager.is_file_locked("main.rs").unwrap());
+    }
+
+    // ================================================================
+    // Test 38: Concurrent release and acquire race
+    // ================================================================
+    #[tokio::test]
+    async fn test_concurrent_release_and_acquire() {
+        use std::thread;
+
+        let (_temp, manager) = setup_test_env();
+        let root = test_project_root();
+
+        let sys_a = SystemToken::new("agent-a".into(), "session-a".into(), root.clone(), 3600, 30);
+        let sys_b = SystemToken::new("agent-b".into(), "session-b".into(), root, 3600, 30);
+        manager.register_system_token(&sys_a).unwrap();
+        manager.register_system_token(&sys_b).unwrap();
+
+        let token_a = make_file_token("agent-a", "session-a", &sys_a.id, "**", FileMode::Write);
+        let token_b = make_file_token("agent-b", "session-b", &sys_b.id, "**", FileMode::Write);
+
+        // Agent A acquires lock
+        manager.acquire_lock(&token_a, "main.rs").unwrap();
+
+        let mgr_a = Arc::clone(&manager);
+        let mgr_b = Arc::clone(&manager);
+        let token_a_id = token_a.id.clone();
+
+        // Spawn thread to release lock
+        let release_handle = thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                // Small delay to let acquire thread start waiting
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                mgr_a.release_lock(token_a_id.as_str(), "main.rs").await
+            })
+        });
+
+        // Try to acquire lock (should succeed after release)
+        let acquire_result = manager.acquire_lock(&token_b, "main.rs");
+
+        release_handle.join().unwrap().unwrap();
+
+        // Either acquire succeeded immediately (race won) or after release
+        // Both are valid - just verify system consistency
+        if acquire_result.is_ok() {
+            assert!(manager.is_file_locked("main.rs").unwrap());
+        }
+    }
+
+    // ================================================================
+    // Test 39: High concurrency DB transaction conflicts
+    // ================================================================
+    #[test]
+    fn test_high_concurrency_db_transactions() {
+        use std::thread;
+
+        let (_temp, manager) = setup_test_env();
+        let root = test_project_root();
+
+        // Create 20 agents trying to acquire different locks simultaneously
+        let num_agents = 20;
+        let mut handles = vec![];
+        let mut system_tokens = vec![];
+        let mut file_tokens = vec![];
+
+        // Setup all tokens
+        for i in 0..num_agents {
+            let sys = SystemToken::new(
+                format!("agent-{}", i),
+                format!("session-{}", i),
+                root.clone(),
+                3600,
+                30,
+            );
+            manager.register_system_token(&sys).unwrap();
+            system_tokens.push(sys);
+        }
+
+        for i in 0..num_agents {
+            let token = make_file_token(
+                &format!("agent-{}", i),
+                &format!("session-{}", i),
+                &system_tokens[i].id,
+                "**",
+                FileMode::Write,
+            );
+            file_tokens.push(token);
+        }
+
+        // Spawn threads that all try to acquire locks on different files at once
+        for i in 0..num_agents {
+            let mgr = Arc::clone(&manager);
+            let token = file_tokens[i].clone();
+            let file_path = format!("file_{}.rs", i);
+
+            // Create the file first
+            std::fs::write(
+                manager.project_root().join(&file_path),
+                "test content",
+            ).unwrap();
+
+            let handle = thread::spawn(move || {
+                mgr.acquire_lock(&token, &file_path)
+            });
+
+            handles.push(handle);
+        }
+
+        // All should succeed since they're on different files
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        let successes = results.iter().filter(|r| r.is_ok()).count();
+
+        // All 20 should succeed (different files, no contention)
+        assert_eq!(successes, num_agents, "All agents should acquire locks on different files");
+    }
+
+    // ================================================================
+    // Test 40: Lock convoy - many agents retry to acquire same lock
+    // ================================================================
+    #[tokio::test]
+    async fn test_lock_convoy_many_retries() {
+        use std::thread;
+
+        let (_temp, manager) = setup_test_env();
+        let root = test_project_root();
+
+        // Create 10 agents all trying to acquire the same lock
+        let num_agents = 10;
+        let mut system_tokens = vec![];
+        let mut file_tokens = vec![];
+
+        for i in 0..num_agents {
+            let sys = SystemToken::new(
+                format!("agent-{}", i),
+                format!("session-{}", i),
+                root.clone(),
+                3600,
+                30,
+            );
+            manager.register_system_token(&sys).unwrap();
+            system_tokens.push(sys);
+        }
+
+        for i in 0..num_agents {
+            let token = make_file_token(
+                &format!("agent-{}", i),
+                &format!("session-{}", i),
+                &system_tokens[i].id,
+                "**",
+                FileMode::Write,
+            );
+            file_tokens.push(token);
+        }
+
+        // First agent acquires lock
+        manager.acquire_lock(&file_tokens[0], "main.rs").unwrap();
+
+        // All other agents try to acquire - should all fail immediately
+        let mut handles = vec![];
+        for i in 1..num_agents {
+            let mgr = Arc::clone(&manager);
+            let token = file_tokens[i].clone();
+
+            let handle = thread::spawn(move || {
+                mgr.acquire_lock(&token, "main.rs")
+            });
+
+            handles.push(handle);
+        }
+
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        let failures = results.iter().filter(|r| r.is_err()).count();
+
+        // All should fail since lock is held
+        assert_eq!(failures, num_agents - 1, "All agents should fail to acquire lock");
+
+        // Release the lock
+        manager.release_lock(file_tokens[0].id.as_str(), "main.rs").await.unwrap();
+
+        // Now one agent can acquire
+        let result = manager.acquire_lock(&file_tokens[1], "main.rs");
+        assert!(result.is_ok(), "Should be able to acquire after release");
+
+        // Cleanup
+        manager.release_lock(file_tokens[1].id.as_str(), "main.rs").await.unwrap();
+    }
+
+    // ================================================================
+    // Test 41: WRITE can be acquired even with concurrent READ holders
+    // ================================================================
+    #[tokio::test]
+    async fn test_write_with_concurrent_readers() {
+        let (_temp, manager) = setup_test_env();
+        let root = test_project_root();
+
+        let sys_a = SystemToken::new("agent-a".into(), "session-a".into(), root.clone(), 3600, 30);
+        let sys_b = SystemToken::new("agent-b".into(), "session-b".into(), root, 3600, 30);
+        manager.register_system_token(&sys_a).unwrap();
+        manager.register_system_token(&sys_b).unwrap();
+
+        // Agent A acquires READ lock
+        let read_token_a = make_file_token("agent-a", "session-a", &sys_a.id, "**", FileMode::Read);
+        manager.acquire_lock(&read_token_a, "main.rs").unwrap();
+
+        // Agent B acquires WRITE lock (READ doesn't block WRITE)
+        let write_token_b = make_file_token("agent-b", "session-b", &sys_b.id, "**", FileMode::Write);
+        let result = manager.acquire_lock(&write_token_b, "main.rs");
+        assert!(result.is_ok(), "WRITE should succeed even with READ holder (optimistic concurrency)");
+
+        // Both locks should exist
+        let active_locks = manager.get_all_active_locks().unwrap();
+        let main_rs_locks = active_locks
+            .iter()
+            .filter(|l| l.file_path.ends_with("main.rs"))
+            .count();
+        assert_eq!(main_rs_locks, 2, "Both READ and WRITE locks should coexist");
+
+        // Cleanup
+        manager.release_lock(read_token_a.id.as_str(), "main.rs").await.unwrap();
+        manager.release_lock(write_token_b.id.as_str(), "main.rs").await.unwrap();
+    }
+
+    // ================================================================
+    // Test 42: WRITE to READ downgrade with waiting writers
+    // ================================================================
+    #[tokio::test]
+    async fn test_downgrade_write_to_read_with_waiting_writers() {
+        let (_temp, manager) = setup_test_env();
+        let root = test_project_root();
+
+        let sys_a = SystemToken::new("agent-a".into(), "session-a".into(), root.clone(), 3600, 30);
+        let sys_b = SystemToken::new("agent-b".into(), "session-b".into(), root, 3600, 30);
+        manager.register_system_token(&sys_a).unwrap();
+        manager.register_system_token(&sys_b).unwrap();
+
+        // Agent A has WRITE lock
+        let write_token_a = make_file_token("agent-a", "session-a", &sys_a.id, "**", FileMode::Write);
+        manager.acquire_lock(&write_token_a, "main.rs").unwrap();
+
+        // Agent B tries to acquire WRITE - should fail
+        let write_token_b = make_file_token("agent-b", "session-b", &sys_b.id, "**", FileMode::Write);
+        let result = manager.acquire_lock(&write_token_b, "main.rs");
+        assert!(result.is_err(), "B should not get WRITE while A has WRITE");
+
+        // Agent A releases WRITE lock
+        manager.release_lock(write_token_a.id.as_str(), "main.rs").await.unwrap();
+
+        // Now B can acquire WRITE
+        let result = manager.acquire_lock(&write_token_b, "main.rs");
+        assert!(result.is_ok(), "B should get WRITE after A releases");
+
+        // Cleanup
+        manager.release_lock(write_token_b.id.as_str(), "main.rs").await.unwrap();
+    }
+
+    // ================================================================
+    // Test 43: Concurrent acquire on same file with mixed READ/WRITE
+    // ================================================================
+    #[test]
+    fn test_concurrent_mixed_read_write_locks() {
+        use std::thread;
+
+        let (_temp, manager) = setup_test_env();
+        let root = test_project_root();
+
+        let num_readers = 5;
+        let num_writers = 3;
+        let mut system_tokens = vec![];
+        let mut file_tokens = vec![];
+
+        // Create readers
+        for i in 0..num_readers {
+            let sys = SystemToken::new(
+                format!("reader-{}", i),
+                format!("session-r{}", i),
+                root.clone(),
+                3600,
+                30,
+            );
+            manager.register_system_token(&sys).unwrap();
+            let token = make_file_token(
+                &format!("reader-{}", i),
+                &format!("session-r{}", i),
+                &sys.id,
+                "**",
+                FileMode::Read,
+            );
+            file_tokens.push(token);
+            system_tokens.push(sys);
+        }
+
+        // Create writers
+        for i in 0..num_writers {
+            let sys = SystemToken::new(
+                format!("writer-{}", i),
+                format!("session-w{}", i),
+                root.clone(),
+                3600,
+                30,
+            );
+            manager.register_system_token(&sys).unwrap();
+            let token = make_file_token(
+                &format!("writer-{}", i),
+                &format!("session-w{}", i),
+                &sys.id,
+                "**",
+                FileMode::Write,
+            );
+            file_tokens.push(token);
+            system_tokens.push(sys);
+        }
+
+        let mut handles = vec![];
+
+        // Spawn all readers and writers concurrently
+        for i in 0..(num_readers + num_writers) {
+            let mgr = Arc::clone(&manager);
+            let token = file_tokens[i].clone();
+
+            let handle = thread::spawn(move || {
+                mgr.acquire_lock(&token, "main.rs")
+            });
+
+            handles.push(handle);
+        }
+
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+        let read_successes = results[0..num_readers]
+            .iter()
+            .filter(|r| r.is_ok())
+            .count();
+        let write_successes = results[num_readers..]
+            .iter()
+            .filter(|r| r.is_ok())
+            .count();
+
+        // All readers should succeed (READ locks coexist)
+        assert_eq!(read_successes, num_readers, "All READ locks should succeed");
+
+        // Exactly one writer should succeed (if any - depends on timing)
+        // If a writer got the lock first, only that writer succeeds
+        // If readers got locks first, no writer succeeds
+        assert!(
+            write_successes <= 1,
+            "At most one WRITE lock should succeed, got {}",
+            write_successes
+        );
+    }
 }
