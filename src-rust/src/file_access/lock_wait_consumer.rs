@@ -164,7 +164,7 @@ impl LockWaitConsumer {
         };
 
         // Try to acquire the lock
-        match self.lock_manager.acquire_lock(&file_token, &request.file_path) {
+        match self.lock_manager.acquire_lock(&file_token, &request.file_path).await {
             Ok(()) => {
                 // Lock acquired successfully
                 info!(

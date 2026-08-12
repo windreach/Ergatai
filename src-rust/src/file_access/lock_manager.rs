@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
 use tracing::{debug, info, warn, error};
 
+use super::audit::AuditManager;
 use super::token::{FileLock, FileMode, FileToken, SystemToken, TokenId, TokenStatus};
 use crate::nats::events::{FileAccessEscalatePayload, FileAccessApprovePayload, FileAccessRejectPayload};
 
@@ -177,6 +178,11 @@ impl FileLockManager {
             disconnected_sessions: Arc::new(Mutex::new(HashMap::new())),
             pending_request_keys: Arc::new(Mutex::new(HashMap::new())),
         })
+    }
+
+    /// Get the project root directory this manager was initialized with.
+    pub fn project_root(&self) -> &Path {
+        &self.project_root
     }
 
     /// Create the lock database tables.
@@ -840,14 +846,18 @@ impl FileLockManager {
     }
 
     /// Release a file lock.
-    pub fn release_lock(&self, token_id: &str, file_path: &str) -> Result<(), ErgataiError> {
+    ///
+    /// Automatically notifies waiters (READ_LATEST) after releasing the lock.
+    pub async fn release_lock(&self, token_id: &str, file_path: &str) -> Result<(), ErgataiError> {
         let normalized_path = self.validate_and_normalize_path(file_path)?;
 
-        let conn = self.conn.lock().map_err(|e| {
-            ErgataiError::internal(format!("Failed to acquire lock: {}", e))
-        })?;
+        // Use a block to ensure conn is dropped before async call
+        let release_result = {
+            let conn = self.conn.lock().map_err(|e| {
+                ErgataiError::internal(format!("Failed to acquire lock: {}", e))
+            })?;
 
-        conn.execute_batch("BEGIN IMMEDIATE")
+            conn.execute_batch("BEGIN IMMEDIATE")
             .map_err(|e| ErgataiError::internal(format!("Failed to begin transaction: {}", e)))?;
 
         // Get lock info for audit
@@ -902,6 +912,13 @@ impl FileLockManager {
                 token_id, file_path
             )))
         }
+        }; // conn is dropped here
+
+        // Notify waiters after releasing the mutex
+        release_result?;
+        self.notify_file_ready(&normalized_path).await?;
+
+        Ok(())
     }
 
     /// Check if a file is locked for writing.
@@ -922,6 +939,31 @@ impl FileLockManager {
             .map_err(|e| ErgataiError::internal(format!("Failed to query lock: {}", e)))?;
 
         Ok(is_locked)
+    }
+
+    /// Record a file access violation in the audit log.
+    ///
+    /// Called by `FileSystemWatcher` when a file modification is detected
+    /// without a corresponding active lock. The agent/session are recorded
+    /// as "unknown" since the watcher cannot identify the modifier.
+    pub fn record_violation(
+        &self,
+        file_path: &str,
+        action: &str,
+    ) -> Result<(), ErgataiError> {
+        let normalized_path = self
+            .validate_and_normalize_path(file_path)
+            .unwrap_or_else(|_| file_path.to_string());
+
+        // Delegate to the shared audit logging method
+        self.log_audit(
+            "unknown",
+            "unknown",
+            action,
+            Some(&normalized_path),
+            None,
+            Some(action),
+        )
     }
 
     /// Update heartbeat for a token.
@@ -1268,6 +1310,281 @@ impl FileLockManager {
             .map_err(|e| ErgataiError::internal(format!("Failed to collect locks: {}", e)))?;
 
         Ok(locks)
+    }
+
+    /// Get all active locks for a session (for ACP disconnect reclaim).
+    ///
+    /// Unlike `get_locks_by_token` which queries by file_token_id,
+    /// this queries by session_id — which is what the watchdog needs
+    /// when reclaiming all locks for a disconnected agent session.
+    pub fn get_locks_by_session(&self, session_id: &str) -> Result<Vec<FileLock>, ErgataiError> {
+        let conn = self.conn.lock().map_err(|e| {
+            ErgataiError::internal(format!("Failed to acquire lock: {}", e))
+        })?;
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, file_path, agent_id, session_id, mode, scope, token_id,
+                        reason, approved_by, created_at, expires_at, heartbeat_interval_secs,
+                        heartbeat_at, status
+                 FROM file_locks
+                 WHERE session_id = ?1 AND status = 'ACTIVE'",
+            )
+            .map_err(|e| ErgataiError::internal(format!("Failed to prepare statement: {}", e)))?;
+
+        let locks = stmt
+            .query_map(params![session_id], parse_file_lock_row)
+            .map_err(|e| ErgataiError::internal(format!("Failed to query locks: {}", e)))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| ErgataiError::internal(format!("Failed to collect locks: {}", e)))?;
+
+        Ok(locks)
+    }
+
+    /// Get an AuditManager sharing this manager's database connection.
+    ///
+    /// Useful for querying audit log entries after lock operations without
+    /// requiring a separate connection.
+    pub fn audit_manager(&self) -> AuditManager {
+        AuditManager::new(Arc::clone(&self.conn))
+    }
+
+    /// Test helper: Set heartbeat to a past time for testing timeout scenarios
+    #[cfg(test)]
+    pub fn set_heartbeat_past(&self, token_id: &str, seconds_ago: i64) -> Result<(), ErgataiError> {
+        let conn = self.conn.lock().map_err(|e| {
+            ErgataiError::internal(format!("Failed to acquire lock: {}", e))
+        })?;
+
+        // Use strftime to format as RFC3339 (ISO 8601 with timezone)
+        conn.execute(
+            "UPDATE system_tokens SET heartbeat_at = strftime('%Y-%m-%dT%H:%M:%S+00:00', 'now', ?1) WHERE id = ?2",
+            rusqlite::params![format!("-{} seconds", seconds_ago), token_id],
+        )
+        .map_err(|e| ErgataiError::internal(format!("Failed to update heartbeat: {}", e)))?;
+
+        Ok(())
+    }
+
+    /// Get all file tokens for a given system token ID
+    pub fn get_file_tokens_by_system_token(&self, system_token_id: &str) -> Result<Vec<FileToken>, ErgataiError> {
+        let conn = self.conn.lock().map_err(|e| {
+            ErgataiError::internal(format!("Failed to acquire lock: {}", e))
+        })?;
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, agent_id, session_id, system_token_id, scope, mode, reason,
+                        approved_by, issued_at, expires_at, heartbeat_interval_secs,
+                        heartbeat_at, status
+                 FROM file_tokens
+                 WHERE system_token_id = ?1 AND status = 'ACTIVE'",
+            )
+            .map_err(|e| ErgataiError::internal(format!("Failed to prepare query: {}", e)))?;
+
+        let tokens = stmt
+            .query_map(params![system_token_id], |row| {
+                Ok(FileToken {
+                    id: TokenId::from_string(row.get::<_, String>(0)?),
+                    agent_id: row.get::<_, String>(1)?,
+                    session_id: row.get::<_, String>(2)?,
+                    system_token_id: TokenId::from_string(row.get::<_, String>(3)?),
+                    scope: row.get::<_, String>(4)?,
+                    mode: parse_file_mode(&row.get::<_, String>(5)?),
+                    reason: row.get::<_, Option<String>>(6)?,
+                    approved_by: row.get::<_, String>(7)?,
+                    issued_at: parse_datetime(&row.get::<_, String>(8)?),
+                    expires_at: parse_datetime(&row.get::<_, String>(9)?),
+                    heartbeat_interval_secs: row.get::<_, i64>(10)? as u64,
+                    heartbeat_at: parse_datetime(&row.get::<_, String>(11)?),
+                    status: parse_token_status(&row.get::<_, String>(12)?),
+                    priority: None,
+                })
+            })
+            .map_err(|e| ErgataiError::internal(format!("Failed to query file tokens: {}", e)))?;
+
+        let mut result = Vec::new();
+        for token in tokens {
+            result.push(token.map_err(|e| ErgataiError::internal(format!("Failed to parse file token: {}", e)))?);
+        }
+
+        Ok(result)
+    }
+
+    /// Test helper: Get all active file locks
+    #[cfg(test)]
+    pub fn get_all_active_locks(&self) -> Result<Vec<FileLock>, ErgataiError> {
+        let conn = self.conn.lock().map_err(|e| {
+            ErgataiError::internal(format!("Failed to acquire lock: {}", e))
+        })?;
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, file_path, agent_id, session_id, mode, scope, token_id,
+                        reason, approved_by, created_at, expires_at, heartbeat_interval_secs,
+                        heartbeat_at, status
+                 FROM file_locks
+                 WHERE status = 'ACTIVE'",
+            )
+            .map_err(|e| ErgataiError::internal(format!("Failed to prepare query: {}", e)))?;
+
+        let locks = stmt
+            .query_map(params![], parse_file_lock_row)
+            .map_err(|e| ErgataiError::internal(format!("Failed to query locks: {}", e)))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| ErgataiError::internal(format!("Failed to collect locks: {}", e)))?;
+
+        Ok(locks)
+    }
+
+    /// Acquire a lock with automatic waiting using NATS queue
+    ///
+    /// This method attempts to acquire a lock immediately. If the lock is already held,
+    /// it publishes a request to the NATS LOCK_WAITERS queue and waits for a notification.
+    ///
+    /// # Arguments
+    /// * `token` - The file token requesting the lock
+    /// * `file_path` - The file path to lock
+    /// * `nats_connection` - NATS connection for publishing wait requests
+    /// * `timeout` - Maximum time to wait for the lock
+    ///
+    /// # Returns
+    /// * `Ok(())` if the lock was acquired (immediately or after waiting)
+    /// * `Err(ErgataiError::Timeout)` if the timeout was reached
+    /// * `Err(ErgataiError)` for other errors
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let nats = nats_connection.clone();
+    /// let timeout = Duration::from_secs(30);
+    /// lock_manager.acquire_lock_with_wait(&token, "main.rs", nats, timeout).await?;
+    /// // Lock is now held, proceed with file operations
+    /// ```
+    pub async fn acquire_lock_with_wait(
+        &self,
+        token: &FileToken,
+        file_path: &str,
+        nats_connection: Arc<crate::nats::connection::NatsConnection>,
+        timeout: std::time::Duration,
+    ) -> Result<(), ErgataiError> {
+        use crate::file_access::lock_waiter::{LockWaitRequest, LockGrantedNotification};
+        use futures_util::StreamExt;
+
+        // Try to acquire immediately
+        match self.acquire_lock(token, file_path).await {
+            Ok(()) => {
+                tracing::debug!(
+                    file_path = file_path,
+                    agent_id = %token.agent_id,
+                    "Lock acquired immediately"
+                );
+                return Ok(());
+            }
+            Err(ErgataiError::LockConflict(_)) => {
+                // Lock is held, need to wait
+                tracing::info!(
+                    file_path = file_path,
+                    agent_id = %token.agent_id,
+                    "Lock conflict, joining wait queue"
+                );
+            }
+            Err(e) => return Err(e),
+        }
+
+        // Create wait request
+        let wait_request = LockWaitRequest::new(
+            token.id.as_str().to_string(),
+            token.agent_id.clone(),
+            token.session_id.clone(),
+            file_path.to_string(),
+            token.mode.clone(),
+            None, // No priority for now
+        );
+
+        let request_id = wait_request.request_id.clone();
+        let reply_subject = wait_request.reply_subject.clone();
+
+        // Publish to NATS
+        let subject = wait_request.subject();
+        let payload = serde_json::to_vec(&wait_request)
+            .map_err(|e| ErgataiError::internal(format!("Failed to serialize wait request: {}", e)))?;
+
+        nats_connection.publish(&subject, payload).await
+            .map_err(|e| ErgataiError::internal(format!("Failed to publish wait request: {}", e)))?;
+
+        tracing::debug!(
+            request_id = %request_id,
+            file_path = file_path,
+            "Published lock wait request to NATS"
+        );
+
+        // Subscribe to reply subject
+        let mut subscriber = nats_connection.client().subscribe(reply_subject.clone()).await
+            .map_err(|e| ErgataiError::internal(format!("Failed to subscribe to reply subject: {}", e)))?;
+
+        // Wait for notification with timeout
+        let notification = tokio::time::timeout(timeout, async {
+            while let Some(msg) = subscriber.next().await {
+                if let Ok(grant) = serde_json::from_slice::<LockGrantedNotification>(&msg.payload) {
+                    if grant.request_id == request_id {
+                        return Some(grant);
+                    }
+                }
+            }
+            None
+        })
+        .await;
+
+        match notification {
+            Ok(Some(_grant)) => {
+                tracing::info!(
+                    request_id = %request_id,
+                    file_path = file_path,
+                    "Received lock grant notification"
+                );
+
+                // Try to acquire the lock now
+                match self.acquire_lock(token, file_path).await {
+                    Ok(()) => {
+                        tracing::info!(
+                            file_path = file_path,
+                            agent_id = %token.agent_id,
+                            "Lock acquired after waiting"
+                        );
+                        Ok(())
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            file_path = file_path,
+                            agent_id = %token.agent_id,
+                            error = %e,
+                            "Failed to acquire lock after grant notification"
+                        );
+                        Err(e)
+                    }
+                }
+            }
+            Ok(None) => {
+                tracing::warn!(
+                    request_id = %request_id,
+                    file_path = file_path,
+                    "Subscriber closed before receiving grant"
+                );
+                Err(ErgataiError::internal("Lock wait channel closed unexpectedly"))
+            }
+            Err(_) => {
+                tracing::warn!(
+                    request_id = %request_id,
+                    file_path = file_path,
+                    timeout_secs = timeout.as_secs(),
+                    "Lock acquisition timed out"
+                );
+                Err(ErgataiError::internal(format!(
+                    "Lock acquisition timed out after {} seconds",
+                    timeout.as_secs()
+                )))
+            }
+        }
     }
 
     /// Mark a token as expired (for watchdog timeout handling).
@@ -1818,7 +2135,7 @@ impl FileLockManager {
         }
 
         // Step 2: Release the READ lock
-        self.release_lock(token.id.as_str(), file_path)?;
+        self.release_lock(token.id.as_str(), file_path).await?;
 
         // Step 3: Attempt WRITE acquisition via a temporary WRITE-mode token
         //
@@ -2261,6 +2578,42 @@ fn parse_datetime(s: &str) -> DateTime<Utc> {
             DateTime::UNIX_EPOCH
         }
     }
+}
+
+/// Parse a database row into a FileLock struct.
+/// Used by both `get_locks_by_token` and `get_locks_by_session`.
+fn parse_file_lock_row(row: &rusqlite::Row) -> rusqlite::Result<FileLock> {
+    Ok(FileLock {
+        id: row.get(0)?,
+        file_path: row.get(1)?,
+        agent_id: row.get(2)?,
+        session_id: row.get(3)?,
+        mode: match row.get::<_, String>(4)?.as_str() {
+            "WRITE" => FileMode::Write,
+            _ => FileMode::Read,
+        },
+        scope: row.get(5)?,
+        token_id: TokenId::from_string(row.get(6)?),
+        reason: row.get(7)?,
+        approved_by: row.get(8)?,
+        created_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(9)?)
+            .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))?
+            .with_timezone(&Utc),
+        expires_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(10)?)
+            .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))?
+            .with_timezone(&Utc),
+        heartbeat_interval_secs: row.get::<_, i64>(11)? as u64,
+        heartbeat_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(12)?)
+            .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))?
+            .with_timezone(&Utc),
+        status: match row.get::<_, String>(13)?.as_str() {
+            "ACTIVE" => TokenStatus::Active,
+            "UPGRADING" => TokenStatus::Upgrading,
+            "EXPIRED" => TokenStatus::Expired,
+            "REVOKED" => TokenStatus::Revoked,
+            _ => TokenStatus::Expired,
+        },
+    })
 }
 
 #[cfg(test)]
