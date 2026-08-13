@@ -34,7 +34,6 @@ pub mod acp;
 pub mod agent;
 pub mod cross_agent;
 pub mod file_access;
-pub mod orchestration;
 pub mod signal;
 
 // Internal modules
@@ -44,6 +43,7 @@ mod skills;
 // ── Re-export extracted crates ──
 pub use ergatai_error as error;
 pub use ergatai_nats as nats;
+pub use ergatai_dag as orchestration;
 
 use std::path::PathBuf;
 use std::sync::Mutex;

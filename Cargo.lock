@@ -1185,6 +1185,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "dirs",
+ "ergatai-dag",
  "ergatai-error",
  "ergatai-nats",
  "evalexpr",
@@ -1214,6 +1215,21 @@ dependencies = [
  "url",
  "uuid",
  "walkdir",
+]
+
+[[package]]
+name = "ergatai-dag"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "ergatai-error",
+ "glob",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
