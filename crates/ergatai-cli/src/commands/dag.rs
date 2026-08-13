@@ -1,7 +1,7 @@
 //! DAG command handlers
 
-use anyhow::Result;
 use crate::DagCommands;
+use anyhow::Result;
 
 pub async fn handle(action: DagCommands) -> Result<()> {
     match action {

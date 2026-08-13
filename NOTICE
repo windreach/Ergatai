@@ -27,9 +27,3 @@ This project includes the following third-party software:
    Copyright (c) Buzz Authors
    Licensed under Apache License 2.0
    Used for: ACP runtime metadata structure and discovery mechanism inspiration
-
-2. 1Code - Desktop Application Framework
-   Copyright (c) 1Code Authors
-   Licensed under Apache License 2.0
-   Used for: Electron desktop application foundation, frontend architecture, and UI components
-   Modified: Backend has been significantly rewritten for ACP agent management

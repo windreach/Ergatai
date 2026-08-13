@@ -759,9 +759,7 @@ impl FileLockManager {
                 token.priority.map(|p| p as i64),
             ],
         )
-        .map_err(|e| {
-            ErgataiError::internal(format!("Failed to insert lock: {}", e))
-        })?;
+        .map_err(|e| ErgataiError::internal(format!("Failed to insert lock: {}", e)))?;
 
         // Audit log
         let now_audit = Utc::now().to_rfc3339();
@@ -975,9 +973,7 @@ impl FileLockManager {
                  WHERE token_id = ?1 AND file_path = ?2",
                     params![token_id, normalized_path],
                 )
-                .map_err(|e| {
-                    ErgataiError::internal(format!("Failed to update lock: {}", e))
-                })?;
+                .map_err(|e| ErgataiError::internal(format!("Failed to update lock: {}", e)))?;
 
                 // Log to audit IN SAME TRANSACTION (avoid reentrant lock)
                 let now_audit = Utc::now().to_rfc3339();
@@ -1116,9 +1112,7 @@ impl FileLockManager {
                     .ok_or_else(|| ErgataiError::InvalidPath("Path has no parent".to_string()))?;
                 let filename = full_path
                     .file_name()
-                    .ok_or_else(|| {
-                        ErgataiError::InvalidPath("Path has no filename".to_string())
-                    })?;
+                    .ok_or_else(|| ErgataiError::InvalidPath("Path has no filename".to_string()))?;
 
                 // Canonicalize parent (must exist)
                 let canonical_parent = parent.canonicalize().map_err(|e| {
@@ -1663,7 +1657,8 @@ impl FileLockManager {
                 );
                 return Ok(());
             }
-            Err(ErgataiError::LockConflict(_)) | Err(ErgataiError::LockConflictWithRetry { .. }) => {
+            Err(ErgataiError::LockConflict(_))
+            | Err(ErgataiError::LockConflictWithRetry { .. }) => {
                 // Lock is held, need to wait
                 tracing::info!(
                     file_path = file_path,
@@ -2560,9 +2555,7 @@ impl FileLockManager {
                      WHERE token_id = ?2 AND file_path = ?3 AND status = 'ACTIVE'",
                     params![now, token.id.as_str(), file_path],
                 )
-                .map_err(|e| {
-                    ErgataiError::internal(format!("Failed to downgrade lock: {}", e))
-                })?;
+                .map_err(|e| ErgataiError::internal(format!("Failed to downgrade lock: {}", e)))?;
 
                 tx.commit().map_err(|e| {
                     ErgataiError::internal(format!("Failed to commit downgrade: {}", e))
@@ -2574,18 +2567,14 @@ impl FileLockManager {
             Some("READ") => {
                 Ok(()) // Already READ, no-op
             }
-            Some(other) => {
-                Err(ErgataiError::InvalidArgument(format!(
-                    "Cannot downgrade lock in {} mode",
-                    other
-                )))
-            }
-            None => {
-                Err(ErgataiError::NotFound(format!(
-                    "No active lock found for token {} on file {}",
-                    token.id, file_path
-                )))
-            }
+            Some(other) => Err(ErgataiError::InvalidArgument(format!(
+                "Cannot downgrade lock in {} mode",
+                other
+            ))),
+            None => Err(ErgataiError::NotFound(format!(
+                "No active lock found for token {} on file {}",
+                token.id, file_path
+            ))),
         }
     }
 

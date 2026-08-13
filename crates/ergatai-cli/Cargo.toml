@@ -33,9 +33,15 @@ ratatui.workspace = true
 crossterm.workspace = true
 
 # Terminal utilities
-dialoguer = "0.11"
+dialoguer = "0.11"   # retained for first-run setup wizard (not in main TUI loop)
 console = "0.15"
-indicatif = "0.17"
+tui-textarea-2 = "0.12"
+tui-markdown = "0.3"
+unicode-width = "0.1"
+
+# Phase 3: syntax highlighting + diff
+syntect.workspace = true
+imara-diff.workspace = true
 
 # Utilities
 uuid.workspace = true

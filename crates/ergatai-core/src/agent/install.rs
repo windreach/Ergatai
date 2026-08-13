@@ -14,17 +14,7 @@ const ALLOWED_PREFIXES: &[&str] = &[
 ];
 
 /// Shell metacharacters that could be used for command injection
-const SHELL_METACHARACTERS: &[&str] = &[
-    ";",
-    "&&",
-    "||",
-    "|",
-    "$(",
-    "`",
-    ">",
-    "<",
-    "&",
-];
+const SHELL_METACHARACTERS: &[&str] = &[";", "&&", "||", "|", "$(", "`", ">", "<", "&"];
 
 /// Validate that an install command is safe to execute
 fn validate_install_command(cmd: &str) -> Result<()> {

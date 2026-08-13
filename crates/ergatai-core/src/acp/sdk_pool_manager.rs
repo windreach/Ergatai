@@ -262,7 +262,10 @@ pub async fn acp_pool_shutdown_all() {
         return;
     }
 
-    tracing::info!(count = agent_names.len(), "Shutting down all agent pools...");
+    tracing::info!(
+        count = agent_names.len(),
+        "Shutting down all agent pools..."
+    );
     for agent_name in agent_names {
         if let Err(e) = acp_pool_shutdown(agent_name.clone()).await {
             tracing::warn!(agent = %agent_name, error = %e, "Failed to shutdown agent pool");

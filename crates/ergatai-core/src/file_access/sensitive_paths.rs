@@ -17,8 +17,8 @@ const SYSTEM_SENSITIVE_PATTERNS: &[&str] = &[
     ".env.*",
     "**/.env",
     "**/.env.*",
-    "*.env",      // Files ending with .env (e.g., prod.env, development.env)
-    "**/*.env",   // Nested files ending with .env
+    "*.env",    // Files ending with .env (e.g., prod.env, development.env)
+    "**/*.env", // Nested files ending with .env
     // Git internal files
     ".git/**",
     ".gitignore",

@@ -1,4 +1,8 @@
-//! UI module - Terminal user interface components
+//! UI module - full-screen ratatui TUI for the chat interface.
 
-pub mod chat;
-pub mod progress;
+pub mod app;
+pub mod event;
+pub mod input;
+pub mod render;
+pub mod runner;
+pub mod widgets;

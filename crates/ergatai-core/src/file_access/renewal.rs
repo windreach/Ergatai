@@ -81,9 +81,7 @@ impl RenewalManager {
                     "UPDATE system_tokens SET expires_at = ?1 WHERE id = ?2",
                     params![new_expiry.to_rfc3339(), token_id],
                 )
-                .map_err(|e| {
-                    ErgataiError::internal(format!("Failed to renew token: {}", e))
-                })?;
+                .map_err(|e| ErgataiError::internal(format!("Failed to renew token: {}", e)))?;
 
                 tx.commit()
                     .map_err(|e| ErgataiError::internal(format!("Failed to commit: {}", e)))?;
@@ -95,18 +93,14 @@ impl RenewalManager {
                 );
                 Ok(new_expiry.to_rfc3339())
             }
-            Some(status) => {
-                Err(ErgataiError::InvalidArgument(format!(
-                    "Cannot renew token in {} status",
-                    status
-                )))
-            }
-            None => {
-                Err(ErgataiError::NotFound(format!(
-                    "System token {} not found",
-                    token_id
-                )))
-            }
+            Some(status) => Err(ErgataiError::InvalidArgument(format!(
+                "Cannot renew token in {} status",
+                status
+            ))),
+            None => Err(ErgataiError::NotFound(format!(
+                "System token {} not found",
+                token_id
+            ))),
         }
     }
 
@@ -170,9 +164,7 @@ impl RenewalManager {
                      WHERE token_id = ?2 AND file_path = ?3 AND status = 'ACTIVE'",
                     params![new_expiry.to_rfc3339(), token_id, file_path],
                 )
-                .map_err(|e| {
-                    ErgataiError::internal(format!("Failed to renew lock: {}", e))
-                })?;
+                .map_err(|e| ErgataiError::internal(format!("Failed to renew lock: {}", e)))?;
 
                 tx.commit()
                     .map_err(|e| ErgataiError::internal(format!("Failed to commit: {}", e)))?;
@@ -185,18 +177,14 @@ impl RenewalManager {
                 );
                 Ok(new_expiry.to_rfc3339())
             }
-            Some(status) => {
-                Err(ErgataiError::InvalidArgument(format!(
-                    "Cannot renew lock in {} status",
-                    status
-                )))
-            }
-            None => {
-                Err(ErgataiError::NotFound(format!(
-                    "No active lock found for token {} on file {}",
-                    token_id, file_path
-                )))
-            }
+            Some(status) => Err(ErgataiError::InvalidArgument(format!(
+                "Cannot renew lock in {} status",
+                status
+            ))),
+            None => Err(ErgataiError::NotFound(format!(
+                "No active lock found for token {} on file {}",
+                token_id, file_path
+            ))),
         }
     }
 
@@ -238,9 +226,7 @@ impl RenewalManager {
                  WHERE token_id = ?2 AND status = 'ACTIVE'",
                 params![new_expiry.to_rfc3339(), token_id],
             )
-            .map_err(|e| {
-                ErgataiError::internal(format!("Failed to renew locks: {}", e))
-            })?;
+            .map_err(|e| ErgataiError::internal(format!("Failed to renew locks: {}", e)))?;
 
         tx.commit()
             .map_err(|e| ErgataiError::internal(format!("Failed to commit: {}", e)))?;
@@ -291,9 +277,7 @@ impl RenewalManager {
                  WHERE status = 'ACTIVE' AND expires_at < ?2",
                 params![new_expiry.to_rfc3339(), threshold.to_rfc3339()],
             )
-            .map_err(|e| {
-                ErgataiError::internal(format!("Failed to renew tokens: {}", e))
-            })?;
+            .map_err(|e| ErgataiError::internal(format!("Failed to renew tokens: {}", e)))?;
 
         // Renew expiring file locks
         let locks_renewed = conn
@@ -302,9 +286,7 @@ impl RenewalManager {
                  WHERE status = 'ACTIVE' AND expires_at < ?2",
                 params![new_expiry.to_rfc3339(), threshold.to_rfc3339()],
             )
-            .map_err(|e| {
-                ErgataiError::internal(format!("Failed to renew locks: {}", e))
-            })?;
+            .map_err(|e| ErgataiError::internal(format!("Failed to renew locks: {}", e)))?;
 
         tx.commit()
             .map_err(|e| ErgataiError::internal(format!("Failed to commit: {}", e)))?;

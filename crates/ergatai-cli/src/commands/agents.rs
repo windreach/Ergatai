@@ -1,10 +1,10 @@
 //! Agents command handlers
 
-use anyhow::Result;
 use crate::AgentsCommands;
-use ergatai_core::agent::hosted_config::list_hosted_agents;
-use ergatai_core::agent::discovery::discover_acp_runtimes;
+use anyhow::Result;
 use ergatai_core::agent::config::get_agent_config;
+use ergatai_core::agent::discovery::discover_acp_runtimes;
+use ergatai_core::agent::hosted_config::list_hosted_agents;
 
 pub async fn handle(action: AgentsCommands) -> Result<()> {
     match action {
@@ -50,7 +50,10 @@ pub async fn handle(action: AgentsCommands) -> Result<()> {
             println!("ℹ️  Agent info for: {}", name);
             match get_agent_config(&name) {
                 Ok(cfg) => {
-                    println!("  Name: {}", cfg.display_name.unwrap_or_else(|| name.clone()));
+                    println!(
+                        "  Name: {}",
+                        cfg.display_name.unwrap_or_else(|| name.clone())
+                    );
                     println!("  Command: {}", cfg.command);
                     if !cfg.args.is_empty() {
                         println!("  Args: {}", cfg.args.join(" "));

@@ -32,14 +32,18 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # CLI
 clap = { version = "4.5", features = ["derive", "env"] }
-ratatui = "0.26"
-crossterm = "0.27"
+ratatui = "0.30"
+crossterm = "0.29"
 
 # Database
 rusqlite = { version = "0.31", features = ["bundled"] }
 
 # NATS
 async-nats = "0.38"
+
+# Syntax highlighting & diff
+syntect = "5.2"
+imara-diff = "0.1"
 
 # Utilities
 uuid = { version = "1.7", features = ["v4", "serde"] }

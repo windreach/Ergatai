@@ -486,10 +486,7 @@ impl TaskScheduler {
             }
             if ancestor_to_create.exists() {
                 let canon_ancestor = ancestor_to_create.canonicalize().map_err(|e| {
-                    ErgataiError::internal(format!(
-                        "Failed to canonicalize ancestor: {}",
-                        e
-                    ))
+                    ErgataiError::internal(format!("Failed to canonicalize ancestor: {}", e))
                 })?;
                 if !canon_ancestor.starts_with(&canonical_allowed) {
                     return Err(ErgataiError::InvalidArgument(format!(

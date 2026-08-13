@@ -860,8 +860,11 @@ mod tests {
             });
 
             let settings_path = agent_dir.join("settings.json");
-            std::fs::write(&settings_path, serde_json::to_string_pretty(&settings).unwrap())
-                .unwrap();
+            std::fs::write(
+                &settings_path,
+                serde_json::to_string_pretty(&settings).unwrap(),
+            )
+            .unwrap();
 
             // Load the hosted agent config
             let config = load_hosted_agent(name).unwrap();
@@ -979,21 +982,28 @@ mod tests {
         let config_dir1 = agent_config1.env.get("CLAUDE_CONFIG_DIR").unwrap();
         let config_dir2 = agent_config2.env.get("CLAUDE_CONFIG_DIR").unwrap();
 
-        assert_ne!(config_dir1, config_dir2, "Config directories should be different");
+        assert_ne!(
+            config_dir1, config_dir2,
+            "Config directories should be different"
+        );
 
         // Verify the paths contain the agent names
-        assert!(config_dir1.contains("claude-agent1"), "Config dir 1 should contain agent name");
-        assert!(config_dir2.contains("claude-agent2"), "Config dir 2 should contain agent name");
+        assert!(
+            config_dir1.contains("claude-agent1"),
+            "Config dir 1 should contain agent name"
+        );
+        assert!(
+            config_dir2.contains("claude-agent2"),
+            "Config dir 2 should contain agent name"
+        );
 
         // Verify the paths are as expected
         assert_eq!(
-            config_dir1,
-            "/tmp/test/claude-agent1/.config",
+            config_dir1, "/tmp/test/claude-agent1/.config",
             "Config dir 1 path mismatch"
         );
         assert_eq!(
-            config_dir2,
-            "/tmp/test/claude-agent2/.config",
+            config_dir2, "/tmp/test/claude-agent2/.config",
             "Config dir 2 path mismatch"
         );
     }

@@ -16,8 +16,8 @@
 //! ergatai status
 //! ```
 
-use clap::{Parser, Subcommand};
 use anyhow::Result;
+use clap::{Parser, Subcommand};
 
 mod chat;
 mod commands;

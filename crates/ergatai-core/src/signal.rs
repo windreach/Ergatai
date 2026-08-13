@@ -171,10 +171,7 @@ async fn graceful_shutdown() -> ErgataiResult<()> {
     .await
     {
         Ok(()) => {}
-        Err(_) => tracing::warn!(
-            "File access shutdown timed out after {:?}",
-            STEP_TIMEOUT
-        ),
+        Err(_) => tracing::warn!("File access shutdown timed out after {:?}", STEP_TIMEOUT),
     }
 
     // 5. NATS (last — other steps may publish completion events)

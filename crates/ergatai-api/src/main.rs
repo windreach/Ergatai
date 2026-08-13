@@ -31,8 +31,8 @@ use tracing::{error, info};
 use ergatai_core::acp::manager::{self as acp_manager, SessionKind};
 use ergatai_core::acp::sdk_session::spawn_session_task_with_kind;
 use ergatai_core::agent::config::{get_agent_config, AgentConfig};
-use ergatai_core::agent::hosted_config::list_hosted_agents;
 use ergatai_core::agent::discovery::discover_acp_runtimes;
+use ergatai_core::agent::hosted_config::list_hosted_agents;
 use ergatai_core::cross_agent::{get_dag_scheduler, DagScheduler};
 use ergatai_core::nats;
 
@@ -228,7 +228,8 @@ async fn auth_middleware(
         return (
             StatusCode::UNAUTHORIZED,
             Json(ErrorResponse {
-                error: "Invalid or missing API token. Provide via Authorization: Bearer <token>".to_string(),
+                error: "Invalid or missing API token. Provide via Authorization: Bearer <token>"
+                    .to_string(),
             }),
         )
             .into_response();
@@ -252,8 +253,8 @@ fn validate_cwd(cwd: &str) -> Result<PathBuf, String> {
     }
 
     // Canonicalize to resolve symlinks and relative paths
-    let canonical = std::fs::canonicalize(path)
-        .map_err(|e| format!("Invalid cwd '{}': {}", cwd, e))?;
+    let canonical =
+        std::fs::canonicalize(path).map_err(|e| format!("Invalid cwd '{}': {}", cwd, e))?;
 
     // Ensure it's a directory
     if !canonical.is_dir() {
@@ -307,35 +308,31 @@ async fn create_chat(
 
     // Wait for the session id with a bounded timeout — the ACP handshake
     // can take a few seconds on a cold start.
-    let session_id = match tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        session_id_rx,
-    )
-    .await
-    {
-        Ok(Ok(Ok(id))) => id,
-        Ok(Ok(Err(e))) => {
-            error!("Failed to start ACP session: {}", e);
-            let body = Json(ErrorResponse {
-                error: format!("Failed to start session: {}", e),
-            });
-            return (StatusCode::INTERNAL_SERVER_ERROR, body).into_response();
-        }
-        Ok(Err(_)) => {
-            error!("Session id sender dropped before returning session_id");
-            let body = Json(ErrorResponse {
-                error: "Session task terminated unexpectedly".to_string(),
-            });
-            return (StatusCode::INTERNAL_SERVER_ERROR, body).into_response();
-        }
-        Err(_) => {
-            error!("Timed out waiting for ACP session to initialize");
-            let body = Json(ErrorResponse {
-                error: "Timed out waiting for session to start".to_string(),
-            });
-            return (StatusCode::GATEWAY_TIMEOUT, body).into_response();
-        }
-    };
+    let session_id =
+        match tokio::time::timeout(std::time::Duration::from_secs(30), session_id_rx).await {
+            Ok(Ok(Ok(id))) => id,
+            Ok(Ok(Err(e))) => {
+                error!("Failed to start ACP session: {}", e);
+                let body = Json(ErrorResponse {
+                    error: format!("Failed to start session: {}", e),
+                });
+                return (StatusCode::INTERNAL_SERVER_ERROR, body).into_response();
+            }
+            Ok(Err(_)) => {
+                error!("Session id sender dropped before returning session_id");
+                let body = Json(ErrorResponse {
+                    error: "Session task terminated unexpectedly".to_string(),
+                });
+                return (StatusCode::INTERNAL_SERVER_ERROR, body).into_response();
+            }
+            Err(_) => {
+                error!("Timed out waiting for ACP session to initialize");
+                let body = Json(ErrorResponse {
+                    error: "Timed out waiting for session to start".to_string(),
+                });
+                return (StatusCode::GATEWAY_TIMEOUT, body).into_response();
+            }
+        };
 
     info!(session_id = %session_id, agent = %req.agent, "Created chat session");
 

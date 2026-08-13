@@ -881,7 +881,7 @@ fn build_ergatai_mcp_servers_blocking(cwd: &str, config: &McpServerConfig) -> Ve
         Some(p) => {
             tracing::debug!(path = ?p, "Found MCP server script");
             p
-        },
+        }
         None => {
             tracing::debug!("MCP server script NOT found, skipping tool injection");
             return vec![];
@@ -918,7 +918,11 @@ fn build_ergatai_mcp_servers_blocking(cwd: &str, config: &McpServerConfig) -> Ve
         .env(env_vars);
 
     tracing::debug!(command = %js_runtime, args = ?stdio_server.args, "Created McpServer::Stdio");
-    tracing::debug!(name = "ergatai", env_count = stdio_server.env.len(), "MCP server config built");
+    tracing::debug!(
+        name = "ergatai",
+        env_count = stdio_server.env.len(),
+        "MCP server config built"
+    );
 
     let mut servers = vec![McpServer::Stdio(stdio_server)];
 
@@ -1003,7 +1007,10 @@ fn find_mcp_server_script() -> Option<PathBuf> {
             .unwrap_or_default(),
     ];
 
-    tracing::debug!(count = candidates.len(), "Checking MCP server script candidates");
+    tracing::debug!(
+        count = candidates.len(),
+        "Checking MCP server script candidates"
+    );
     for path in &candidates {
         tracing::debug!(path = ?path, exists = path.exists(), "MCP script candidate");
         if path.exists() {

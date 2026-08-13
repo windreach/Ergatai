@@ -106,9 +106,7 @@ impl LockModeManager {
                      WHERE token_id = ?2 AND file_path = ?3",
                     params![now, token_id, file_path],
                 )
-                .map_err(|e| {
-                    ErgataiError::internal(format!("Failed to upgrade lock: {}", e))
-                })?;
+                .map_err(|e| ErgataiError::internal(format!("Failed to upgrade lock: {}", e)))?;
 
                 tx.commit()
                     .map_err(|e| ErgataiError::internal(format!("Failed to commit: {}", e)))?;
@@ -128,18 +126,14 @@ impl LockModeManager {
                 );
                 Ok(())
             }
-            Some(mode) => {
-                Err(ErgataiError::InvalidArgument(format!(
-                    "Cannot upgrade lock in {} mode",
-                    mode
-                )))
-            }
-            None => {
-                Err(ErgataiError::NotFound(format!(
-                    "No active lock found for token {} on file {}",
-                    token_id, file_path
-                )))
-            }
+            Some(mode) => Err(ErgataiError::InvalidArgument(format!(
+                "Cannot upgrade lock in {} mode",
+                mode
+            ))),
+            None => Err(ErgataiError::NotFound(format!(
+                "No active lock found for token {} on file {}",
+                token_id, file_path
+            ))),
         }
     }
 
@@ -193,9 +187,7 @@ impl LockModeManager {
                      WHERE token_id = ?2 AND file_path = ?3",
                     params![now, token_id, file_path],
                 )
-                .map_err(|e| {
-                    ErgataiError::internal(format!("Failed to downgrade lock: {}", e))
-                })?;
+                .map_err(|e| ErgataiError::internal(format!("Failed to downgrade lock: {}", e)))?;
 
                 tx.commit()
                     .map_err(|e| ErgataiError::internal(format!("Failed to commit: {}", e)))?;
@@ -215,18 +207,14 @@ impl LockModeManager {
                 );
                 Ok(())
             }
-            Some(mode) => {
-                Err(ErgataiError::InvalidArgument(format!(
-                    "Cannot downgrade lock in {} mode",
-                    mode
-                )))
-            }
-            None => {
-                Err(ErgataiError::NotFound(format!(
-                    "No active lock found for token {} on file {}",
-                    token_id, file_path
-                )))
-            }
+            Some(mode) => Err(ErgataiError::InvalidArgument(format!(
+                "Cannot downgrade lock in {} mode",
+                mode
+            ))),
+            None => Err(ErgataiError::NotFound(format!(
+                "No active lock found for token {} on file {}",
+                token_id, file_path
+            ))),
         }
     }
 

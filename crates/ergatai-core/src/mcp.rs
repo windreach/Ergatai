@@ -306,13 +306,12 @@ fn is_server_running(name: &str) -> bool {
 /// Spawns the configured command and tracks the child process so it can be
 /// stopped later via [`stop_mcp_server`].
 pub async fn start_mcp_server(name: String) -> ErgataiResult<String> {
-    let config = get_mcp_server_config(name.clone())?.ok_or_else(|| {
-        ErgataiError::internal(format!("MCP server not found: {}", name))
-    })?;
+    let config = get_mcp_server_config(name.clone())?
+        .ok_or_else(|| ErgataiError::internal(format!("MCP server not found: {}", name)))?;
 
-    let cmd = config.command.ok_or_else(|| {
-        ErgataiError::internal(format!("No command configured for {}", name))
-    })?;
+    let cmd = config
+        .command
+        .ok_or_else(|| ErgataiError::internal(format!("No command configured for {}", name)))?;
 
     // Check if already running
     if is_server_running(&name) {
@@ -357,9 +356,10 @@ pub async fn start_mcp_server(name: String) -> ErgataiResult<String> {
 /// Stop a running MCP server.
 pub async fn stop_mcp_server(name: String) -> ErgataiResult<()> {
     let child_arc = {
-        let mut procs = mcp_registry().processes.lock().map_err(|_| {
-            ErgataiError::internal("Failed to lock process registry".to_string())
-        })?;
+        let mut procs = mcp_registry()
+            .processes
+            .lock()
+            .map_err(|_| ErgataiError::internal("Failed to lock process registry".to_string()))?;
         procs.remove(&name).ok_or_else(|| {
             ErgataiError::internal(format!("MCP server '{}' is not running", name))
         })?
