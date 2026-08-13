@@ -16,7 +16,7 @@
 //! └───────────────────────┬─────────────────────────────────┘
 //!                         │
 //! ┌───────────────────────▼─────────────────────────────────┐
-//! │ error.rs — unified error enum (ErgataiError)            │
+//! │ ergatai-error — unified error enum (ErgataiError)       │
 //! └─────────────────────────────────────────────────────────┘
 //! ```
 //!
@@ -33,7 +33,6 @@
 pub mod acp;
 pub mod agent;
 pub mod cross_agent;
-pub mod error;
 pub mod file_access;
 pub mod nats;
 pub mod orchestration;
@@ -42,6 +41,9 @@ pub mod signal;
 // Internal modules
 mod mcp;
 mod skills;
+
+// ── Re-export ergatai-error as the error module ──
+pub use ergatai_error as error;
 
 use std::path::PathBuf;
 use std::sync::Mutex;

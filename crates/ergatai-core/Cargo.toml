@@ -6,6 +6,9 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
+# Ergatai crates
+ergatai-error = { path = "../ergatai-error" }
+
 # Async
 tokio.workspace = true
 async-trait.workspace = true

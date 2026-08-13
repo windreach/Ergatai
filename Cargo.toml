@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/ergatai-error",
     "crates/ergatai-core",
     "crates/ergatai-cli",
     "crates/ergatai-api",

@@ -1,0 +1,29 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(bun --version)",
+      "Bash(cargo test *)",
+      "Bash(awk -F: '{print $1}')",
+      "Bash(ocr delegate *)",
+      "Bash(cargo build *)",
+      "Bash(git push *)",
+      "Bash(awk -F'::' '{print $3}')",
+      "Bash(awk -F'::tests::' '{print $1}')",
+      "Bash(awk -F'file_access::' '{print $2}')",
+      "Bash(awk '{print $2}')",
+      "Bash(git add *)",
+      "Bash(git commit -m 'fix\\(file_access\\): address review findings from OCR *)",
+      "Bash(awk '/^    pub fn log_audit/,/^    }/' src/file_access/audit.rs)",
+      "Bash(cargo check *)",
+      "Bash(cargo clippy *)",
+      "Bash(cargo fmt *)",
+      "Bash(grep \"test$\")",
+      "Bash(npm install *)",
+      "Bash(node *)",
+      "Bash(npm run *)",
+      "Bash(cat)",
+      "Read(//tmp/**)",
+      "Bash(git commit -m 'refactor: 提取 ergatai-error 为独立 crate *)"
+    ]
+  }
+}

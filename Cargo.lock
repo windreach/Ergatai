@@ -1185,6 +1185,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "dirs",
+ "ergatai-error",
  "evalexpr",
  "futures",
  "futures-util",
@@ -1212,6 +1213,18 @@ dependencies = [
  "url",
  "uuid",
  "walkdir",
+]
+
+[[package]]
+name = "ergatai-error"
+version = "0.1.0"
+dependencies = [
+ "agent-client-protocol 2.0.0",
+ "anyhow",
+ "rusqlite",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tracing",
 ]
 
 [[package]]
