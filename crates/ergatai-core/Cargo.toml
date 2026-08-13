@@ -10,6 +10,7 @@ license.workspace = true
 ergatai-error = { path = "../ergatai-error" }
 ergatai-nats = { path = "../ergatai-nats" }
 ergatai-dag = { path = "../ergatai-dag" }
+ergatai-lock = { path = "../ergatai-lock" }
 
 # Async
 tokio.workspace = true

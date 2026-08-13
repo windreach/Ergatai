@@ -1187,6 +1187,7 @@ dependencies = [
  "dirs",
  "ergatai-dag",
  "ergatai-error",
+ "ergatai-lock",
  "ergatai-nats",
  "evalexpr",
  "futures",
@@ -1242,6 +1243,31 @@ dependencies = [
  "serde_json",
  "thiserror 1.0.69",
  "tracing",
+]
+
+[[package]]
+name = "ergatai-lock"
+version = "0.1.0"
+dependencies = [
+ "async-nats",
+ "chrono",
+ "ergatai-error",
+ "ergatai-nats",
+ "futures",
+ "futures-util",
+ "git2",
+ "glob",
+ "md5",
+ "notify",
+ "rand",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tracing",
+ "uuid",
+ "walkdir",
 ]
 
 [[package]]

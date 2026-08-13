@@ -1,0 +1,29 @@
+[package]
+name = "ergatai-lock"
+version = "0.1.0"
+edition = "2021"
+authors = ["Ergatai Team"]
+license = "MIT"
+repository = "https://github.com/ergatai/ergatai"
+description = "File access control and locking for Ergatai"
+
+[dependencies]
+ergatai-error = { path = "../ergatai-error" }
+ergatai-nats = { path = "../ergatai-nats" }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+rusqlite.workspace = true
+async-nats.workspace = true
+notify = "6.1"
+md5 = "0.7"
+sha2 = "0.10"
+git2 = "0.18"
+walkdir = "2.4"
+rand = "0.8"
+glob = "0.3"
+futures = "0.3"
+futures-util = "0.3"
