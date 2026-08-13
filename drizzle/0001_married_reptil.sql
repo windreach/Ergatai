@@ -1,1 +1,0 @@
-ALTER TABLE `sub_chats` ADD `stream_id` text;

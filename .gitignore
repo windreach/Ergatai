@@ -6,6 +6,7 @@ dist/
 release/
 release-*/
 out/
+target/
 
 # IDE
 .idea/
@@ -25,20 +26,11 @@ npm-debug.log*
 .env
 .env.local
 
-# electron-vite temp files
-electron.vite.config.*.mjs
-
-# napi-rs build artifacts (empty files generated as side effects)
-src-rust/native-binding.d.ts
-src/index.d.ts
+# Rust build artifacts
+*.node
 
 # Claude binary (downloaded at build time)
 resources/bin/
-
-# Rust
-src-rust/target/
-*.node
-!index.*.node
 
 # AI tool artifacts & config (local-only)
 .plan/
@@ -56,5 +48,5 @@ docs/superpowers/
 openspec/
 AGENTS.md
 
-network-demo/target/
-src-rust/serde::Deserialize
+# Ergatai runtime data
+.ergatai/

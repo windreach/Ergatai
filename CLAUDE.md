@@ -6,59 +6,80 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Ergatai** - A multi-agent collaboration platform for AI-assisted software engineering. Transforms individual AI coding assistants into a coordinated engineering team with parallel task execution, safe concurrent file access, and DAG-based workflow orchestration.
 
-Built with **Rust** core (performance + safety), **ACP** (Agent Client Protocol) for standardized agent communication, embedded **NATS** event bus for reliable messaging, and **Electron + React** frontend.
+**Pure Rust implementation** using **ACP (Agent Client Protocol)** for standardized agent communication, embedded **NATS** event bus for reliable messaging, and **DAG-based orchestration engine** with template-driven data flow.
 
 ## Commands
 
-### Development
+### Build and Test
 
 ```bash
-# Frontend (Electron + React)
-bun run dev              # Start Electron with hot reload
+# Build all crates
+cargo build --workspace
 
-# Rust backend
-cd src-rust
-cargo build              # Build Rust library
-cargo test --lib         # Run all tests (418 tests)
-cargo test --lib <module_name>  # Run specific module tests
-cargo clippy -- -D warnings     # Lint (treats warnings as errors)
-cargo fmt              # Format code
+# Build release version
+cargo build --release --workspace
 
-# Build everything
-bun run build            # Compile TypeScript + Rust
-bun run build:rust       # Build Rust release binary
-bun run build:napi       # Build NAPI bindings
+# Run tests
+cargo test --workspace
 
-# Package for distribution
-bun run package          # Package for current platform
-bun run package:mac      # Build macOS (DMG + ZIP)
-bun run package:win      # Build Windows (NSIS + portable)
-bun run package:linux    # Build Linux (AppImage + DEB)
+# Run specific crate tests
+cargo test -p ergatai-core
+cargo test -p ergatai-cli
+cargo test -p ergatai-api
+
+# Lint
+cargo clippy --workspace -- -D warnings
+
+# Format
+cargo fmt --all
 ```
 
-### Database (Drizzle + SQLite)
+### Run
 
 ```bash
-bun run db:generate      # Generate migrations from schema
-bun run db:push          # Push schema directly (dev only)
+# Run CLI
+cargo run --bin ergatai -- chat
+cargo run --bin ergatai -- chat --agent claude-code
+cargo run --bin ergatai -- agents list
+cargo run --bin ergatai -- dag submit workflow.md
+
+# Run API server
+cargo run --bin ergatai-api -- --port 3000
 ```
 
 ## Architecture
 
 ### Layer Responsibilities
 
-| Layer | Language | Responsibility |
-|-------|----------|----------------|
-| **Frontend** (`src/renderer/`) | TypeScript/React | UI layer, user interactions |
-| **Main Process** (`src/main/`) | TypeScript | Electron main, tRPC routers, DB access |
-| **Rust Backend** (`src-rust/src/`) | Rust | Core logic, ACP protocol, NATS, file access control |
+| Layer | Crate | Responsibility |
+|-------|-------|----------------|
+| **CLI** | `ergatai-cli` | Interactive terminal interface, user interactions |
+| **Core** | `ergatai-core` | All business logic, ACP, NATS, file access control |
+| **API** | `ergatai-api` | HTTP/WebSocket server for future GUI |
 
-**Fork Principle**: Frontend + Main TS are forked from 21st Agents. When inconsistencies arise, **Rust backend is the source of truth**.
-
-### Call Chain
+### Workspace Structure
 
 ```
-Frontend (React) → tRPC → Main (TypeScript) → NAPI-RS → Rust (core logic)
+crates/
+├── ergatai-core/    # Core library (~30,000 lines)
+│   ├── src/
+│   │   ├── acp/          # ACP protocol layer
+│   │   ├── nats/         # NATS messaging system
+│   │   ├── orchestration/# DAG orchestration engine
+│   │   ├── cross_agent/  # Multi-agent collaboration
+│   │   ├── file_access/  # File locking and access control
+│   │   └── agent/        # Agent discovery and configuration
+│   └── Cargo.toml
+├── ergatai-cli/     # CLI binary
+│   ├── src/
+│   │   ├── main.rs       # Entry point, command parsing
+│   │   ├── commands/     # Command handlers
+│   │   └── ui/           # TUI components
+│   └── Cargo.toml
+└── ergatai-api/     # API server
+    ├── src/
+    │   └── main.rs       # HTTP/WebSocket endpoints
+    └── Cargo.toml
 ```
 
 ### Communication Architecture (Critical!)
@@ -75,46 +96,71 @@ Frontend (React) → tRPC → Main (TypeScript) → NAPI-RS → Rust (core logic
 ```
 User request: "Refactor this module with 3 agents"
     ↓
-Main Agent (claude-code) outputs DAG markdown
+CLI generates DAG definition
     ↓
-Ergatai parses DAG → NATS distributes tasks → Sub-agents A/B/C (ACP execution)
+DagScheduler parses → NATS distributes tasks → Sub-agents A/B/C (ACP execution)
                    ↑ NATS events relay completion
 ```
 
-### Rust Backend Modules
+### Core Modules
 
-**Core Infrastructure:**
-- `acp/` - ACP protocol layer (session management, agent pool, SDK integration)
-- `nats/` - NATS server management, JetStream streams, event bus, task queues
-- `orchestration/` - DAG parser, template engine ({{var}}), context management
+**ACP Protocol (`acp/`):**
+- `manager.rs` - Session lifecycle management
+- `sdk_session.rs` - ACP SDK-based sessions
+- `sdk_pool.rs` - Session pooling for efficiency
+- `persistence.rs` - Session state persistence
 
-**Multi-Agent Collaboration:**
-- `cross_agent/` - DAG scheduler, task scheduler, agent launcher, message router
-- `file_access/` - Token-based file locking, lock manager, watchdog, snapshots, audit
-- `agent/` - Agent discovery, configuration (13 built-in + hosted agents)
+**NATS Messaging (`nats/`):**
+- `manager.rs` - NATS server management
+- `streams.rs` - JetStream stream definitions
+- `event_bus.rs` - Typed event publishing
 
-**Integration:**
-- `napi/` - NAPI bindings (Rust → TypeScript FFI)
-- `error/` - Error types (ErgataiError enum)
+**DAG Orchestration (`orchestration/`):**
+- `task_graph.rs` - DAG parsing and validation
+- `template.rs` - Template engine ({{var}} rendering)
+- `dag_context.rs` - Context management for data flow
+
+**Multi-Agent Collaboration (`cross_agent/`):**
+- `dag_scheduler.rs` - DAG execution scheduling
+- `task_scheduler.rs` - Individual task scheduling
+- `agent_launcher.rs` - Agent process management
+- `message_router.rs` - Inter-agent message routing
+
+**File Access Control (`file_access/`):**
+- `lock_manager.rs` - Token-based locking (READ/WRITE/ADMIN)
+- `token.rs` - Two-level token system (SystemToken + FileToken)
+- `watchdog.rs` - Heartbeat monitoring and lock reclamation
+- `snapshot.rs` - Git snapshot creation before writes
+- `audit.rs` - Security audit logging
+
+**Agent Management (`agent/`):**
+- `config.rs` - Agent configuration structures
+- `discovery.rs` - Agent discovery (built-in + custom)
+- `hosted_config.rs` - User-defined agent configurations
 
 ### File Access Control (Multi-Agent Safety)
 
 Token-based locking prevents conflicting edits:
 
-```
-Agent A (WRITE lock on src/foo.rs)
-    ↓ holds token
-    ↓ modifies file
-    ↓ creates git snapshot
-    ↓ releases lock
-Agent B (waits for WRITE lock → acquires → continues)
+```rust
+// Agent A acquires WRITE lock
+let token = lock_manager.acquire_write("src/foo.rs").await?;
+
+// Modify file
+fs::write("src/foo.rs", new_content)?;
+
+// Automatic git snapshot
+snapshot_manager.create_snapshot("src/foo.rs")?;
+
+// Release lock (Agent B can now acquire)
+lock_manager.release(token).await?;
 ```
 
 **Two-level Token System:**
 - `SystemToken` - Session-level admission (binds agent_id + session_id)
 - `FileToken` - Operation-level (READ/WRITE/ADMIN scope)
 
-**Database**: `{project_root}/.ergatai/locks.db` (SQLite with 5 tables)
+**Database**: `{project_root}/.ergatai/locks.db` (SQLite)
 
 **Single Agent Mode**: When only one agent is active, automatically bypasses approval flow and conflict arbitration (5-second hysteresis debounce).
 
@@ -122,11 +168,11 @@ Agent B (waits for WRITE lock → acquires → continues)
 
 ```markdown
 ## Task A (Analyze code)
-- **agent**: agent-a
+- **agent**: claude-code
 - **task**: tasks/analyze.md
 
 ## Task B (Write tests)
-- **agent**: agent-b
+- **agent**: cursor
 - **task**: tasks/test.md
 - **depends_on**: [Task A]
 - **input**: "Analysis: {{TaskA.review_result}}"
@@ -159,220 +205,210 @@ ergatai.
 - `FILE_EVENTS` - File ready/error notifications
 - `LOCK_WAITERS` - Lock waiting queue
 
-## Database (Drizzle ORM)
+## Database
 
-**Location**: `{userData}/data/agents.db` (SQLite)
+**Location**: `{project_root}/.ergatai/ergatai.db` (SQLite)
 
-**Schema**: `src/main/lib/db/schema/index.ts`
+**Key Tables:**
+- `projects` - Project information
+- `agents` - Agent configurations
+- `sessions` - Session records
+- `tasks` - Task execution records
 
-```typescript
-// Three main tables:
-projects    → id, name, path (local folder), timestamps
-chats       → id, name, projectId, worktree fields, timestamps
-sub_chats   → id, name, chatId, sessionId, mode, messages (JSON)
-```
-
-**Auto-migration**: On app start, `initDatabase()` runs migrations from `drizzle/` folder.
-
-## Frontend Stack
-
-| Technology | Purpose |
-|------------|---------|
-| Electron 33.4.5 | Desktop app shell |
-| React 19 | UI framework |
-| TypeScript 5.4.5 | Type safety |
-| Tailwind CSS | Styling |
-| Radix UI | Component library |
-| Jotai | UI state (selected chat, sidebar) |
-| Zustand | Sub-chat tabs (persisted to localStorage) |
-| React Query | Server state via tRPC |
-| tRPC + trpc-electron | Type-safe IPC |
+**Lock Database**: `{project_root}/.ergatai/locks.db` (SQLite with 5 tables)
 
 ## Current Status
 
 ### ✅ Completed
 
-**Phase 1-4: Core Infrastructure**
-- NATS infrastructure + Pool task queue (VecDeque → JetStream dual mode)
-- Template engine + data flow pipeline (DagContext + {{var}} rendering)
-- DAG event-driven scheduling (NATS pub/sub with fallback)
-- Markdown orchestration (input/output/retry/timeout/priority)
+**Phase 1: Architecture Migration**
+- Migrated from Electron/React/TypeScript to pure Rust
+- Created workspace structure (core + cli + api)
+- Removed all NAPI bindings
+- Updated all dependencies
 
-**Phase 5: Inter-Agent Communication**
-- Message router (detect @mentions, route via NATS)
-- AgentMessagePayload for agent-to-agent messages
-- NAPI bindings: `nats_route_agent_message` / `nats_scan_and_route_mentions`
-
-**Phase 6: File Access Control**
-- Token permission model (READ/WRITE/ADMIN) + path scope matching
-- Two-level Token system (SystemToken admission + FileToken operations)
-- SQLite persistent lock manager (transaction-safe, 5 tables)
-- Lock upgrade/downgrade + renewal + heartbeat
-- Watchdog progressive timeout + automatic reclamation
-- Git snapshot (auto-create before WRITE, for rollback)
-- Security audit log + sensitive path detection
-- Conflict arbitration (WRITE conflict priority)
-- Performance optimization (lock cache + BinaryHeap priority queue)
-- Single agent mode auto-bypass (5s hysteresis, skip approval + conflict check)
-- Approval flow (escalate → respond_approval interaction)
-- READ_LATEST waiter model (notify readers after WRITE completes)
-- Multi-project support (per-project lock_manager / snapshot_manager / watchdog)
-
-**Phase 7: NATS File Event Streams**
-- FILE_EVENTS JetStream stream (WorkQueue retention)
-- FileEventsConsumer background processing (file.ready / file.error)
-- Event notification API (notify_file_ready / notify_file_error)
-- EventBus typed publishing (publish_file_ready / publish_file_error)
-
-**Phase 8: Hosted Agent Configuration** (Latest)
-- `hosted_config.rs` module for user-defined agent configs
-- MCP server injection (system tools for agents)
-- Security: path traversal protection, command injection prevention
-- Avatar path validation, agent_base whitelist
+**Phase 2: Core Infrastructure**
+- NATS infrastructure + JetStream streams
+- ACP protocol integration + session pool management
+- DAG orchestration engine + template system
+- File access control + token-based locking
+- Agent discovery + configuration management
 
 ### 🚧 In Progress
 
-**Frontend Integration:**
-- Replacing `mock-api.ts` with real tRPC calls
-- Implementing DAG submission UI
-- Real-time progress display (listen to NATS events)
-- File conflict approval UI
+**CLI Implementation:**
+- Interactive chat interface
+- Agent selection and configuration
+- Real-time progress display
 
-**End-to-End Testing:**
-- Complete multi-agent collaboration scenario tests
-- Frontend → Backend → Agent integration tests
-- Real DAG execution flow verification
+**Integration Testing:**
+- End-to-end multi-agent collaboration scenarios
+- CLI → Backend → Agent complete flow
 
 ### ❌ Known Issues
 
 **Test Isolation:**
-- `test_global_dag_scheduler_lifecycle` fails intermittently when run with other tests (shared global state issue)
-- Passes when run individually
-- Not caused by recent changes, pre-existing issue
+- Some tests may fail intermittently when run together (shared global state)
+- Pass when run individually
+- Pre-existing issue from original codebase
 
 ## Code Statistics
 
-- **Rust**: ~30,000 lines across 92 files
-- **Tests**: 418 passing (unit tests, exclude `agent::discovery` which hangs)
-- **TypeScript**: Frontend + Main process
+- **Rust**: ~30,000 lines across all crates
+- **Tests**: 418+ unit tests
+- **Crates**: 3 (ergatai-core, ergatai-cli, ergatai-api)
 
 ## Debugging Tips
 
-### First Install Issues
-
-When testing auth flows or fresh install behavior:
+### Build Issues
 
 ```bash
-# Clear all app data
-rm -rf ~/Library/Application\ Support/Agents\ Dev/
+# Clean build
+cargo clean
+cargo build --workspace
 
-# Clear preferences
-defaults delete dev.21st.agents.dev  # Dev mode
-defaults delete dev.21st.agents      # Production
+# Check dependencies
+cargo tree | grep <crate-name>
 
-# Run in dev mode
-bun run dev
+# Verbose build
+cargo build --workspace --verbose
 ```
 
-**Common bugs:**
-- OAuth deep link not working on first launch (macOS Launch Services delay)
-- Folder dialog not appearing (window focus timing)
-
-### Debug Mode
+### Runtime Issues
 
 ```bash
-# Start debug server
-bun packages/debug/src/server.ts &
+# Enable debug logging
+RUST_LOG=debug cargo run --bin ergatai -- chat
 
-# Instrument renderer code (no import needed)
-fetch('http://localhost:7799/log',{
-  method:'POST',
-  headers:{'Content-Type':'application/json'},
-  body:JSON.stringify({tag:'TAG',msg:'MESSAGE',data:{},ts:Date.now()})
-}).catch(()=>{});
-
-# Read logs
-cat .debug/logs.ndjson
-
-# Clear logs
-curl -X DELETE http://localhost:7799/logs
+# Enable trace logging
+RUST_LOG=trace cargo run --bin ergatai -- chat
 ```
 
-See `packages/debug/INSTRUCTIONS.md` for full protocol.
+### NATS Issues
 
-## File Naming Conventions
+```bash
+# Check NATS server status
+# NATS is embedded, auto-started by ergatai-core
 
-- **Components**: PascalCase (`ActiveChat.tsx`, `AgentsSidebar.tsx`)
-- **Utilities/hooks**: camelCase (`useFileUpload.ts`, `formatters.ts`)
-- **Stores**: kebab-case (`sub-chat-store.ts`, `agent-chat-store.ts`)
-- **Atoms**: camelCase with `Atom` suffix (`selectedAgentChatIdAtom`)
+# View NATS logs
+# Logs are in {project_root}/.ergatai/logs/
+```
 
 ## Important Files
 
-### Frontend
-- `src/renderer/App.tsx` - Root with providers
-- `src/renderer/features/agents/main/active-chat.tsx` - Main chat component
-- `src/renderer/features/agents/atoms/index.ts` - Agent UI state atoms
-- `src/main/lib/trpc/routers/claude.ts` - Claude SDK integration
+### Core Library
+- `crates/ergatai-core/src/lib.rs` - Library entry point
+- `crates/ergatai-core/src/acp/manager.rs` - ACP session management
+- `crates/ergatai-core/src/nats/manager.rs` - NATS global state
+- `crates/ergatai-core/src/file_access/lock_manager.rs` - Lock management (largest file)
+- `crates/ergatai-core/src/cross_agent/dag_scheduler.rs` - DAG scheduling
 
-### Backend
-- `src/main/lib/db/schema/index.ts` - Drizzle schema (source of truth)
-- `src/main/lib/db/index.ts` - DB initialization + auto-migrate
+### CLI
+- `crates/ergatai-cli/src/main.rs` - CLI entry point, command parsing
+- `crates/ergatai-cli/src/commands/` - Command implementations
 
-### Rust
-- `src-rust/src/lib.rs` - Library entry point
-- `src-rust/src/file_access/lock_manager.rs` - Core lock management (largest file)
-- `src-rust/src/acp/sdk_session.rs` - ACP session lifecycle
-- `src-rust/src/nats/manager.rs` - Global NATS state
+### API Server
+- `crates/ergatai-api/src/main.rs` - HTTP/WebSocket server
+
+### Configuration
+- `Cargo.toml` - Workspace configuration
+- `ARCHITECTURE.md` - Detailed architecture documentation
 
 ## Building & Releasing
 
-### Prerequisites (macOS notarization)
+### Development Build
 
 ```bash
-# Create keychain profile
-xcrun notarytool store-credentials "21st-notarize" \
-  --apple-id YOUR_APPLE_ID \
-  --team-id YOUR_TEAM_ID
+cargo build --workspace
 ```
 
-### Release Flow
+### Release Build
 
 ```bash
-# Full release
-bun run release
-
-# Or step by step
-bun run build
-bun run package:mac
-bun run dist:manifest
-./scripts/upload-release-wrangler.sh
-
-# After release
-# 1. Wait for notarization (2-5 min)
-# 2. Staple DMGs: cd release && xcrun stapler staple *.dmg
-# 3. Re-upload stapled DMGs
-# 4. Update changelog: gh release edit v0.0.X --notes "..."
-# 5. Upload manifests (triggers auto-updates)
-# 6. Sync to public: ./scripts/sync-to-public.sh
+cargo build --release --workspace
 ```
 
-### Version Bump
+Binaries will be in `target/release/`:
+- `ergatai` - CLI binary
+- `ergatai-api` - API server binary
+
+### Future: Packaging
 
 ```bash
-npm version patch --no-git-tag-version  # 0.0.27 → 0.0.28
+# Will be added for distribution
+# cargo install --path crates/ergatai-cli
+# cargo install --path crates/ergatai-api
 ```
 
 ## Tech Stack Summary
 
 | Layer | Technology |
 |-------|-----------|
-| Desktop | Electron 33.4.5, electron-vite, electron-builder |
-| UI | React 19, TypeScript 5.4.5, Tailwind CSS |
-| Components | Radix UI, Lucide icons, Motion, Sonner |
-| State | Jotai, Zustand, React Query |
-| Backend | tRPC, Drizzle ORM, better-sqlite3 |
-| AI | ACP Protocol (agent-client-protocol SDK) |
-| Agent Communication | NATS (async-nats 0.38) + nats-server subprocess |
-| DAG Orchestration | Custom TaskGraph + template engine + DagContext |
-| Package Manager | bun |
+| Language | Rust (100%) |
+| Agent Protocol | ACP (agent-client-protocol 2.x) |
+| Messaging | NATS (async-nats 0.38) + JetStream |
+| Database | SQLite (rusqlite 0.31) |
+| CLI Framework | clap 4.5 |
+| TUI | ratatui 0.26 + crossterm 0.27 |
+| HTTP Server | axum 0.7 |
+| Async Runtime | tokio 1.36 |
+
+## Project History
+
+This project underwent a major architecture migration from Electron/React/TypeScript to pure Rust CLI-first architecture. The old version used:
+- React frontend (forked from 21st Agents)
+- Electron main process
+- NAPI-RS bindings for Rust ↔ TypeScript FFI
+
+The new pure Rust architecture provides:
+- Better performance (no FFI overhead)
+- Simpler deployment (single binary)
+- Easier maintenance (one language)
+- Better type safety (Rust's type system throughout)
+
+## Current Development Direction
+
+**CLI-First Strategy (v0.x)**
+
+The project is currently focused on developing the **CLI conversational version**. The desktop version is planned for v1.0.0.
+
+**Architecture Design:**
+- **ergatai-core**: Core library (shared by all clients)
+- **ergatai-cli**: CLI client (current focus)
+- **ergatai-api**: API layer (GUI-ready with authentication)
+- **Desktop/Web**: v1.0.0 planned clients
+
+**Key priorities for v0.x:**
+1. Complete CLI chat interface with permission confirmation UI
+2. Improve TUI components (ratatui-based)
+3. Enhance agent discovery and configuration
+4. Add real-time progress display for DAG execution
+5. Stabilize core features for production use
+
+**v1.0.0 Features (planned):**
+- Desktop GUI application (Tauri/Electron)
+- Visual DAG editor
+- Real-time agent collaboration monitoring
+- User management and permission system
+- Enterprise features
+
+## Recent Security Improvements (2026-08-13)
+
+Comprehensive code security audit and fixes completed:
+
+**Security fixes:**
+- API path traversal protection + Bearer token authentication
+- Sensitive file detection enhanced (`*.env` patterns + path validation)
+- Configuration file permission protection (`0o600`)
+- Install command whitelist hardening (shell injection prevention)
+
+**Correctness fixes:**
+- NATS zombie process reaping
+- Signal handler improvements (proper exit codes)
+- Lock manager correctness (new file support, conflict handling)
+- CLI command conflicts resolved
+
+**Code quality:**
+- Removed hardcoded agent lists (now dynamic)
+- Fixed byte slicing panic in skills.rs
+- Improved error handling throughout

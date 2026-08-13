@@ -1,1 +1,0 @@
-ALTER TABLE `sub_chats` ADD `runtime_id` text DEFAULT 'claude';
