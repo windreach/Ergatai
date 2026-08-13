@@ -1,0 +1,20 @@
+{
+  "name": "ergatai-mcp-server",
+  "version": "1.0.0",
+  "description": "Ergatai MCP server for agent collaboration",
+  "main": "dist/index.js",
+  "type": "commonjs",
+  "scripts": {
+    "build": "esbuild src/index.ts --bundle --platform=node --target=node20 --outfile=dist/index.js --format=cjs",
+    "dev": "esbuild src/index.ts --bundle --platform=node --target=node20 --outfile=dist/index.js --format=cjs --watch"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "esbuild": "^0.20.2",
+    "typescript": "^5.4.5"
+  }
+}

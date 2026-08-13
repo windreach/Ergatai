@@ -310,7 +310,7 @@ if (!nativeBinding) {
   throw new Error(`Failed to load native binding`)
 }
 
-const { scanSkills, getSkillDetail, scanMcpServers, getMcpServerConfig, checkBuiltinServices, startMcpServer, stopMcpServer, scanLocalAgents, getAgentConfig, saveAgentConfig, generateLaunchScript, acpCreateSession, acpSendPrompt, acpCloseSession, acpListSessions, acpCloseAllSessions, acpPollEvents, acpListAgentSessions, acpLoadSession, acpResumeSession, acpRespondPermission, acpSetSessionMode, acpSetConfigOption, acpDeleteSession, acpGetPersistedSessions, acpSaveSessionMeta, acpUpdateSessionTitle, networkRegister, networkUnregister, networkSendTask, networkSendResult, networkBroadcast, networkListAgents, networkGetState, networkInitNats, networkSendFriendly, networkBroadcastFriendly, networkCreateTask, networkGetTask, networkListTasks, dagSubmit, dagProgress, dagIsComplete, dagStatus, dagGetState, setResourcesPath, discoverAcpRuntimes, getGlobalAgentConfig, setGlobalAgentConfig, saveCustomHarness, deleteCustomHarness, installAcpRuntime } = nativeBinding
+const { scanSkills, getSkillDetail, scanMcpServers, getMcpServerConfig, checkBuiltinServices, startMcpServer, stopMcpServer, scanLocalAgents, getAgentConfig, saveAgentConfig, generateLaunchScript, acpCreateSession, acpSendPrompt, acpCloseSession, acpListSessions, acpCloseAllSessions, acpPollEvents, acpListAgentSessions, acpLoadSession, acpResumeSession, acpRespondPermission, acpSetSessionMode, acpSetConfigOption, acpDeleteSession, acpGetPersistedSessions, acpSaveSessionMeta, acpUpdateSessionTitle, networkRegister, networkUnregister, networkSendTask, networkSendResult, networkBroadcast, networkListAgents, networkGetState, networkInitNats, networkSendFriendly, networkBroadcastFriendly, networkCreateTask, networkGetTask, networkListTasks, dagSubmit, dagProgress, dagIsComplete, dagStatus, dagGetState, setResourcesPath, discoverAcpRuntimes, getGlobalAgentConfig, setGlobalAgentConfig, saveCustomHarness, deleteCustomHarness, installAcpRuntime, natsInit, natsIsInitialized, natsShutdown, natsRouteAgentMessage, natsScanAndRouteMentions } = nativeBinding
 
 module.exports.scanSkills = scanSkills
 module.exports.getSkillDetail = getSkillDetail
@@ -364,3 +364,10 @@ module.exports.setGlobalAgentConfig = setGlobalAgentConfig
 module.exports.saveCustomHarness = saveCustomHarness
 module.exports.deleteCustomHarness = deleteCustomHarness
 module.exports.installAcpRuntime = installAcpRuntime
+
+// ── NATS management (for MCP RPC handler) ──
+module.exports.natsInit = natsInit
+module.exports.natsIsInitialized = natsIsInitialized
+module.exports.natsShutdown = natsShutdown
+module.exports.natsRouteAgentMessage = natsRouteAgentMessage
+module.exports.natsScanAndRouteMentions = natsScanAndRouteMentions
