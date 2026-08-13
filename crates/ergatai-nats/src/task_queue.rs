@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-use crate::error::{ErgataiError, ErgataiResult};
-use crate::nats::connection::NatsConnection;
+use ergatai_error::{ErgataiError, ErgataiResult};
+use crate::connection::NatsConnection;
 
 /// Default ack wait time (5 minutes)
 const ACK_WAIT_SECS: u64 = 300;
@@ -306,7 +306,7 @@ mod tests {
     /// Skips if nats-server is not available.
     #[tokio::test]
     async fn test_task_queue_full_flow() {
-        let server = match crate::nats::NatsServer::start().await {
+        let server = match crate::NatsServer::start().await {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("⚠️  Skipping (nats-server not available): {}", e);
@@ -314,7 +314,7 @@ mod tests {
             }
         };
 
-        let conn = crate::nats::NatsConnection::connect_to_server(&server)
+        let conn = crate::NatsConnection::connect_to_server(&server)
             .await
             .unwrap();
 
@@ -379,7 +379,7 @@ mod tests {
     /// Test empty queue returns None
     #[tokio::test]
     async fn test_consume_empty_queue() {
-        let server = match crate::nats::NatsServer::start().await {
+        let server = match crate::NatsServer::start().await {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("⚠️  Skipping (nats-server not available): {}", e);
@@ -387,7 +387,7 @@ mod tests {
             }
         };
 
-        let conn = crate::nats::NatsConnection::connect_to_server(&server)
+        let conn = crate::NatsConnection::connect_to_server(&server)
             .await
             .unwrap();
 

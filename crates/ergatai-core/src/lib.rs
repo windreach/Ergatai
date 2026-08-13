@@ -34,7 +34,6 @@ pub mod acp;
 pub mod agent;
 pub mod cross_agent;
 pub mod file_access;
-pub mod nats;
 pub mod orchestration;
 pub mod signal;
 
@@ -42,8 +41,9 @@ pub mod signal;
 mod mcp;
 mod skills;
 
-// ── Re-export ergatai-error as the error module ──
+// ── Re-export extracted crates ──
 pub use ergatai_error as error;
+pub use ergatai_nats as nats;
 
 use std::path::PathBuf;
 use std::sync::Mutex;

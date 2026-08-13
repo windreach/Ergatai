@@ -1,0 +1,22 @@
+[package]
+name = "ergatai-nats"
+version = "0.1.0"
+edition = "2021"
+authors = ["Ergatai Team"]
+license = "MIT"
+repository = "https://github.com/ergatai/ergatai"
+description = "NATS messaging infrastructure for Ergatai"
+
+[dependencies]
+ergatai-error = { path = "../ergatai-error" }
+tokio.workspace = true
+async-nats.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+futures = "0.3"
+futures-util = "0.3"
+dirs = "5.0"
+md5 = "0.7"

@@ -9,8 +9,8 @@ use async_nats::jetstream::stream::{self, Config};
 use async_nats::Client;
 use tracing::{debug, info};
 
-use crate::error::{ErgataiError, ErgataiResult};
-use crate::nats::server::NatsServer;
+use ergatai_error::{ErgataiError, ErgataiResult};
+use crate::server::NatsServer;
 
 /// NATS connection wrapper
 ///
@@ -253,7 +253,7 @@ mod tests {
     async fn test_connection_and_pubsub() {
         use futures_util::StreamExt;
 
-        let server = match crate::nats::NatsServer::start().await {
+        let server = match crate::NatsServer::start().await {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("⚠️  Skipping (nats-server not available): {}", e);
@@ -284,7 +284,7 @@ mod tests {
     /// Test stream creation
     #[tokio::test]
     async fn test_create_stream() {
-        let server = match crate::nats::NatsServer::start().await {
+        let server = match crate::NatsServer::start().await {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("⚠️  Skipping (nats-server not available): {}", e);

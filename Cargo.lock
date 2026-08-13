@@ -1186,6 +1186,7 @@ dependencies = [
  "chrono",
  "dirs",
  "ergatai-error",
+ "ergatai-nats",
  "evalexpr",
  "futures",
  "futures-util",
@@ -1225,6 +1226,24 @@ dependencies = [
  "serde_json",
  "thiserror 1.0.69",
  "tracing",
+]
+
+[[package]]
+name = "ergatai-nats"
+version = "0.1.0"
+dependencies = [
+ "async-nats",
+ "chrono",
+ "dirs",
+ "ergatai-error",
+ "futures",
+ "futures-util",
+ "md5",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

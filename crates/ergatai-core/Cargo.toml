@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 # Ergatai crates
 ergatai-error = { path = "../ergatai-error" }
+ergatai-nats = { path = "../ergatai-nats" }
 
 # Async
 tokio.workspace = true

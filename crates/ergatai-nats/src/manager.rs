@@ -6,9 +6,9 @@ use std::sync::OnceLock;
 use tokio::sync::RwLock;
 use tracing::info;
 
-use crate::error::ErgataiResult;
-use crate::nats::file_access_streams::all_file_access_stream_configs;
-use crate::nats::{NatsConnection, NatsServer};
+use ergatai_error::ErgataiResult;
+use crate::file_access_streams::all_file_access_stream_configs;
+use crate::{NatsConnection, NatsServer};
 
 /// Global NATS state
 struct NatsState {
@@ -75,7 +75,7 @@ pub async fn init_nats() -> ErgataiResult<NatsConnection> {
 /// Returns an error if any required stream cannot be obtained or created. The caller
 /// decides whether to fail-fast or degrade — errors are never silently swallowed here.
 async fn init_jetstream_streams(connection: &NatsConnection) -> ErgataiResult<()> {
-    use crate::error::ErgataiError;
+    use ergatai_error::ErgataiError;
 
     let jetstream = async_nats::jetstream::new(connection.client().clone());
 

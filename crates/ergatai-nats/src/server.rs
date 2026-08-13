@@ -9,7 +9,7 @@ use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{error, info, warn};
 
-use crate::error::{ErgataiError, ErgataiResult};
+use ergatai_error::{ErgataiError, ErgataiResult};
 
 /// Default NATS server port
 const DEFAULT_PORT: u16 = 4222;

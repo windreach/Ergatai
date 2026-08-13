@@ -6,9 +6,9 @@
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
-use crate::error::{ErgataiError, ErgataiResult};
-use crate::nats::connection::NatsConnection;
-use crate::nats::events::*;
+use ergatai_error::{ErgataiError, ErgataiResult};
+use crate::connection::NatsConnection;
+use crate::events::*;
 
 /// Event bus for typed NATS pub/sub
 ///
@@ -465,7 +465,7 @@ mod tests {
     /// Test publish + receive roundtrip for TaskSubmitPayload
     #[tokio::test]
     async fn test_event_bus_task_submit_roundtrip() {
-        let server = match crate::nats::NatsServer::start().await {
+        let server = match crate::NatsServer::start().await {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("⚠️  Skipping (nats-server not available): {}", e);
@@ -473,7 +473,7 @@ mod tests {
             }
         };
 
-        let conn = crate::nats::NatsConnection::connect_to_server(&server)
+        let conn = crate::NatsConnection::connect_to_server(&server)
             .await
             .unwrap();
         let bus = EventBus::new(conn);
@@ -510,7 +510,7 @@ mod tests {
     /// Test NodeComplete publish + receive
     #[tokio::test]
     async fn test_event_bus_node_complete_roundtrip() {
-        let server = match crate::nats::NatsServer::start().await {
+        let server = match crate::NatsServer::start().await {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("⚠️  Skipping (nats-server not available): {}", e);
@@ -518,7 +518,7 @@ mod tests {
             }
         };
 
-        let conn = crate::nats::NatsConnection::connect_to_server(&server)
+        let conn = crate::NatsConnection::connect_to_server(&server)
             .await
             .unwrap();
         let bus = EventBus::new(conn);
@@ -553,7 +553,7 @@ mod tests {
     /// Test NodeFailed publish + receive
     #[tokio::test]
     async fn test_event_bus_node_failed_roundtrip() {
-        let server = match crate::nats::NatsServer::start().await {
+        let server = match crate::NatsServer::start().await {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("⚠️  Skipping (nats-server not available): {}", e);
@@ -561,7 +561,7 @@ mod tests {
             }
         };
 
-        let conn = crate::nats::NatsConnection::connect_to_server(&server)
+        let conn = crate::NatsConnection::connect_to_server(&server)
             .await
             .unwrap();
         let bus = EventBus::new(conn);
