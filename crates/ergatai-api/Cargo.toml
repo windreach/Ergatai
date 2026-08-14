@@ -40,7 +40,7 @@ tracing-subscriber.workspace = true
 clap.workspace = true
 
 # MCP protocol (rmcp SDK)
-rmcp = { version = "1.8", features = ["server", "transport-streamable-http-server", "macros"] }
+rmcp = { version = "3", features = ["server", "transport-streamable-http-server", "macros"] }
 schemars = "1.0"
 tokio-util = "0.7"
 

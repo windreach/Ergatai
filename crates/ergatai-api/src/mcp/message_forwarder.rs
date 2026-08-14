@@ -4,15 +4,24 @@
 //! This completes the message routing loop:
 //! Agent A → send_message (MCP) → NATS → this forwarder → Agent B (ACP)
 
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
+use std::time::Duration;
 
 use ergatai_acp::agent_registry::AgentRegistry;
-use ergatai_acp::http_client::http_connection_manager;
-use ergatai_acp::manager::SessionKind;
 use ergatai_nats::{AgentMessagePayload, EventBus};
 use futures::StreamExt;
+use reqwest::Client;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
+
+/// Shared HTTP client for forwarding messages (reused across all forwards)
+static HTTP_CLIENT: LazyLock<Client> = LazyLock::new(|| {
+    Client::builder()
+        .timeout(Duration::from_secs(30))
+        .connect_timeout(Duration::from_secs(10))
+        .build()
+        .expect("Failed to create HTTP client")
+});
 
 /// Start the NATS → ACP message forwarder as a background task.
 ///
@@ -124,52 +133,59 @@ async fn handle_nats_message(
 
 /// Forward a message to an agent via ACP protocol.
 ///
-/// Uses the HttpConnectionManager to maintain persistent connections.
-/// If not already connected, creates a new connection.
+/// Uses direct HTTP POST to the agent's /acp endpoint.
+/// This is simpler than using the full ACP SDK client for basic message forwarding.
 async fn forward_via_acp(
     payload: &AgentMessagePayload,
     acp_endpoint: &str,
 ) -> anyhow::Result<()> {
-    let manager = http_connection_manager();
-
     // Format the message content
     let message_text = format!(
         "来自 {} 的消息:\n\n{}",
         payload.from_agent, payload.content
     );
 
-    // Try to send prompt to the agent
-    // If not connected, this will fail - we need to connect first
-    match manager.send_prompt(&payload.to_agent, message_text.clone()).await {
-        Ok(_) => {
-            info!("Message forwarded to {} successfully", payload.to_agent);
-            Ok(())
+    info!("Forwarding to {} via HTTP POST to {}/acp", payload.to_agent, acp_endpoint);
+
+    // Use the shared HTTP client (with timeout configured)
+    let client = &HTTP_CLIENT;
+
+    // For simplicity, we use a deterministic session ID based on the agent
+    // This allows agents to maintain state per-sender if needed
+    // In production, should use proper session lifecycle management
+    let session_id = format!("forwarded-{}", payload.from_agent);
+
+    // Build session/prompt request
+    let prompt_request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "session/prompt",
+        "params": {
+            "sessionId": session_id,
+            "prompt": [
+                {
+                    "type": "text",
+                    "text": message_text
+                }
+            ]
         }
-        Err(_) => {
-            // Not connected yet, try to connect
-            info!("Not connected to {}, establishing ACP connection", payload.to_agent);
+    });
 
-            // Use a default working directory for forwarded messages
-            // TODO: Store agent's preferred cwd in registry during set_acp_endpoint
-            let cwd = std::env::var("ERGATAI_DEFAULT_CWD")
-                .or_else(|_| std::env::current_dir().map(|p| p.to_string_lossy().to_string()))
-                .unwrap_or_else(|_| ".".to_string());
+    // Send to agent's ACP endpoint
+    let response = client
+        .post(format!("{}/acp", acp_endpoint))
+        .header("Content-Type", "application/json")
+        .json(&prompt_request)
+        .send()
+        .await?;
 
-            // Connect to the agent
-            manager.connect(
-                &payload.to_agent,
-                acp_endpoint,
-                cwd,
-                SessionKind::Chat,
-            ).await?;
+    let status = response.status();
+    let body = response.text().await?;
 
-            info!("Connected to {}, sending message", payload.to_agent);
-
-            // Now send the message
-            manager.send_prompt(&payload.to_agent, message_text).await?;
-
-            info!("Message forwarded to {} successfully", payload.to_agent);
-            Ok(())
-        }
+    if !status.is_success() {
+        anyhow::bail!("Agent returned error status {}: {}", status, body);
     }
+
+    info!("Message forwarded to {} successfully (status: {})", payload.to_agent, status);
+    Ok(())
 }

@@ -517,7 +517,16 @@ Check the status of a DAG execution.
 
 To create an agent that works with Ergatai:
 
-### 1. Start an ACP HTTP server
+### 1. Start an ACP HTTP server on a random port
+
+Your agent should bind to port 0 to let the OS assign a random available port:
+
+```rust
+// Bind to port 0 - OS will assign a random available port
+let listener = TcpListener::bind("127.0.0.1:0").await?;
+let actual_port = listener.local_addr()?.port();
+info!("ACP HTTP server listening on port {}", actual_port);
+```
 
 Your agent should expose these endpoints:
 
@@ -528,9 +537,9 @@ POST /acp/session/:id/close  → Close a session
 GET  /health                  → Health check
 ```
 
-### 2. Connect to Ergatai MCP
+### 2. Connect to Ergatai MCP with your port
 
-Send a JSON-RPC initialize request to Ergatai:
+Send a JSON-RPC initialize request to Ergatai, **including your ACP port in the `_meta` field**:
 
 ```bash
 curl -X POST http://localhost:3000/mcp \
@@ -540,33 +549,21 @@ curl -X POST http://localhost:3000/mcp \
     "id": 1,
     "method": "initialize",
     "params": {
-      "protocol_version": "2024-11-05",
-      "client_info": {"name": "my-agent", "version": "1.0.0"},
-      "capabilities": {}
+      "protocolVersion": "2025-11-25",
+      "clientInfo": {"name": "my-agent", "version": "1.0.0"},
+      "capabilities": {},
+      "_meta": {"acp_port": 54321}
     }
   }'
 ```
 
-### 3. Register your ACP endpoint
+**That's it!** Ergatai will automatically:
+- Register your agent identity (from `clientInfo.name`)
+- Register your ACP endpoint (from `_meta.acp_port`)
 
-```bash
-curl -X POST http://localhost:3000/mcp \
-  -H "Content-Type: application/json" \
-  -d '{
-    "jsonrpc": "2.0",
-    "id": 2,
-    "method": "tools/call",
-    "params": {
-      "name": "set_acp_endpoint",
-      "arguments": {
-        "agent_id": "my-agent",
-        "endpoint": "http://localhost:8080"
-      }
-    }
-  }'
-```
+No need to call `set_acp_endpoint` separately!
 
-### 4. Use Ergatai tools
+### 3. Use Ergatai tools
 
 Now your agent can call `list_agents`, `send_message`, etc. to collaborate with other agents.
 

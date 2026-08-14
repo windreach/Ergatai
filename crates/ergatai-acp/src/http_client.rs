@@ -75,21 +75,21 @@ impl HttpAcpClient {
 
         // Spawn the connection task (returns Result<()> to propagate errors)
         let connection_handle: tokio::task::JoinHandle<Result<()>> = tokio::spawn(async move {
-            let _result = Client.builder()
-                // Handle notifications from the agent
+            let _result = Client.v2()
+                // Handle notifications from the agent (V2 protocol)
                 .on_receive_notification(
-                    async |notification: agent_client_protocol::schema::v1::SessionNotification,
+                    async |notification: agent_client_protocol::schema::v2::UpdateSessionNotification,
                            _connection: ConnectionTo<Agent>| {
-                        info!("Received notification from agent: {:?}", notification.update);
+                        info!("Received V2 notification from agent: {:?}", notification.update);
                         // TODO: Forward to event bus
                         Ok(())
                     },
                     agent_client_protocol::on_receive_notification!(),
                 )
-                // Handle permission requests from the agent
+                // Handle permission requests from the agent (V2 protocol)
                 .on_receive_request(
-                    async |request: agent_client_protocol::schema::v1::RequestPermissionRequest,
-                           responder: agent_client_protocol::Responder<agent_client_protocol::schema::v1::RequestPermissionResponse>,
+                    async |request: agent_client_protocol::schema::v2::RequestPermissionRequest,
+                           responder: agent_client_protocol::Responder<agent_client_protocol::schema::v2::RequestPermissionResponse>,
                            _connection: ConnectionTo<Agent>| {
                         // SECURITY: Log all permission requests for audit trail
                         tracing::warn!(
@@ -117,9 +117,9 @@ impl HttpAcpClient {
                         let option_id = request.options.first().map(|o| o.option_id.clone());
                         if let Some(id) = option_id {
                             let _ = responder.respond(
-                                agent_client_protocol::schema::v1::RequestPermissionResponse::new(
-                                    agent_client_protocol::schema::v1::RequestPermissionOutcome::Selected(
-                                        agent_client_protocol::schema::v1::SelectedPermissionOutcome::new(id),
+                                agent_client_protocol::schema::v2::RequestPermissionResponse::new(
+                                    agent_client_protocol::schema::v2::RequestPermissionOutcome::Selected(
+                                        agent_client_protocol::schema::v2::SelectedPermissionOutcome::new(id),
                                     ),
                                 ),
                             );
@@ -131,27 +131,30 @@ impl HttpAcpClient {
                     },
                     agent_client_protocol::on_receive_request!(),
                 )
-                // Connect to the agent via HTTP
-                .connect_with(http_client, |connection: ConnectionTo<Agent>| async move {
-                    use agent_client_protocol::schema::v1::*;
+                // Connect to the agent via HTTP using V2 protocol
+                .connect_with(http_client, async |cx| {
+                    use agent_client_protocol::schema::v2::*;
                     use agent_client_protocol::schema::ProtocolVersion;
 
-                    // Initialize the connection
-                    let _init_response = connection
-                        .send_request(InitializeRequest::new(ProtocolVersion::V1))
+                    // Initialize the connection with V2 protocol
+                    let _init_response = cx
+                        .send_request(InitializeRequest::new(
+                            ProtocolVersion::V2,
+                            Implementation::new("ergatai", env!("CARGO_PKG_VERSION")),
+                        ))
                         .block_task()
                         .await?;
 
-                    info!("Connected to agent at {}", endpoint_for_log);
+                    info!("Connected to agent at {} with ACP V2 protocol", endpoint_for_log);
 
                     // Create a new session
-                    let new_session = connection
+                    let new_session = cx
                         .send_request(NewSessionRequest::new(std::path::PathBuf::from(&cwd_for_task)))
                         .block_task()
                         .await?;
 
                     let session_id = new_session.session_id.to_string();
-                    info!("Created session {} with agent", session_id);
+                    info!("Created session {} with agent (V2)", session_id);
 
                     // Send session ID directly to caller
                     let _ = session_id_tx.send(Ok(session_id.clone()));
@@ -163,8 +166,8 @@ impl HttpAcpClient {
                     loop {
                         match cmd_rx.recv().await {
                             Some(SessionCommand::SendPrompt { text, reply_tx }) => {
-                                info!("Sending prompt to agent");
-                                let result = connection
+                                info!("Sending prompt to agent (V2)");
+                                let result = cx
                                     .send_request(PromptRequest::new(
                                         session_id_arc.clone(),
                                         vec![ContentBlock::Text(TextContent::new(text))],
@@ -176,17 +179,17 @@ impl HttpAcpClient {
                                 let _ = reply_tx.send(result);
                             }
                             Some(SessionCommand::SetMode { mode_id, reply_tx }) => {
-                                info!("Setting mode to {}", mode_id);
-                                // TODO: Implement mode setting
+                                info!("Setting mode to {} (V2 - not yet implemented)", mode_id);
+                                // TODO: Implement mode setting for V2
                                 let _ = reply_tx.send(Ok(()));
                             }
                             Some(SessionCommand::Steer { text, reply_tx }) => {
-                                info!("Steering agent with: {}", text);
-                                // TODO: Implement steering
+                                info!("Steering agent with: {} (V2 - not yet implemented)", text);
+                                // TODO: Implement steering for V2
                                 let _ = reply_tx.send(Ok(()));
                             }
                             Some(SessionCommand::Close) | None => {
-                                info!("Closing connection to agent");
+                                info!("Closing connection to agent (V2)");
                                 break;
                             }
                             _ => {

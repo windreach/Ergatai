@@ -2,8 +2,8 @@
 // for direct JSON-RPC communication with agents.
 //
 // This is a rewrite of the session lifecycle using:
-// - Client::builder().connect_with() for connection management
-// - SDK's SessionNotification handler for event forwarding
+// - Client.v2().connect_with() for connection management (V2 protocol)
+// - SDK's UpdateSessionNotification handler for event forwarding
 // - SDK's RequestPermissionRequest handler for permission bridging
 // - Custom idle timeout + usage tracking wrappers
 
@@ -15,8 +15,9 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 
-use agent_client_protocol::schema::v1::{
-    CloseSessionRequest, ContentBlock, EnvVariable, InitializeRequest, McpServer, McpServerStdio,
+// V2 protocol types
+use agent_client_protocol::schema::v2::{
+    CloseSessionRequest, ContentBlock, EnvVariable, InitializeRequest, Implementation, McpServer, McpServerStdio,
     NewSessionRequest, PromptRequest, RequestPermissionOutcome, RequestPermissionRequest,
     RequestPermissionResponse, SelectedPermissionOutcome, SessionConfigId, SessionConfigValueId,
     SessionId, SetSessionConfigOptionRequest, TextContent,
@@ -343,26 +344,28 @@ async fn run_sdk_session(
     let pending_perms_clone = pending_perms.clone();
 
     let result = Client
-        .builder()
-        // Notification handler: forward session/update events to frontend
+        .v2()
+        // Notification handler: forward session/update events to frontend (V2 protocol)
         .on_receive_notification(
             {
                 let evt_tx = evt_tx_clone.clone();
-                async move |notification: agent_client_protocol::schema::v1::SessionNotification,
+                async move |notification: agent_client_protocol::schema::v2::UpdateSessionNotification,
                             _connection: ConnectionTo<Agent>| -> std::result::Result<(), agent_client_protocol::Error> {
                     let session_id = notification.session_id.to_string();
                     let event_type = match &notification.update {
-                        agent_client_protocol::schema::v1::SessionUpdate::AgentMessageChunk(_) => "agent_message_chunk",
-                        agent_client_protocol::schema::v1::SessionUpdate::UserMessageChunk(_) => "user_message_chunk",
-                        agent_client_protocol::schema::v1::SessionUpdate::AgentThoughtChunk(_) => "agent_thought_chunk",
-                        agent_client_protocol::schema::v1::SessionUpdate::ToolCall(_) => "tool_call",
-                        agent_client_protocol::schema::v1::SessionUpdate::ToolCallUpdate(_) => "tool_call_update",
-                        agent_client_protocol::schema::v1::SessionUpdate::Plan(_) => "plan",
-                        agent_client_protocol::schema::v1::SessionUpdate::AvailableCommandsUpdate(_) => "available_commands_update",
-                        agent_client_protocol::schema::v1::SessionUpdate::CurrentModeUpdate(_) => "current_mode_update",
-                        agent_client_protocol::schema::v1::SessionUpdate::ConfigOptionUpdate(_) => "config_option_update",
-                        agent_client_protocol::schema::v1::SessionUpdate::SessionInfoUpdate(_) => "session_info_update",
-                        agent_client_protocol::schema::v1::SessionUpdate::UsageUpdate(_) => "usage_update",
+                        agent_client_protocol::schema::v2::SessionUpdate::AgentMessageChunk(_) => "agent_message_chunk",
+                        agent_client_protocol::schema::v2::SessionUpdate::UserMessageChunk(_) => "user_message_chunk",
+                        agent_client_protocol::schema::v2::SessionUpdate::AgentThoughtChunk(_) => "agent_thought_chunk",
+                        agent_client_protocol::schema::v2::SessionUpdate::ToolCallUpdate(_) => "tool_call_update",
+                        agent_client_protocol::schema::v2::SessionUpdate::Plan(_) => "plan",
+                        agent_client_protocol::schema::v2::SessionUpdate::AvailableCommandsUpdate(_) => "available_commands_update",
+                        agent_client_protocol::schema::v2::SessionUpdate::ConfigOptionUpdate(_) => "config_option_update",
+                        agent_client_protocol::schema::v2::SessionUpdate::SessionInfoUpdate(_) => "session_info_update",
+                        agent_client_protocol::schema::v2::SessionUpdate::UsageUpdate(_) => "usage_update",
+                        // V2 new variants
+                        agent_client_protocol::schema::v2::SessionUpdate::StateUpdate(_) => "state_update",
+                        agent_client_protocol::schema::v2::SessionUpdate::TerminalUpdate(_) => "terminal_update",
+                        agent_client_protocol::schema::v2::SessionUpdate::TerminalOutputChunk(_) => "terminal_output_chunk",
                         _ => "other",
                 };
                 let data = match serde_json::to_value(&notification.update) {
@@ -512,21 +515,24 @@ async fn run_sdk_session(
                 Ok(())
             }
         }, agent_client_protocol::on_receive_request!())
-        // Main connection closure
+        // Main connection closure (V2 protocol)
         .connect_with(agent, {
             let cwd_clone = cwd.clone();
             let session_id_holder = session_id_holder_clone.clone();
             let evt_tx = evt_tx_clone.clone();
-            move |connection: ConnectionTo<Agent>| async move {
-                // Initialize
-                let init_result = timeout(SESSION_TIMEOUT, connection
-                    .send_request(InitializeRequest::new(ProtocolVersion::V1))
+            move |cx| async move {
+                // Initialize with V2 protocol
+                let init_result = timeout(SESSION_TIMEOUT, cx
+                    .send_request(InitializeRequest::new(
+                        ProtocolVersion::V2,
+                        Implementation::new("ergatai", env!("CARGO_PKG_VERSION")),
+                    ))
                     .block_task())
                     .await
                     .map_err(|_| agent_client_protocol::Error::internal_error().data("Initialize timeout"))?
                     .map_err(|e| agent_client_protocol::Error::internal_error().data(format!("Initialize failed: {}", e)))?;
 
-                tracing::info!("Agent initialized: {:?}", init_result);
+                tracing::info!("Agent initialized with ACP V2: {:?}", init_result);
 
                 // Create session — inject Ergatai MCP server for system tools.
                 // `build_ergatai_mcp_servers` dispatches its blocking work
@@ -545,16 +551,16 @@ async fn run_sdk_session(
                         "Injecting Ergatai MCP server into agent session"
                     );
                 }
-                let session_response = timeout(SESSION_TIMEOUT, connection
+                let session_response = timeout(SESSION_TIMEOUT, cx
                     .send_request(new_session_request)
                     .block_task())
                     .await
                     .map_err(|_| agent_client_protocol::Error::internal_error().data("Session creation timeout"))?
                     .map_err(|e| agent_client_protocol::Error::internal_error().data(format!("Session creation failed: {}", e)))?;
 
-                tracing::debug!(session_id = %session_response.session_id, "Session created");
+                tracing::debug!(session_id = %session_response.session_id, "Session created (V2)");
                 let session_id = session_response.session_id.to_string();
-                tracing::info!(session_id = %session_id, "Session created");
+                tracing::info!(session_id = %session_id, "Session created (V2)");
 
                 // Store session_id for later use
                 {
@@ -592,7 +598,7 @@ async fn run_sdk_session(
                 loop {
                     match cmd_rx.recv().await {
                         Some(SessionCommand::SendPrompt { text, reply_tx }) => {
-                            let result = timeout(MAX_TURN_DURATION, connection
+                            let result = timeout(MAX_TURN_DURATION, cx
                                 .send_request(PromptRequest::new(
                                     session_id_arc.clone(),
                                     vec![ContentBlock::Text(TextContent::new(text))],
@@ -621,7 +627,7 @@ async fn run_sdk_session(
                             let _ = reply_tx.send(Ok(()));
                         }
                         Some(SessionCommand::SetConfigOption { config_id, value_id, reply_tx }) => {
-                            let result = timeout(SESSION_TIMEOUT, connection
+                            let result = timeout(SESSION_TIMEOUT, cx
                                 .send_request(SetSessionConfigOptionRequest::new(
                                     session_id_arc.clone(),
                                     SessionConfigId::new(config_id),
@@ -648,8 +654,8 @@ async fn run_sdk_session(
                             )));
                         }
                         Some(SessionCommand::Close) => {
-                            tracing::info!("Closing SDK session");
-                            match timeout(Duration::from_secs(5), connection
+                            tracing::info!("Closing SDK session (V2)");
+                            match timeout(Duration::from_secs(5), cx
                                 .send_request(CloseSessionRequest::new(session_id_arc.clone()))
                                 .block_task())
                                 .await
@@ -671,8 +677,8 @@ async fn run_sdk_session(
                             break;
                         }
                         None => {
-                            tracing::info!("Command channel closed, shutting down");
-                            match timeout(Duration::from_secs(5), connection
+                            tracing::info!("Command channel closed, shutting down (V2)");
+                            match timeout(Duration::from_secs(5), cx
                                 .send_request(CloseSessionRequest::new(session_id_arc.clone()))
                                 .block_task())
                                 .await

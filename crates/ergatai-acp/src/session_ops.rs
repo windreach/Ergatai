@@ -2,11 +2,12 @@ use std::path::PathBuf;
 use std::time::Duration;
 use tokio::time::timeout;
 
-use agent_client_protocol::schema::v1::{
-    CloseSessionRequest, ContentBlock, DeleteSessionRequest, InitializeRequest,
+// V2 protocol types
+use agent_client_protocol::schema::v2::{
+    CloseSessionRequest, ContentBlock, DeleteSessionRequest, InitializeRequest, Implementation,
     ListSessionsRequest, LoadSessionRequest, ResumeSessionRequest, SessionConfigId,
-    SessionConfigValueId, SessionId, SessionInfo, SessionModeId, SetSessionConfigOptionRequest,
-    SetSessionModeRequest, TextContent,
+    SessionConfigValueId, SessionId, SessionInfo, SetSessionConfigOptionRequest,
+    TextContent,
 };
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::{AcpAgent, Agent, Client, ConnectionTo};
@@ -18,7 +19,7 @@ use ergatai_error::{ErgataiError, ErgataiResult};
 const SESSION_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_TURN_DURATION: Duration = Duration::from_secs(7200); // 2 hours (matches sdk_session.rs)
 
-/// 通过临时连接执行一次性 ACP 操作。
+/// 通过临时连接执行一次性 ACP 操作 (V2 protocol)。
 /// 连接 → 初始化 → 执行闭包 → 断开。
 async fn with_agent_connection<F, T, Fut>(config: &AgentConfig, f: F) -> ErgataiResult<T>
 where
@@ -29,14 +30,16 @@ where
     let agent = AcpAgent::new(agent_config);
 
     let result = Client
-        .builder()
-        .connect_with(agent, |connection: ConnectionTo<Agent>| async move {
-            // 初始化
+        .v2()
+        .connect_with(agent, async |cx| {
+            // 初始化 with V2 protocol
             let init_result = timeout(
                 SESSION_TIMEOUT,
-                connection
-                    .send_request(InitializeRequest::new(ProtocolVersion::V1))
-                    .block_task(),
+                cx.send_request(InitializeRequest::new(
+                    ProtocolVersion::V2,
+                    Implementation::new("ergatai", env!("CARGO_PKG_VERSION")),
+                ))
+                .block_task(),
             )
             .await;
 
@@ -53,8 +56,9 @@ where
                 }
             }
 
-            // 执行操作
-            match f(connection).await {
+            // 执行操作 - need to get the underlying connection
+            // For V2, cx provides the same interface
+            match f(cx).await {
                 Ok(result) => Ok(result),
                 Err(e) => Err(agent_client_protocol::Error::internal_error().data(e.to_string())),
             }
@@ -137,24 +141,26 @@ pub fn load_session_task(
         let session_id_tx = session_id_tx.clone();
         async move {
             let abort_handle = abort_rx.await.ok();
-            let result = Client.builder()
+            let result = Client.v2()
                 .on_receive_notification({
                     let evt_tx = evt_tx.clone();
-                    async move |notification: agent_client_protocol::schema::v1::SessionNotification,
+                    async move |notification: agent_client_protocol::schema::v2::UpdateSessionNotification,
                                 _connection: ConnectionTo<Agent>| {
                         let session_id = notification.session_id.to_string();
                         let event_type = match &notification.update {
-                            agent_client_protocol::schema::v1::SessionUpdate::AgentMessageChunk(_) => "agent_message_chunk",
-                            agent_client_protocol::schema::v1::SessionUpdate::UserMessageChunk(_) => "user_message_chunk",
-                            agent_client_protocol::schema::v1::SessionUpdate::AgentThoughtChunk(_) => "agent_thought_chunk",
-                            agent_client_protocol::schema::v1::SessionUpdate::ToolCall(_) => "tool_call",
-                            agent_client_protocol::schema::v1::SessionUpdate::ToolCallUpdate(_) => "tool_call_update",
-                            agent_client_protocol::schema::v1::SessionUpdate::Plan(_) => "plan",
-                            agent_client_protocol::schema::v1::SessionUpdate::AvailableCommandsUpdate(_) => "available_commands_update",
-                            agent_client_protocol::schema::v1::SessionUpdate::CurrentModeUpdate(_) => "current_mode_update",
-                            agent_client_protocol::schema::v1::SessionUpdate::ConfigOptionUpdate(_) => "config_option_update",
-                            agent_client_protocol::schema::v1::SessionUpdate::SessionInfoUpdate(_) => "session_info_update",
-                            agent_client_protocol::schema::v1::SessionUpdate::UsageUpdate(_) => "usage_update",
+                            agent_client_protocol::schema::v2::SessionUpdate::AgentMessageChunk(_) => "agent_message_chunk",
+                            agent_client_protocol::schema::v2::SessionUpdate::UserMessageChunk(_) => "user_message_chunk",
+                            agent_client_protocol::schema::v2::SessionUpdate::AgentThoughtChunk(_) => "agent_thought_chunk",
+                            agent_client_protocol::schema::v2::SessionUpdate::ToolCallUpdate(_) => "tool_call_update",
+                            agent_client_protocol::schema::v2::SessionUpdate::Plan(_) => "plan",
+                            agent_client_protocol::schema::v2::SessionUpdate::AvailableCommandsUpdate(_) => "available_commands_update",
+                            agent_client_protocol::schema::v2::SessionUpdate::ConfigOptionUpdate(_) => "config_option_update",
+                            agent_client_protocol::schema::v2::SessionUpdate::SessionInfoUpdate(_) => "session_info_update",
+                            agent_client_protocol::schema::v2::SessionUpdate::UsageUpdate(_) => "usage_update",
+                            // V2 new variants
+                            agent_client_protocol::schema::v2::SessionUpdate::StateUpdate(_) => "state_update",
+                            agent_client_protocol::schema::v2::SessionUpdate::TerminalUpdate(_) => "terminal_update",
+                            agent_client_protocol::schema::v2::SessionUpdate::TerminalOutputChunk(_) => "terminal_output_chunk",
                             _ => "other",
                         };
                         let data = match serde_json::to_value(&notification.update) {
@@ -175,20 +181,20 @@ pub fn load_session_task(
                 agent_client_protocol::on_receive_notification!(),
                 )
                 .on_receive_request(
-                    async move |request: agent_client_protocol::schema::v1::RequestPermissionRequest,
+                    async move |request: agent_client_protocol::schema::v2::RequestPermissionRequest,
                                 responder,
                                 _connection: ConnectionTo<Agent>| {
                         // YOLO: 自动批准
                         let option_id = request.options.first().map(|opt| opt.option_id.clone());
                         if let Some(id) = option_id {
-                            responder.respond(agent_client_protocol::schema::v1::RequestPermissionResponse::new(
-                                agent_client_protocol::schema::v1::RequestPermissionOutcome::Selected(
-                                    agent_client_protocol::schema::v1::SelectedPermissionOutcome::new(id),
+                            responder.respond(agent_client_protocol::schema::v2::RequestPermissionResponse::new(
+                                agent_client_protocol::schema::v2::RequestPermissionOutcome::Selected(
+                                    agent_client_protocol::schema::v2::SelectedPermissionOutcome::new(id),
                                 ),
                             ))
                         } else {
-                            responder.respond(agent_client_protocol::schema::v1::RequestPermissionResponse::new(
-                                agent_client_protocol::schema::v1::RequestPermissionOutcome::Cancelled,
+                            responder.respond(agent_client_protocol::schema::v2::RequestPermissionResponse::new(
+                                agent_client_protocol::schema::v2::RequestPermissionOutcome::Cancelled,
                             ))
                         }
                     },
@@ -198,7 +204,7 @@ pub fn load_session_task(
                     let tx_for_closure = session_id_tx.clone();
                     let session_id_clone = session_id.clone();
                     let cwd_clone = cwd.clone();
-                    move |connection: ConnectionTo<Agent>| async move {
+                    move |cx| async move {
                         let tx = match tx_for_closure.lock() {
                             Ok(mut g) => g.take(),
                             Err(e) => {
@@ -207,9 +213,12 @@ pub fn load_session_task(
                             }
                         };
 
-                        // 1. 初始化
-                        let init_result = timeout(SESSION_TIMEOUT, connection
-                            .send_request(InitializeRequest::new(ProtocolVersion::V1))
+                        // 1. 初始化 with V2 protocol
+                        let init_result = timeout(SESSION_TIMEOUT, cx
+                            .send_request(InitializeRequest::new(
+                                ProtocolVersion::V2,
+                                Implementation::new("ergatai", env!("CARGO_PKG_VERSION")),
+                            ))
                             .block_task())
                             .await;
                         match init_result {
@@ -218,16 +227,16 @@ pub fn load_session_task(
                             Err(_) => return Err(agent_client_protocol::Error::internal_error().data("Initialize timeout")),
                         }
 
-                        // 2. 加载会话
+                        // 2. 加载会话 - V2 uses ResumeSessionRequest instead of LoadSessionRequest
                         let sid = SessionId::new(session_id_clone.clone());
-                        let load_result = timeout(SESSION_TIMEOUT, connection
-                            .send_request(LoadSessionRequest::new(sid, PathBuf::from(&cwd_clone)))
+                        let resume_result = timeout(SESSION_TIMEOUT, cx
+                            .send_request(ResumeSessionRequest::new(sid, PathBuf::from(&cwd_clone)))
                             .block_task())
                             .await;
-                        match load_result {
+                        match resume_result {
                             Ok(Ok(_)) => {},
-                            Ok(Err(e)) => return Err(agent_client_protocol::Error::internal_error().data(format!("LoadSession failed: {}", e))),
-                            Err(_) => return Err(agent_client_protocol::Error::internal_error().data("LoadSession timeout")),
+                            Ok(Err(e)) => return Err(agent_client_protocol::Error::internal_error().data(format!("ResumeSession failed: {}", e))),
+                            Err(_) => return Err(agent_client_protocol::Error::internal_error().data("ResumeSession timeout")),
                         }
 
                         // 3. 注册到全局管理器
@@ -256,8 +265,8 @@ pub fn load_session_task(
                         loop {
                             match cmd_rx.recv().await {
                                 Some(SessionCommand::SendPrompt { text, reply_tx }) => {
-                                    let result = timeout(MAX_TURN_DURATION, connection
-                                        .send_request(agent_client_protocol::schema::v1::PromptRequest::new(
+                                    let result = timeout(MAX_TURN_DURATION, cx
+                                        .send_request(agent_client_protocol::schema::v2::PromptRequest::new(
                                             session_id_arc.clone(),
                                             vec![ContentBlock::Text(TextContent::new(text))],
                                         ))
@@ -268,19 +277,12 @@ pub fn load_session_task(
                                     let _ = reply_tx.send(result.map(|_| ()));
                                 }
                                 Some(SessionCommand::SetMode { mode_id, reply_tx }) => {
-                                    let result = timeout(SESSION_TIMEOUT, connection
-                                        .send_request(SetSessionModeRequest::new(
-                                            session_id_arc.clone(),
-                                            SessionModeId::new(mode_id),
-                                        ))
-                                        .block_task())
-                                        .await
-                                        .map_err(|_| anyhow::anyhow!("SetMode timeout"))
-                                        .and_then(|r| r.map_err(|e| anyhow::anyhow!("SetMode failed: {}", e)));
-                                    let _ = reply_tx.send(result.map(|_| ()));
+                                    // V2: session modes removed - log warning and return Ok
+                                    tracing::warn!("SetMode requested but session modes are removed in ACP V2. Mode: {}", mode_id);
+                                    let _ = reply_tx.send(Ok(()));
                                 }
                                 Some(SessionCommand::SetConfigOption { config_id, value_id, reply_tx }) => {
-                                    let result = timeout(SESSION_TIMEOUT, connection
+                                    let result = timeout(SESSION_TIMEOUT, cx
                                         .send_request(SetSessionConfigOptionRequest::new(
                                             session_id_arc.clone(),
                                             SessionConfigId::new(config_id),
@@ -303,7 +305,7 @@ pub fn load_session_task(
                                 }
                                 Some(SessionCommand::Close) => {
                                     // 通过 ACP 协议发送 CloseSessionRequest
-                                    match timeout(SESSION_TIMEOUT, connection
+                                    match timeout(SESSION_TIMEOUT, cx
                                         .send_request(CloseSessionRequest::new(session_id_arc.clone()))
                                         .block_task())
                                         .await
@@ -326,7 +328,7 @@ pub fn load_session_task(
                                     break;
                                 }
                                 None => {
-                                    match timeout(std::time::Duration::from_secs(5), connection
+                                    match timeout(std::time::Duration::from_secs(5), cx
                                         .send_request(CloseSessionRequest::new(session_id_arc.clone()))
                                         .block_task())
                                         .await
@@ -394,24 +396,26 @@ pub fn resume_session_task(
         let session_id_tx = session_id_tx.clone();
         async move {
             let abort_handle = abort_rx.await.ok();
-            let result = Client.builder()
+            let result = Client.v2()
                 .on_receive_notification({
                     let evt_tx = evt_tx.clone();
-                    async move |notification: agent_client_protocol::schema::v1::SessionNotification,
+                    async move |notification: agent_client_protocol::schema::v2::UpdateSessionNotification,
                                 _connection: ConnectionTo<Agent>| {
                         let session_id = notification.session_id.to_string();
                         let event_type = match &notification.update {
-                            agent_client_protocol::schema::v1::SessionUpdate::AgentMessageChunk(_) => "agent_message_chunk",
-                            agent_client_protocol::schema::v1::SessionUpdate::UserMessageChunk(_) => "user_message_chunk",
-                            agent_client_protocol::schema::v1::SessionUpdate::AgentThoughtChunk(_) => "agent_thought_chunk",
-                            agent_client_protocol::schema::v1::SessionUpdate::ToolCall(_) => "tool_call",
-                            agent_client_protocol::schema::v1::SessionUpdate::ToolCallUpdate(_) => "tool_call_update",
-                            agent_client_protocol::schema::v1::SessionUpdate::Plan(_) => "plan",
-                            agent_client_protocol::schema::v1::SessionUpdate::AvailableCommandsUpdate(_) => "available_commands_update",
-                            agent_client_protocol::schema::v1::SessionUpdate::CurrentModeUpdate(_) => "current_mode_update",
-                            agent_client_protocol::schema::v1::SessionUpdate::ConfigOptionUpdate(_) => "config_option_update",
-                            agent_client_protocol::schema::v1::SessionUpdate::SessionInfoUpdate(_) => "session_info_update",
-                            agent_client_protocol::schema::v1::SessionUpdate::UsageUpdate(_) => "usage_update",
+                            agent_client_protocol::schema::v2::SessionUpdate::AgentMessageChunk(_) => "agent_message_chunk",
+                            agent_client_protocol::schema::v2::SessionUpdate::UserMessageChunk(_) => "user_message_chunk",
+                            agent_client_protocol::schema::v2::SessionUpdate::AgentThoughtChunk(_) => "agent_thought_chunk",
+                            agent_client_protocol::schema::v2::SessionUpdate::ToolCallUpdate(_) => "tool_call_update",
+                            agent_client_protocol::schema::v2::SessionUpdate::Plan(_) => "plan",
+                            agent_client_protocol::schema::v2::SessionUpdate::AvailableCommandsUpdate(_) => "available_commands_update",
+                            agent_client_protocol::schema::v2::SessionUpdate::ConfigOptionUpdate(_) => "config_option_update",
+                            agent_client_protocol::schema::v2::SessionUpdate::SessionInfoUpdate(_) => "session_info_update",
+                            agent_client_protocol::schema::v2::SessionUpdate::UsageUpdate(_) => "usage_update",
+                            // V2 new variants
+                            agent_client_protocol::schema::v2::SessionUpdate::StateUpdate(_) => "state_update",
+                            agent_client_protocol::schema::v2::SessionUpdate::TerminalUpdate(_) => "terminal_update",
+                            agent_client_protocol::schema::v2::SessionUpdate::TerminalOutputChunk(_) => "terminal_output_chunk",
                             _ => "other",
                         };
                         let data = match serde_json::to_value(&notification.update) {
@@ -432,20 +436,20 @@ pub fn resume_session_task(
                 agent_client_protocol::on_receive_notification!(),
                 )
                 .on_receive_request(
-                    async move |request: agent_client_protocol::schema::v1::RequestPermissionRequest,
+                    async move |request: agent_client_protocol::schema::v2::RequestPermissionRequest,
                                 responder,
                                 _connection: ConnectionTo<Agent>| {
                         // YOLO: 自动批准（resume 会话暂不支持前端权限确认）
                         let option_id = request.options.first().map(|opt| opt.option_id.clone());
                         if let Some(id) = option_id {
-                            responder.respond(agent_client_protocol::schema::v1::RequestPermissionResponse::new(
-                                agent_client_protocol::schema::v1::RequestPermissionOutcome::Selected(
-                                    agent_client_protocol::schema::v1::SelectedPermissionOutcome::new(id),
+                            responder.respond(agent_client_protocol::schema::v2::RequestPermissionResponse::new(
+                                agent_client_protocol::schema::v2::RequestPermissionOutcome::Selected(
+                                    agent_client_protocol::schema::v2::SelectedPermissionOutcome::new(id),
                                 ),
                             ))
                         } else {
-                            responder.respond(agent_client_protocol::schema::v1::RequestPermissionResponse::new(
-                                agent_client_protocol::schema::v1::RequestPermissionOutcome::Cancelled,
+                            responder.respond(agent_client_protocol::schema::v2::RequestPermissionResponse::new(
+                                agent_client_protocol::schema::v2::RequestPermissionOutcome::Cancelled,
                             ))
                         }
                     },
@@ -455,7 +459,7 @@ pub fn resume_session_task(
                     let tx_for_closure = session_id_tx.clone();
                     let session_id_clone = session_id.clone();
                     let cwd_clone = cwd.clone();
-                    move |connection: ConnectionTo<Agent>| async move {
+                    move |cx| async move {
                         let tx = match tx_for_closure.lock() {
                             Ok(mut g) => g.take(),
                             Err(e) => {
@@ -464,9 +468,12 @@ pub fn resume_session_task(
                             }
                         };
 
-                        // 1. 初始化
-                        let init_result = timeout(SESSION_TIMEOUT, connection
-                            .send_request(InitializeRequest::new(ProtocolVersion::V1))
+                        // 1. 初始化 with V2 protocol
+                        let init_result = timeout(SESSION_TIMEOUT, cx
+                            .send_request(InitializeRequest::new(
+                                ProtocolVersion::V2,
+                                Implementation::new("ergatai", env!("CARGO_PKG_VERSION")),
+                            ))
                             .block_task())
                             .await;
                         match init_result {
@@ -477,7 +484,7 @@ pub fn resume_session_task(
 
                         // 2. 恢复会话
                         let sid = SessionId::new(session_id_clone.clone());
-                        let resume_result = timeout(SESSION_TIMEOUT, connection
+                        let resume_result = timeout(SESSION_TIMEOUT, cx
                             .send_request(ResumeSessionRequest::new(sid, PathBuf::from(&cwd_clone)))
                             .block_task())
                             .await;
@@ -513,8 +520,8 @@ pub fn resume_session_task(
                         loop {
                             match cmd_rx.recv().await {
                                 Some(SessionCommand::SendPrompt { text, reply_tx }) => {
-                                    let result = timeout(MAX_TURN_DURATION, connection
-                                        .send_request(agent_client_protocol::schema::v1::PromptRequest::new(
+                                    let result = timeout(MAX_TURN_DURATION, cx
+                                        .send_request(agent_client_protocol::schema::v2::PromptRequest::new(
                                             session_id_arc.clone(),
                                             vec![ContentBlock::Text(TextContent::new(text))],
                                         ))
@@ -525,19 +532,12 @@ pub fn resume_session_task(
                                     let _ = reply_tx.send(result.map(|_| ()));
                                 }
                                 Some(SessionCommand::SetMode { mode_id, reply_tx }) => {
-                                    let result = timeout(SESSION_TIMEOUT, connection
-                                        .send_request(SetSessionModeRequest::new(
-                                            session_id_arc.clone(),
-                                            SessionModeId::new(mode_id),
-                                        ))
-                                        .block_task())
-                                        .await
-                                        .map_err(|_| anyhow::anyhow!("SetMode timeout"))
-                                        .and_then(|r| r.map_err(|e| anyhow::anyhow!("SetMode failed: {}", e)));
-                                    let _ = reply_tx.send(result.map(|_| ()));
+                                    // V2: session modes removed - log warning and return Ok
+                                    tracing::warn!("SetMode requested but session modes are removed in ACP V2. Mode: {}", mode_id);
+                                    let _ = reply_tx.send(Ok(()));
                                 }
                                 Some(SessionCommand::SetConfigOption { config_id, value_id, reply_tx }) => {
-                                    let result = timeout(SESSION_TIMEOUT, connection
+                                    let result = timeout(SESSION_TIMEOUT, cx
                                         .send_request(SetSessionConfigOptionRequest::new(
                                             session_id_arc.clone(),
                                             SessionConfigId::new(config_id),
@@ -556,7 +556,7 @@ pub fn resume_session_task(
                                     )));
                                 }
                                 Some(SessionCommand::Close) => {
-                                    match timeout(SESSION_TIMEOUT, connection
+                                    match timeout(SESSION_TIMEOUT, cx
                                         .send_request(CloseSessionRequest::new(session_id_arc.clone()))
                                         .block_task())
                                         .await
@@ -578,7 +578,7 @@ pub fn resume_session_task(
                                     break;
                                 }
                                 None => {
-                                    match timeout(std::time::Duration::from_secs(5), connection
+                                    match timeout(std::time::Duration::from_secs(5), cx
                                         .send_request(CloseSessionRequest::new(session_id_arc.clone()))
                                         .block_task())
                                         .await

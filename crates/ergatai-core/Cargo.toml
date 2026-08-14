@@ -41,7 +41,7 @@ rusqlite.workspace = true
 async-nats.workspace = true
 
 # ACP Protocol SDK
-agent-client-protocol = "2"
+agent-client-protocol = { version = "2", features = ["unstable_protocol_v2"] }
 agent-client-protocol-tokio = "0.11"
 
 # Utilities

@@ -139,6 +139,19 @@ async fn async_main(args: Args) -> Result<()> {
     );
     tracing::info!("MCP server initialized (protocol 2025-06-18, Streamable HTTP)");
 
+    // Initialize NATS (embedded server + JetStream)
+    match nats::init_nats().await {
+        Ok(conn) => {
+            tracing::info!("✅ NATS initialized successfully");
+            // NATS connection is stored globally, can be retrieved via get_nats_connection()
+            let _ = conn;
+        }
+        Err(e) => {
+            tracing::error!("❌ Failed to initialize NATS: {}", e);
+            return Err(anyhow::anyhow!("NATS initialization failed: {}", e));
+        }
+    }
+
     // Start NATS → ACP message forwarder
     start_nats_acp_forwarder(mcp_registry.clone(), mcp_cancellation_token.clone());
     tracing::info!("NATS → ACP message forwarder started");

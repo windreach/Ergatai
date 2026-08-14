@@ -10,7 +10,7 @@ use rmcp::{
     ErrorData, ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
-        CallToolResult, Content, InitializeRequestParams, InitializeResult,
+        CallToolResult, ContentBlock, InitializeRequestParams, InitializeResult,
         ServerCapabilities, ServerInfo,
     },
     service::RequestContext,
@@ -144,7 +144,7 @@ impl ErgataiMcpServer {
             "total": agents.len()
         });
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&result).unwrap_or_default(),
         )]))
     }
@@ -181,7 +181,7 @@ impl ErgataiMcpServer {
         let resolved_agent_id = match matching_agent {
             Some(id) => id,
             None => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
+                return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
                     "Agent {} not found. Agent must connect via MCP first.",
                     target_agent_id
                 ))]));
@@ -192,7 +192,7 @@ impl ErgataiMcpServer {
         let acp_endpoint = self.registry.get_acp_endpoint(&resolved_agent_id).await;
 
         if acp_endpoint.is_none() {
-            return Ok(CallToolResult::error(vec![Content::text(format!(
+            return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
                 "Agent {} has no ACP endpoint registered. \
                  Agents MUST register their ACP endpoint via set_acp_endpoint to receive messages.",
                 resolved_agent_id
@@ -203,7 +203,7 @@ impl ErgataiMcpServer {
         info!("Routing message to {} via NATS", resolved_agent_id);
 
         if !is_nats_initialized().await {
-            return Ok(CallToolResult::error(vec![Content::text(
+            return Ok(CallToolResult::error(vec![ContentBlock::text(
                 "NATS not initialized. Cannot route message.".to_string(),
             )]));
         }
@@ -211,7 +211,7 @@ impl ErgataiMcpServer {
         let conn = match get_nats_connection().await {
             Some(c) => c,
             None => {
-                return Ok(CallToolResult::error(vec![Content::text(
+                return Ok(CallToolResult::error(vec![ContentBlock::text(
                     "NATS connection not available.".to_string(),
                 )]));
             }
@@ -249,13 +249,13 @@ impl ErgataiMcpServer {
                     "note": "Message published to NATS. Will be delivered to agent's ACP endpoint."
                 });
 
-                Ok(CallToolResult::success(vec![Content::text(
+                Ok(CallToolResult::success(vec![ContentBlock::text(
                     serde_json::to_string_pretty(&response_json).unwrap_or_default(),
                 )]))
             }
             Err(e) => {
                 error!("Failed to publish message to NATS: {}", e);
-                Ok(CallToolResult::error(vec![Content::text(format!(
+                Ok(CallToolResult::error(vec![ContentBlock::text(format!(
                     "Failed to route message: {}",
                     e
                 ))]))
@@ -274,9 +274,11 @@ impl ErgataiMcpServer {
     ) -> Result<CallToolResult, ErrorData> {
         let endpoint = &params.0.endpoint;
 
+        info!("🔧 set_acp_endpoint called with endpoint: {}", endpoint);
+
         // Validate endpoint URL
         if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
-            return Ok(CallToolResult::error(vec![Content::text(
+            return Ok(CallToolResult::error(vec![ContentBlock::text(
                 "Invalid endpoint URL. Must start with http:// or https://",
             )]));
         }
@@ -284,19 +286,30 @@ impl ErgataiMcpServer {
         // CRITICAL: Prevent agents from registering Ergatai's own endpoints
         // This would create a message loop where Ergatai sends messages to itself
         if endpoint.contains(self.ergatai_own_address.as_str()) {
-            return Ok(CallToolResult::error(vec![Content::text(format!(
+            return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
                 "Invalid endpoint: Cannot register Ergatai's own address ({}) as ACP endpoint. \
                  Agents must run their own ACP server on a different port.",
                 self.ergatai_own_address
             ))]));
         }
 
+        // Get agent_id: use provided one, or fall back to session's registered agent_id
         let provided_agent_id = match &params.0.agent_id {
             Some(id) => id.clone(),
             None => {
-                return Ok(CallToolResult::error(vec![Content::text(
-                    "Missing agent_id parameter. Please provide your agent's ID.",
-                )]));
+                // Try to get from session
+                match self.session_agent_id.read().await.clone() {
+                    Some(id) => {
+                        info!("No agent_id provided, using session agent_id: {}", id);
+                        id
+                    }
+                    None => {
+                        return Ok(CallToolResult::error(vec![ContentBlock::text(
+                            "Missing agent_id parameter and no session agent_id available. \
+                             Please provide your agent's ID.",
+                        )]));
+                    }
+                }
             }
         };
 
@@ -316,7 +329,7 @@ impl ErgataiMcpServer {
         let agent_id = match matching_agent {
             Some(id) => id,
             None => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
+                return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
                     "Agent {} is not registered. Connect via MCP first.",
                     provided_agent_id
                 ))]));
@@ -326,10 +339,14 @@ impl ErgataiMcpServer {
         // SECURITY: Track which agent is setting the endpoint
         // For now, we trust the agent_id parameter, but in production
         // we should validate against the MCP session's authenticated agent
-        info!("Agent {} registering ACP endpoint: {}", agent_id, endpoint);
+        info!("✅ Agent {} registering ACP endpoint: {}", agent_id, endpoint);
         self.registry
             .set_acp_endpoint(&agent_id, endpoint.to_string())
             .await;
+
+        // Verify it was stored
+        let stored = self.registry.get_acp_endpoint(&agent_id).await;
+        info!("✅ ACP endpoint stored in registry: {:?}", stored);
 
         let result = serde_json::json!({
             "agent_id": agent_id,
@@ -338,7 +355,7 @@ impl ErgataiMcpServer {
             "message": "ACP endpoint registered successfully. Ergatai can now push tasks to this agent."
         });
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&result).unwrap_or_default(),
         )]))
     }
@@ -366,7 +383,7 @@ impl ErgataiMcpServer {
             "note": "DAG definition received but execution not yet implemented"
         });
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&result).unwrap_or_default(),
         )]))
     }
@@ -394,7 +411,7 @@ impl ErgataiMcpServer {
             "note": "Status query integration pending"
         });
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&result).unwrap_or_default(),
         )]))
     }
@@ -486,7 +503,6 @@ pub fn create_mcp_service(
     let config = StreamableHttpServerConfig::default()
         .with_sse_keep_alive(Some(std::time::Duration::from_secs(15)))
         .with_sse_retry(Some(std::time::Duration::from_secs(3)))
-        .with_stateful_mode(true)
         .with_json_response(true)
         .with_cancellation_token(cancellation_token)
         .with_allowed_hosts([

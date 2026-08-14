@@ -1,39 +1,45 @@
-//! Simple Agent Example
+//! Simple ACP Agent Example
 //!
-//! Demonstrates how an agent works in the middleware architecture:
-//! 1. Agent starts an HTTP server exposing ACP endpoints
-//! 2. Agent connects to Ergatai's MCP endpoint (2025-03-26 protocol)
-//! 3. Agent registers its ACP endpoint via `set_acp_endpoint` tool
-//! 4. Ergatai can now push tasks to the agent via ACP HTTP
+//! Demonstrates a minimal ACP-compliant agent that can be used for testing.
+//! Implements the ACP HTTP transport protocol (JSON-RPC over HTTP + SSE).
 //!
 //! # Usage
 //!
 //! ```bash
 //! # Start Ergatai API server
-//! cargo run -p ergatai-api -- --port 3000
+//! cargo run --bin ergatai-api -- --port 3000
 //!
-//! # In another terminal, start this agent
-//! cargo run -p simple-agent -- --port 8080 --agent-id my-agent --ergatai http://localhost:3000
+//! # In another terminal, start this agent (port is auto-assigned)
+//! cargo run -p simple-agent -- --agent-id my-agent --ergatai http://localhost:3000
 //! ```
 
 use std::sync::{Arc, OnceLock};
 
 use axum::{
-    http::StatusCode,
-    response::IntoResponse,
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use tracing::{error, info};
+use uuid::Uuid;
 
 /// Agent state shared across handlers
 struct AgentState {
     agent_id: String,
-    /// Current session ID (if any)
-    session_id: Option<String>,
-    /// Ergatai MCP endpoint
     ergatai_endpoint: String,
+    acp_port: u16,
+    /// Active sessions
+    sessions: Arc<tokio::sync::RwLock<std::collections::HashMap<String, SessionState>>>,
+}
+
+struct SessionState {
+    session_id: String,
+    cwd: String,
+    created_at: std::time::Instant,
 }
 
 /// Global state
@@ -50,13 +56,6 @@ fn get_state() -> Arc<AgentState> {
 async fn main() -> anyhow::Result<()> {
     // Parse command line arguments
     let args: Vec<String> = std::env::args().collect();
-    let port = args
-        .iter()
-        .position(|a| a == "--port")
-        .and_then(|i| args.get(i + 1))
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(8080u16);
-
     let agent_id = args
         .iter()
         .position(|a| a == "--agent-id")
@@ -79,45 +78,284 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    info!("Starting agent '{}' on port {}", agent_id, port);
+    info!("Starting ACP agent '{}'", agent_id);
     info!("Connecting to Ergatai at {}", ergatai_endpoint);
 
-    // Initialize state
+    // Step 1: Start ACP HTTP server on port 0 (OS assigns random available port)
+    // Bind to port 0 first to get the actual port
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let actual_port = listener.local_addr()?.port();
+
+    info!(
+        "ACP HTTP server listening on 127.0.0.1:{} (OS-assigned)",
+        actual_port
+    );
+
+    // Initialize state with the actual port
     let state = Arc::new(AgentState {
         agent_id: agent_id.clone(),
-        session_id: None,
         ergatai_endpoint: ergatai_endpoint.clone(),
+        acp_port: actual_port,
+        sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
     });
+
     if AGENT_STATE.set(state.clone()).is_err() {
-        tracing::warn!("AGENT_STATE already initialized (this should not happen)");
+        tracing::warn!("AGENT_STATE already initialized");
     }
 
-    // Step 1: Connect to Ergatai MCP and register
-    if let Err(e) = connect_to_ergatai(&agent_id, &ergatai_endpoint, port).await {
-        error!("Failed to connect to Ergatai: {}", e);
-        // Continue anyway - agent can still serve ACP requests
-    }
-
-    // Step 2: Start ACP HTTP server
     let app = Router::new()
+        .route("/acp", post(handle_acp_request))
         .route("/health", get(health_check))
-        .route("/acp/session/new", post(create_session))
-        .route("/acp/session/{id}/prompt", post(handle_prompt))
-        .route("/acp/session/{id}/close", post(close_session))
         .with_state(state.clone());
 
-    let addr = format!("0.0.0.0:{}", port);
-    info!("ACP HTTP server listening on {}", addr);
+    // Start server in background
+    let server_handle = tokio::spawn(async move {
+        if let Err(e) = axum::serve(listener, app).await {
+            error!("ACP HTTP server error: {}", e);
+        }
+    });
 
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
-    axum::serve(listener, app).await?;
+    // Step 2: Connect to Ergatai MCP and register with actual port
+    let mcp_session = match connect_to_ergatai(&agent_id, &ergatai_endpoint, actual_port).await {
+        Ok(session) => {
+            info!("Agent is ready and registered with Ergatai!");
+            Some(session)
+        }
+        Err(e) => {
+            error!("Failed to connect to Ergatai: {}", e);
+            None
+        }
+    };
+
+    // Step 3: Start automatic conversation task
+    let agent_id_clone = agent_id.clone();
+    let ergatai_endpoint_clone = ergatai_endpoint.clone();
+    tokio::spawn(async move {
+        if let Some(session_id) = mcp_session {
+            // Wait a bit for other agents to connect
+            tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+
+            // Start automatic conversation
+            if let Err(e) = start_auto_conversation(&agent_id_clone, &ergatai_endpoint_clone, &session_id).await {
+                error!("Auto conversation failed: {}", e);
+            }
+        }
+    });
+
+    // Wait for server to finish
+    server_handle.await?;
 
     Ok(())
 }
 
+// ── ACP Protocol Handler ──
+
+/// Handle all ACP JSON-RPC requests via POST /acp
+async fn handle_acp_request(
+    State(state): State<Arc<AgentState>>,
+    headers: HeaderMap,
+    Json(request): Json<serde_json::Value>,
+) -> Response {
+    // Extract connection ID and session ID from headers if present
+    let connection_id = headers
+        .get("Acp-Connection-Id")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
+
+    let method = request
+        .get("method")
+        .and_then(|m| m.as_str())
+        .unwrap_or("unknown");
+
+    let id = request.get("id").cloned();
+
+    info!(
+        "ACP request: method={}, connection_id={:?}",
+        method, connection_id
+    );
+
+    // Route to appropriate handler based on method
+    let result = match method {
+        "initialize" => handle_initialize(&request).await,
+        "session/new" => handle_session_new(&state, &request).await,
+        "session/prompt" => handle_session_prompt(&state, &request).await,
+        "session/close" => handle_session_close(&state, &request).await,
+        _ => {
+            error!("Unknown ACP method: {}", method);
+            Err(json!({
+                "code": -32601,
+                "message": format!("Method not found: {}", method)
+            }))
+        }
+    };
+
+    // Build JSON-RPC response
+    let response = match result {
+        Ok(value) => json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": value
+        }),
+        Err(error) => json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": error
+        }),
+    };
+
+    // Return with appropriate headers
+    let mut response_headers = HeaderMap::new();
+    response_headers.insert("Content-Type", "application/json".parse().unwrap());
+    if let Some(conn_id) = connection_id {
+        response_headers.insert("Acp-Connection-Id", conn_id.parse().unwrap());
+    }
+
+    (StatusCode::OK, response_headers, Json(response)).into_response()
+}
+
+/// Handle ACP initialize
+async fn handle_initialize(request: &serde_json::Value) -> Result<serde_json::Value, serde_json::Value> {
+    info!("ACP initialize request");
+
+    Ok(json!({
+        "protocolVersion": "2025-11-25",
+        "serverInfo": {
+            "name": "simple-acp-agent",
+            "version": "0.1.0"
+        },
+        "capabilities": {
+            "sessions": {}
+        }
+    }))
+}
+
+/// Handle session/new
+async fn handle_session_new(
+    state: &AgentState,
+    request: &serde_json::Value,
+) -> Result<serde_json::Value, serde_json::Value> {
+    let params = request.get("params").ok_or_else(|| json!({
+        "code": -32602,
+        "message": "Missing params"
+    }))?;
+
+    let cwd = params
+        .get("cwd")
+        .and_then(|c| c.as_str())
+        .unwrap_or("/tmp");
+
+    let session_id = Uuid::new_v4().to_string();
+
+    info!("Creating ACP session {} (cwd: {})", session_id, cwd);
+
+    // Store session
+    let session_state = SessionState {
+        session_id: session_id.clone(),
+        cwd: cwd.to_string(),
+        created_at: std::time::Instant::now(),
+    };
+
+    state.sessions.write().await.insert(session_id.clone(), session_state);
+
+    Ok(json!({
+        "sessionId": session_id
+    }))
+}
+
+/// Handle session/prompt
+async fn handle_session_prompt(
+    state: &AgentState,
+    request: &serde_json::Value,
+) -> Result<serde_json::Value, serde_json::Value> {
+    let params = request.get("params").ok_or_else(|| json!({
+        "code": -32602,
+        "message": "Missing params"
+    }))?;
+
+    let session_id = params
+        .get("sessionId")
+        .and_then(|s| s.as_str())
+        .ok_or_else(|| json!({
+            "code": -32602,
+            "message": "Missing sessionId"
+        }))?;
+
+    let prompt = params.get("prompt").ok_or_else(|| json!({
+        "code": -32602,
+        "message": "Missing prompt"
+    }))?;
+
+    info!("Received prompt for session {}", session_id);
+
+    // Check if session exists
+    if !state.sessions.read().await.contains_key(session_id) {
+        return Err(json!({
+            "code": -32000,
+            "message": format!("Session not found: {}", session_id)
+        }));
+    }
+
+    // Extract user message (simplified - just get text content)
+    let user_message = prompt
+        .as_array()
+        .and_then(|arr| arr.first())
+        .and_then(|content| content.get("text"))
+        .and_then(|t| t.as_str())
+        .unwrap_or("(no message)");
+
+    info!("User message: {}", user_message);
+
+    // Simulate processing
+    let response_text = format!(
+        "Hello from {}! I received: '{}'",
+        state.agent_id, user_message
+    );
+
+    Ok(json!({
+        "content": [
+            {
+                "type": "text",
+                "text": response_text
+            }
+        ]
+    }))
+}
+
+/// Handle session/close
+async fn handle_session_close(
+    state: &AgentState,
+    request: &serde_json::Value,
+) -> Result<serde_json::Value, serde_json::Value> {
+    let params = request.get("params").ok_or_else(|| json!({
+        "code": -32602,
+        "message": "Missing params"
+    }))?;
+
+    let session_id = params
+        .get("sessionId")
+        .and_then(|s| s.as_str())
+        .ok_or_else(|| json!({
+            "code": -32602,
+            "message": "Missing sessionId"
+        }))?;
+
+    info!("Closing ACP session {}", session_id);
+
+    state.sessions.write().await.remove(session_id);
+
+    Ok(json!({}))
+}
+
+// ── Health Check ──
+
+async fn health_check() -> &'static str {
+    "OK"
+}
+
+// ── MCP Client (Connect to Ergatai) ──
+
 /// Parse SSE response and extract JSON from data: lines
 fn parse_sse_response(body: &str) -> anyhow::Result<serde_json::Value> {
-    // SSE format: "data: {...}\n\n" or just "{...}" for JSON mode
     for line in body.lines() {
         let line = line.trim();
         if line.starts_with("data: ") {
@@ -128,43 +366,46 @@ fn parse_sse_response(body: &str) -> anyhow::Result<serde_json::Value> {
                 }
             }
         } else if line.starts_with('{') {
-            // Direct JSON response (when server uses json_response mode)
             if let Ok(json) = serde_json::from_str(line) {
                 return Ok(json);
             }
         }
     }
-    // If no data: lines found, try parsing the whole body as JSON
     serde_json::from_str(body)
         .map_err(|e| anyhow::anyhow!("Failed to parse response: {} - body: {}", e, body))
 }
 
-/// Connect to Ergatai's MCP endpoint and register this agent.
-/// Uses MCP 2025-03-26 protocol with Streamable HTTP transport.
+/// Connect to Ergatai's MCP endpoint and register this agent
 async fn connect_to_ergatai(
     agent_id: &str,
     ergatai_endpoint: &str,
-    port: u16,
-) -> anyhow::Result<()> {
+    acp_port: u16,
+) -> anyhow::Result<String> {
     let client = reqwest::Client::new();
     let mcp_url = format!("{}/mcp", ergatai_endpoint);
 
-    // Step 1: Initialize with MCP 2025-03-26 protocol (camelCase fields)
+    // Initialize with MCP protocol, including ACP port in meta
     let init_request = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,
         "method": "initialize",
         "params": {
-            "protocolVersion": "2025-03-26",
+            "protocolVersion": "2025-11-25",
             "clientInfo": {
                 "name": agent_id,
                 "version": "0.1.0"
             },
-            "capabilities": {}
+            "capabilities": {},
+            "_meta": {
+                "acp_port": acp_port
+            }
         }
     });
 
-    info!("Sending MCP initialize to {}", mcp_url);
+    info!(
+        "Sending MCP initialize to {} with ACP port {}",
+        mcp_url, acp_port
+    );
 
     let response = client
         .post(&mcp_url)
@@ -175,8 +416,6 @@ async fn connect_to_ergatai(
         .await?;
 
     let status = response.status();
-
-    // Extract session ID from response headers
     let session_id = response
         .headers()
         .get("mcp-session-id")
@@ -184,7 +423,6 @@ async fn connect_to_ergatai(
         .unwrap_or("")
         .to_string();
 
-    // Parse SSE response
     let body_text = response.text().await?;
     let body = parse_sse_response(&body_text)?;
 
@@ -201,7 +439,7 @@ async fn connect_to_ergatai(
             .unwrap_or(&serde_json::Value::Null)
     );
 
-    // Step 2: Send initialized notification
+    // Send initialized notification
     let notification = serde_json::json!({
         "jsonrpc": "2.0",
         "method": "notifications/initialized"
@@ -212,37 +450,36 @@ async fn connect_to_ergatai(
         .header("Content-Type", "application/json")
         .header("Accept", "application/json, text/event-stream")
         .header("Mcp-Session-Id", &session_id)
-        .header("MCP-Protocol-Version", "2025-03-26")
+        .header("MCP-Protocol-Version", "2025-11-25")
         .json(&notification)
         .send()
         .await?;
 
     info!("Sent initialized notification");
 
-    // Step 3: Register ACP endpoint via set_acp_endpoint tool
-    let acp_endpoint = format!("http://localhost:{}", port);
-    let tool_request = serde_json::json!({
+    // Auto-register ACP endpoint using the tool
+    let acp_endpoint = format!("http://127.0.0.1:{}", acp_port);
+    let register_request = serde_json::json!({
         "jsonrpc": "2.0",
-        "id": 2,
+        "id": 3,
         "method": "tools/call",
         "params": {
             "name": "set_acp_endpoint",
             "arguments": {
-                "agent_id": agent_id,
+                "agent_id": agent_id,  // MUST provide agent_id
                 "endpoint": acp_endpoint
             }
         }
     });
 
     info!("Registering ACP endpoint: {}", acp_endpoint);
-
     let response = client
         .post(&mcp_url)
         .header("Content-Type", "application/json")
         .header("Accept", "application/json, text/event-stream")
         .header("Mcp-Session-Id", &session_id)
-        .header("MCP-Protocol-Version", "2025-03-26")
-        .json(&tool_request)
+        .header("MCP-Protocol-Version", "2025-11-25")
+        .json(&register_request)
         .send()
         .await?;
 
@@ -250,16 +487,16 @@ async fn connect_to_ergatai(
     let body = parse_sse_response(&body_text)?;
 
     if body.get("error").is_some() {
-        error!("set_acp_endpoint failed: {:?}", body);
-        return Err(anyhow::anyhow!("set_acp_endpoint failed"));
+        error!("Failed to register ACP endpoint: {:?}", body);
+        return Err(anyhow::anyhow!("Failed to register ACP endpoint"));
     }
 
-    info!("ACP endpoint registered successfully");
+    info!("✅ ACP endpoint registered successfully");
 
-    // Step 4: List available tools (for demonstration)
+    // List available tools
     let list_tools_request = serde_json::json!({
         "jsonrpc": "2.0",
-        "id": 3,
+        "id": 2,
         "method": "tools/list",
         "params": {}
     });
@@ -269,7 +506,7 @@ async fn connect_to_ergatai(
         .header("Content-Type", "application/json")
         .header("Accept", "application/json, text/event-stream")
         .header("Mcp-Session-Id", &session_id)
-        .header("MCP-Protocol-Version", "2025-03-26")
+        .header("MCP-Protocol-Version", "2025-11-25")
         .json(&list_tools_request)
         .send()
         .await?;
@@ -278,112 +515,134 @@ async fn connect_to_ergatai(
     let body = parse_sse_response(&body_text)?;
     info!("Available Ergatai tools: {:?}", body.get("result"));
 
-    Ok(())
+    Ok(session_id)
 }
 
-// ── ACP HTTP Handlers ──
+/// Start automatic conversation with other agents
+async fn start_auto_conversation(
+    agent_id: &str,
+    ergatai_endpoint: &str,
+    mcp_session_id: &str,
+) -> anyhow::Result<()> {
+    let client = reqwest::Client::new();
+    let mcp_url = format!("{}/mcp", ergatai_endpoint);
 
-async fn health_check() -> &'static str {
-    "OK"
-}
+    info!("🤖 Starting automatic conversation...");
 
-#[derive(Debug, Deserialize)]
-struct NewSessionRequest {
-    #[serde(default)]
-    cwd: Option<String>,
-}
+    // Step 1: List other agents
+    let list_request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 10,
+        "method": "tools/call",
+        "params": {
+            "name": "list_agents",
+            "arguments": {}
+        }
+    });
 
-#[derive(Debug, Serialize)]
-struct NewSessionResponse {
-    session_id: String,
-}
+    let response = client
+        .post(&mcp_url)
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json, text/event-stream")
+        .header("Mcp-Session-Id", mcp_session_id)
+        .header("MCP-Protocol-Version", "2025-11-25")
+        .json(&list_request)
+        .send()
+        .await?;
 
-async fn create_session(Json(req): Json<NewSessionRequest>) -> impl IntoResponse {
-    let state = get_state();
-    let session_id = uuid::Uuid::new_v4().to_string();
+    let body_text = response.text().await?;
+    let body = parse_sse_response(&body_text)?;
 
-    info!(
-        "Creating session {} for agent {} (cwd: {:?})",
-        session_id, state.agent_id, req.cwd
-    );
+    // Parse agent list
+    let agents_json = body
+        .get("result")
+        .and_then(|r| r.get("content"))
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("text"))
+        .and_then(|t| t.as_str())
+        .unwrap_or("{}");
 
-    (StatusCode::OK, Json(NewSessionResponse { session_id }))
-}
+    let agents_data: serde_json::Value = serde_json::from_str(agents_json)?;
+    let agents = agents_data
+        .get("agents")
+        .and_then(|a| a.as_array())
+        .unwrap_or(&vec![])
+        .clone();
 
-#[derive(Debug, Deserialize)]
-struct PromptRequest {
-    messages: Vec<Message>,
-}
+    info!("Found {} agents in the system", agents.len());
 
-#[derive(Debug, Deserialize)]
-struct Message {
-    role: String,
-    content: String,
-}
-
-#[derive(Debug, Serialize)]
-struct PromptResponse {
-    content: Vec<Content>,
-}
-
-#[derive(Debug, Serialize)]
-struct Content {
-    r#type: String,
-    text: String,
-}
-
-async fn handle_prompt(
-    axum::extract::Path(session_id): axum::extract::Path<String>,
-    Json(req): Json<PromptRequest>,
-) -> impl IntoResponse {
-    let state = get_state();
-
-    info!(
-        "Received prompt for session {} (agent: {})",
-        session_id, state.agent_id
-    );
-
-    // Extract the last user message
-    let user_message = req
-        .messages
+    // Find other agents (not this one)
+    let other_agents: Vec<_> = agents
         .iter()
-        .rev()
-        .find(|m| m.role == "user")
-        .map(|m| m.content.as_str())
-        .unwrap_or("(no message)");
+        .filter(|a| {
+            a.get("agent_id")
+                .and_then(|id| id.as_str())
+                .map(|id| !id.starts_with(agent_id))
+                .unwrap_or(false)
+        })
+        .collect();
 
-    info!("User message: {}", user_message);
+    if other_agents.is_empty() {
+        info!("No other agents to talk to. Waiting for more agents to join...");
+        return Ok(());
+    }
 
-    // Simulate processing and response
-    let response_text = format!(
-        "Hello from {}! I received your message: '{}'",
-        state.agent_id, user_message
-    );
+    info!("Found {} other agents to chat with", other_agents.len());
 
-    let response = PromptResponse {
-        content: vec![Content {
-            r#type: "text".to_string(),
-            text: response_text,
-        }],
-    };
+    // Step 2: Send message to the first other agent
+    if let Some(target_agent) = other_agents.first() {
+        let target_id = target_agent
+            .get("agent_id")
+            .and_then(|id| id.as_str())
+            .unwrap_or("unknown");
 
-    (StatusCode::OK, Json(response))
-}
+        info!("💬 Sending message to {}...", target_id);
 
-#[derive(Debug, Serialize)]
-struct CloseSessionResponse {
-    status: String,
-}
+        let message = format!(
+            "Hi from {}! Let's collaborate. What are you working on?",
+            agent_id
+        );
 
-async fn close_session(
-    axum::extract::Path(session_id): axum::extract::Path<String>,
-) -> impl IntoResponse {
-    info!("Closing session {}", session_id);
+        let send_request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 11,
+            "method": "tools/call",
+            "params": {
+                "name": "send_message",
+                "arguments": {
+                    "target_agent_id": target_id,
+                    "message": message,
+                    "message_type": "request"
+                }
+            }
+        });
 
-    (
-        StatusCode::OK,
-        Json(CloseSessionResponse {
-            status: "closed".to_string(),
-        }),
-    )
+        let response = client
+            .post(&mcp_url)
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json, text/event-stream")
+            .header("Mcp-Session-Id", mcp_session_id)
+            .header("MCP-Protocol-Version", "2025-11-25")
+            .json(&send_request)
+            .send()
+            .await?;
+
+        let body_text = response.text().await?;
+        let body = parse_sse_response(&body_text)?;
+
+        if let Some(result) = body.get("result") {
+            info!("✅ Message sent successfully: {:?}", result);
+        } else if let Some(error) = body.get("error") {
+            error!("❌ Failed to send message: {:?}", error);
+        }
+    }
+
+    // Step 3: Wait and listen for responses
+    info!("👂 Listening for incoming messages...");
+
+    // Keep the agent running to receive messages
+    loop {
+        tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+        info!("Agent still active, waiting for more conversations...");
+    }
 }
