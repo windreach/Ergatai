@@ -6,6 +6,7 @@ pub mod types;
 pub mod agent_registry;
 pub mod tools;
 pub mod server;
+pub mod message_relay;
 
 pub use server::McpServer;
 pub use agent_registry::AgentRegistry;

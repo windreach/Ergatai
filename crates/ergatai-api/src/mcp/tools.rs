@@ -8,6 +8,7 @@ use tracing::{info, warn};
 
 use super::types::{Content, Tool, ToolCallResponse};
 use super::agent_registry::AgentRegistry;
+use super::message_relay;
 
 /// Create tool definitions
 pub fn get_tool_definitions() -> Vec<Tool> {
