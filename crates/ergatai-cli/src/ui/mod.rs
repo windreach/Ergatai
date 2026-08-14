@@ -5,4 +5,5 @@ pub mod event;
 pub mod input;
 pub mod render;
 pub mod runner;
+pub mod theme;
 pub mod widgets;

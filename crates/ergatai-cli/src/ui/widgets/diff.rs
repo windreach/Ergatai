@@ -6,16 +6,10 @@
 
 use imara_diff::intern::InternedInput;
 use imara_diff::{diff, Algorithm};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 
-/// Background RGB for added lines on a dark terminal (codex: `#213A2B`).
-const DARK_ADD_BG: Color = Color::Rgb(33, 58, 43);
-/// Background RGB for removed lines on a dark terminal (codex: `#4A221D`).
-const DARK_DEL_BG: Color = Color::Rgb(74, 34, 29);
-/// Foreground for the sign column (`+` / `-`).
-const SIGN_ADD_FG: Color = Color::Green;
-const SIGN_DEL_FG: Color = Color::Red;
+use crate::ui::theme;
 
 /// A single line in a diff output.
 #[derive(Debug, Clone)]
@@ -125,12 +119,18 @@ pub fn render_diff(lines: &[DiffLine]) -> Text<'static> {
                     Span::styled(
                         format!("{ln_str} "),
                         Style::default()
-                            .fg(SIGN_ADD_FG)
-                            .bg(DARK_ADD_BG)
+                            .fg(theme::diff_add_fg())
+                            .bg(theme::diff_add_bg())
                             .add_modifier(Modifier::DIM),
                     ),
-                    Span::styled("+", Style::default().fg(SIGN_ADD_FG).bg(DARK_ADD_BG)),
-                    Span::styled(format!(" {}", line.content), Style::default().bg(DARK_ADD_BG)),
+                    Span::styled(
+                        "+",
+                        Style::default().fg(theme::diff_add_fg()).bg(theme::diff_add_bg()),
+                    ),
+                    Span::styled(
+                        format!(" {}", line.content),
+                        Style::default().bg(theme::diff_add_bg()),
+                    ),
                 ]));
             }
             DiffKind::Removed => {
@@ -142,12 +142,18 @@ pub fn render_diff(lines: &[DiffLine]) -> Text<'static> {
                     Span::styled(
                         format!("{ln_str} "),
                         Style::default()
-                            .fg(SIGN_DEL_FG)
-                            .bg(DARK_DEL_BG)
+                            .fg(theme::diff_del_fg())
+                            .bg(theme::diff_del_bg())
                             .add_modifier(Modifier::DIM),
                     ),
-                    Span::styled("-", Style::default().fg(SIGN_DEL_FG).bg(DARK_DEL_BG)),
-                    Span::styled(format!(" {}", line.content), Style::default().bg(DARK_DEL_BG)),
+                    Span::styled(
+                        "-",
+                        Style::default().fg(theme::diff_del_fg()).bg(theme::diff_del_bg()),
+                    ),
+                    Span::styled(
+                        format!(" {}", line.content),
+                        Style::default().bg(theme::diff_del_bg()),
+                    ),
                 ]));
             }
         }

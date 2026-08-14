@@ -13,23 +13,20 @@
 //!   31, 31)` — a 12% white blend on a black terminal). Combined with the
 //!   `▌` prefix this visually separates user turns without a border.
 
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
 
 use crate::ui::app::Message;
+use crate::ui::theme;
 use crate::ui::widgets::{thinking, tool_card};
-
-/// Subtle background applied to every user-message line. Matches codex's
-/// dark-terminal user-message tint (12% white blended onto black).
-const USER_MSG_BG: Color = Color::Rgb(31, 31, 31);
 
 /// Append one message's content to `text`. Each message is followed by a
 /// blank line for readability.
 pub fn render_into(text: &mut Text<'static>, msg: &Message, collapsed_thinking: bool) {
     match msg {
         Message::User { text: content } => {
-            let prefix_style = Style::default().fg(Color::Cyan).bg(USER_MSG_BG);
-            let content_style = Style::default().bg(USER_MSG_BG);
+            let prefix_style = Style::default().fg(theme::accent()).bg(theme::user_msg_bg());
+            let content_style = Style::default().bg(theme::user_msg_bg());
             let lines: Vec<&str> = content.lines().collect();
             if lines.is_empty() {
                 text.lines
@@ -71,7 +68,7 @@ pub fn render_into(text: &mut Text<'static>, msg: &Message, collapsed_thinking: 
             if content.is_empty() && *in_progress {
                 text.lines.push(Line::from(Span::styled(
                     "…",
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(theme::muted()),
                 )));
             } else if !content.is_empty() {
                 let md =
@@ -90,7 +87,7 @@ pub fn render_into(text: &mut Text<'static>, msg: &Message, collapsed_thinking: 
         Message::System { text: content } => {
             text.lines.push(Line::from(Span::styled(
                 format!("• {content}"),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme::muted()),
             )));
             text.lines.push(Line::default());
         }

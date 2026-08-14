@@ -42,6 +42,18 @@ clap = { version = "4.5", features = ["derive", "env"] }
 ratatui = "0.30"
 crossterm = "0.29"
 
+# TUI ecosystem
+ratatui-interact = "0.5.3"
+tui-widgets = { version = "0.7.10", default-features = false, features = [
+    "popup",
+    "scrollview",
+    "scrollbar",
+    "prompts",
+    "big-text",
+] }
+tui-skeleton = "0.3.0"
+unicode-width = "0.2"
+
 # Database
 rusqlite = { version = "0.31", features = ["bundled"] }
 

@@ -4,57 +4,35 @@
 //! invoke a tool.  The dialog shows the tool name, the available options,
 //! and keyboard hints for navigating / confirming.
 //!
-//! Phase A: softened border (DarkGray), title simplified to
-//! `Permission Request` in default fg (no ⚠, no yellow).
+//! Uses `tui_widgets::popup::Popup` (re-export of `tui-popup`) for
+//! auto-centering, background clearing, and border rendering.  The content
+//! (tool name + option list + hints) is built as a `Text` and passed as the
+//! popup body.  Keyboard navigation (j/k/Enter/Esc) is handled by
+//! `handle_permission_key` in `render/mod.rs`.
 
-use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::layout::Rect;
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span, Text};
 use ratatui::Frame;
+use tui_widgets::popup::Popup;
 
 use crate::ui::app::PermissionDialog;
+use crate::ui::theme;
 
 /// Render the permission dialog as a centered overlay on top of the frame.
 ///
-/// The dialog is ~60% wide × ~40% tall, centered in the given `area`.
-/// A `Clear` widget is drawn first so the underlying content is hidden
-/// behind the dialog.
+/// `tui-popup` handles centering, clearing the underlying content, and
+/// drawing the border + title.  We just build the body text.
 pub fn render_permission_dialog(dialog: &PermissionDialog, area: Rect, frame: &mut Frame<'_>) {
-    // Centre a ~60% × ~40% block inside `area`.
-    let vertical = Layout::vertical([
-        Constraint::Percentage(30),
-        Constraint::Percentage(40),
-        Constraint::Percentage(30),
-    ])
-    .split(area);
-    let horizontal = Layout::horizontal([
-        Constraint::Percentage(20),
-        Constraint::Percentage(60),
-        Constraint::Percentage(20),
-    ])
-    .split(vertical[1]);
-
-    let dialog_area = horizontal[1];
-
-    // Clear underlying content.
-    frame.render_widget(Clear, dialog_area);
-
-    // Softened border: DarkGray instead of Yellow.
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray))
-        .title(Span::styled(" Permission Request ", Style::default()));
-
     let mut lines: Vec<Line<'static>> = Vec::new();
 
     // Tool name.
     lines.push(Line::from(vec![
-        Span::styled("Tool: ", Style::default().fg(Color::Gray)),
+        Span::styled("Tool: ", Style::default().fg(theme::dim())),
         Span::styled(
             dialog.tool_name.clone(),
             Style::default()
-                .fg(Color::Cyan)
+                .fg(theme::accent())
                 .add_modifier(Modifier::BOLD),
         ),
     ]));
@@ -72,14 +50,14 @@ pub fn render_permission_dialog(dialog: &PermissionDialog, area: Rect, frame: &m
 
         let is_selected = i == dialog.selected;
         let fg = if is_selected {
-            Color::Black
+            theme::highlight_fg()
         } else {
-            Color::White
+            theme::default_fg()
         };
         let bg = if is_selected {
-            Color::Cyan
+            theme::accent()
         } else {
-            Color::Reset
+            ratatui::style::Color::Reset
         };
         let line = Line::from(vec![
             Span::raw("  "),
@@ -95,14 +73,17 @@ pub fn render_permission_dialog(dialog: &PermissionDialog, area: Rect, frame: &m
 
     // Keyboard hints.
     lines.push(Line::from(vec![
-        Span::styled("[↑↓]", Style::default().fg(Color::DarkGray)),
-        Span::styled(" navigate  ", Style::default().fg(Color::DarkGray)),
-        Span::styled("[Enter]", Style::default().fg(Color::DarkGray)),
-        Span::styled(" confirm  ", Style::default().fg(Color::DarkGray)),
-        Span::styled("[Esc]", Style::default().fg(Color::DarkGray)),
-        Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
+        Span::styled("[↑↓]", Style::default().fg(theme::muted())),
+        Span::styled(" navigate  ", Style::default().fg(theme::muted())),
+        Span::styled("[Enter]", Style::default().fg(theme::muted())),
+        Span::styled(" confirm  ", Style::default().fg(theme::muted())),
+        Span::styled("[Esc]", Style::default().fg(theme::muted())),
+        Span::styled(" cancel", Style::default().fg(theme::muted())),
     ]));
 
-    let paragraph = Paragraph::new(lines).block(block);
-    frame.render_widget(paragraph, dialog_area);
+    let body = Text::from(lines);
+    let popup = Popup::new(body)
+        .title(" Permission Request ")
+        .border_style(Style::default().fg(theme::muted()));
+    frame.render_widget(popup, area);
 }

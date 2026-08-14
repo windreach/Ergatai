@@ -16,11 +16,12 @@
 //!   [`TOOL_OUTPUT_PREVIEW_LINES`] lines, we show the first few lines then
 //!   a dim `… +N lines (ctrl+t to view transcript)` hint.
 
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 
 use super::diff::render_diff;
 use crate::ui::app::{ToolCall, ToolStatus};
+use crate::ui::theme;
 
 /// Maximum number of output lines shown when a tool card is expanded.
 const TOOL_OUTPUT_PREVIEW_LINES: usize = 5;
@@ -36,7 +37,7 @@ pub fn render_tool_card_into(text: &mut Text<'static>, tc: &ToolCall) {
         if let Some(diff_lines) = &tc.diff_lines {
             text.lines.push(Line::from(Span::styled(
                 "  ── diff ──",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme::muted()),
             )));
             let diff_text = render_diff(diff_lines);
             for line in diff_text.lines {
@@ -50,17 +51,21 @@ pub fn render_tool_card_into(text: &mut Text<'static>, tc: &ToolCall) {
             for line in pretty.lines() {
                 text.lines.push(Line::from(Span::styled(
                     format!("  {line}"),
-                    Style::default().fg(Color::Gray),
+                    Style::default().fg(theme::dim()),
                 )));
             }
         }
         // Output preview (head + ellipsis hint when truncated).
         if let Some(out) = &tc.output {
-            let color = if out.is_error { Color::Red } else { Color::Reset };
+            let color = if out.is_error {
+                theme::error()
+            } else {
+                ratatui::style::Color::Reset
+            };
             let all_lines: Vec<&str> = out.text.lines().collect();
             for line in all_lines.iter().take(TOOL_OUTPUT_PREVIEW_LINES) {
                 text.lines.push(Line::from(vec![
-                    Span::styled("  └ ", Style::default().fg(Color::DarkGray)),
+                    Span::styled("  └ ", Style::default().fg(theme::muted())),
                     Span::styled(line.to_string(), Style::default().fg(color)),
                 ]));
             }
@@ -84,32 +89,32 @@ fn render_header(tc: &ToolCall, summary: &str) -> Line<'static> {
         Span::raw(" "),
         Span::styled(verb, Style::default().add_modifier(Modifier::BOLD)),
         Span::raw(" "),
-        Span::styled(format!("{icon} "), Style::default().fg(Color::Cyan)),
+        Span::styled(format!("{icon} "), Style::default().fg(theme::accent())),
         Span::styled(
             tc.name.clone(),
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default().fg(theme::accent()).add_modifier(Modifier::BOLD),
         ),
         Span::raw(": "),
-        Span::styled(summary.to_string(), Style::default().fg(Color::DarkGray)),
+        Span::styled(summary.to_string(), Style::default().fg(theme::muted())),
     ])
 }
 
 fn status_bullet(status: ToolStatus) -> Span<'static> {
     let style = match status {
-        ToolStatus::Running => Style::default().fg(Color::Yellow),
-        ToolStatus::Success => Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
-        ToolStatus::Failed => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        ToolStatus::Denied => Style::default().fg(Color::DarkGray),
+        ToolStatus::Running => Style::default().fg(theme::warning()),
+        ToolStatus::Success => Style::default().fg(theme::success()).add_modifier(Modifier::BOLD),
+        ToolStatus::Failed => Style::default().fg(theme::error()).add_modifier(Modifier::BOLD),
+        ToolStatus::Denied => Style::default().fg(theme::muted()),
     };
     Span::styled("•".to_string(), style)
 }
 
 fn output_ellipsis_line(omitted: usize) -> Line<'static> {
     Line::from(vec![
-        Span::styled("  └ ", Style::default().fg(Color::DarkGray)),
+        Span::styled("  └ ", Style::default().fg(theme::muted())),
         Span::styled(
             format!("… +{omitted} lines (ctrl+t to view transcript)"),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme::muted()),
         ),
     ])
 }

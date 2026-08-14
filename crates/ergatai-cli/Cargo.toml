@@ -37,7 +37,12 @@ dialoguer = "0.11"   # retained for first-run setup wizard (not in main TUI loop
 console = "0.15"
 tui-textarea-2 = "0.12"
 tui-markdown = "0.3"
-unicode-width = "0.1"
+unicode-width.workspace = true
+
+# TUI ecosystem
+ratatui-interact.workspace = true
+tui-widgets.workspace = true
+tui-skeleton.workspace = true
 
 # Phase 3: syntax highlighting + diff
 syntect.workspace = true

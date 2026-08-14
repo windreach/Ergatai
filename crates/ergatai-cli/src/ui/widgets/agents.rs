@@ -13,6 +13,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 use ratatui::Frame;
 
+use crate::ui::theme;
+
 /// High-level state of an agent in the multi-agent panel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
@@ -51,10 +53,10 @@ impl AgentState {
     /// Colour used for the status icon/label.
     pub fn color(self) -> Color {
         match self {
-            AgentState::Idle => Color::DarkGray,
-            AgentState::Busy => Color::Yellow,
-            AgentState::Done => Color::Green,
-            AgentState::Error => Color::Red,
+            AgentState::Idle => theme::muted(),
+            AgentState::Busy => theme::warning(),
+            AgentState::Done => theme::success(),
+            AgentState::Error => theme::error(),
         }
     }
 }
@@ -82,7 +84,7 @@ pub fn render_agents_panel(frame: &mut Frame<'_>, area: Rect, agents: &[AgentSta
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray))
+        .border_style(Style::default().fg(theme::muted()))
         .title(" Agents ");
 
     let items: Vec<ListItem> = agents
@@ -105,7 +107,7 @@ pub fn render_agents_panel(frame: &mut Frame<'_>, area: Rect, agents: &[AgentSta
                     a.status.label().to_string(),
                     Style::default().fg(a.status.color()),
                 ),
-                Span::styled(task_suffix, Style::default().fg(Color::DarkGray)),
+                Span::styled(task_suffix, Style::default().fg(theme::muted())),
             ]);
             ListItem::new(line)
         })
@@ -149,10 +151,10 @@ pub fn render_placeholder(frame: &mut Frame<'_>, area: Rect) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::DarkGray))
+                .border_style(Style::default().fg(theme::muted()))
                 .title(" Agents "),
         )
-        .style(Style::default().fg(Color::DarkGray));
+        .style(Style::default().fg(theme::muted()));
     frame.render_widget(text, area);
 }
 

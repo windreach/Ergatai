@@ -4,15 +4,16 @@
 //! secondary — users learn shortcuts; we don't advertise everything.
 
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use crate::ui::app::AppState;
+use crate::ui::theme;
 
 pub fn render(frame: &mut Frame<'_>, area: Rect, _app: &AppState<'_>) {
-    let dim = Style::default().fg(Color::DarkGray);
+    let dim = Style::default().fg(theme::muted());
     let line = Line::from(vec![
         Span::styled("↑↓ history", dim),
         Span::styled("  ·  ", dim),

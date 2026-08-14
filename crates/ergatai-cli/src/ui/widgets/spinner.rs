@@ -11,8 +11,10 @@
 //! blends a highlight color across a run of characters. Falls back to a
 //! bold/dim alternation when truecolor is unavailable.
 
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
+
+use crate::ui::theme;
 
 /// The set of spinner frames used for the "thinking" indicator.
 ///
@@ -57,8 +59,8 @@ impl SpinnerPhase {
     /// Style applied to the spinner frame.
     pub fn style(self) -> Style {
         match self {
-            SpinnerPhase::Thinking => Style::default().fg(Color::Magenta),
-            SpinnerPhase::Tool => Style::default().fg(Color::Yellow),
+            SpinnerPhase::Thinking => Style::default().fg(theme::thinking()),
+            SpinnerPhase::Tool => Style::default().fg(theme::warning()),
             SpinnerPhase::Idle => Style::default(),
         }
     }
@@ -76,7 +78,7 @@ pub fn spinner_line(phase: SpinnerPhase, tick: u64, label: &str) -> Line<'static
     if !label.is_empty() {
         spans.push(Span::styled(
             label.to_string(),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme::muted()),
         ));
     }
     Line::from(spans)
@@ -143,16 +145,16 @@ pub fn shimmer_spans(text: &str, tick: u64, truecolor: bool) -> Vec<Span<'static
                 let peak: f32 = 255.0;
                 let v = (base + (peak - base) * intensity * 0.9) as u8;
                 Style::default()
-                    .fg(Color::Rgb(v, v, v))
+                    .fg(ratatui::style::Color::Rgb(v, v, v))
                     .add_modifier(Modifier::BOLD)
             } else if intensity > 0.5 {
                 Style::default()
-                    .fg(Color::White)
+                    .fg(ratatui::style::Color::White)
                     .add_modifier(Modifier::BOLD)
             } else if intensity > 0.0 {
-                Style::default().fg(Color::Yellow)
+                Style::default().fg(theme::warning())
             } else {
-                Style::default().fg(Color::DarkGray)
+                Style::default().fg(theme::muted())
             };
             Span::styled(ch.to_string(), style)
         })

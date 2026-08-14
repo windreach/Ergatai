@@ -3,8 +3,10 @@
 //! Phase A: removed `(Ctrl-T to expand)` help hint — the footer handles
 //! shortcut discovery.
 
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
+
+use crate::ui::theme;
 
 /// Render a thinking block into the given Text.
 ///
@@ -19,14 +21,14 @@ pub fn render_thinking_into(text: &mut Text<'static>, thinking: &str, collapsed:
         // Collapsed: single line indicator (no help hint — footer covers shortcuts).
         text.lines.push(Line::from(Span::styled(
             "💭 Thinking…",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme::muted()),
         )));
     } else {
         // Expanded: show full thinking text with dim styling.
         for line in thinking.lines() {
             text.lines.push(Line::from(Span::styled(
                 format!("│ {line}"),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme::dim()),
             )));
         }
     }

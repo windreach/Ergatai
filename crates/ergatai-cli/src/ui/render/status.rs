@@ -20,12 +20,13 @@
 //! ```
 
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use crate::ui::app::AppState;
+use crate::ui::theme;
 use crate::ui::widgets::spinner::{fmt_elapsed_compact, shimmer_spans, spinner_line};
 
 /// Separator between segments.
@@ -35,8 +36,8 @@ const SEP: &str = "  ·  ";
 const TICK_MS: u64 = 50;
 
 pub fn render(frame: &mut Frame<'_>, area: Rect, app: &AppState<'_>) {
-    let dim = Style::default().fg(Color::DarkGray);
-    let cyan = Style::default().fg(Color::Cyan);
+    let dim = Style::default().fg(theme::muted());
+    let cyan = Style::default().fg(theme::accent());
     let bold_default = Style::default().add_modifier(Modifier::BOLD);
 
     let truecolor = is_truecolor();

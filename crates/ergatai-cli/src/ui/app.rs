@@ -1,11 +1,12 @@
 //! Application state and message types for the TUI.
 
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use serde_json::Value;
 use tui_textarea::TextArea;
 
 use super::input::complete::{Completion, SlashCompleter};
 use super::input::history::InputHistory;
+use super::theme;
 use super::widgets::agents::AgentStatus;
 
 // Phase 3: re-export diff types for convenience.
@@ -307,7 +308,7 @@ fn new_textarea_with_placeholder<'a>() -> TextArea<'a> {
     textarea.set_placeholder_text("Ask agent anything");
     textarea.set_placeholder_style(
         Style::default()
-            .fg(Color::DarkGray)
+            .fg(theme::muted())
             .add_modifier(Modifier::ITALIC),
     );
     textarea

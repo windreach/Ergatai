@@ -10,12 +10,13 @@
 //!   highlight (Black on Cyan) without the `▸ ` marker.
 
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, Paragraph};
 use ratatui::Frame;
 
 use crate::ui::app::AppState;
+use crate::ui::theme;
 
 /// The minimum height reserved for the input area (matches the layout in
 /// `root.rs`): 1 row separator + 2 rows textarea. When the completion popup is
@@ -77,7 +78,7 @@ fn render_separator(frame: &mut Frame<'_>, area: Rect) {
     let line = "─".repeat(width);
     let paragraph = Paragraph::new(Span::styled(
         line,
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(theme::muted()),
     ));
     frame.render_widget(paragraph, area);
 }
@@ -110,16 +111,16 @@ fn render_popup(frame: &mut Frame<'_>, area: Rect, app: &AppState<'_>) {
             // No marker — selected item uses background highlight only.
             let label_style = if is_selected {
                 Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Cyan)
+                    .fg(theme::highlight_fg())
+                    .bg(theme::accent())
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::Cyan)
+                Style::default().fg(theme::accent())
             };
             let desc_style = if is_selected {
-                Style::default().fg(Color::Black).bg(Color::Cyan)
+                Style::default().fg(theme::highlight_fg()).bg(theme::accent())
             } else {
-                Style::default().fg(Color::DarkGray)
+                Style::default().fg(theme::muted())
             };
             let line = Line::from(vec![
                 Span::raw("  "), // consistent indent (replaces old marker column)
