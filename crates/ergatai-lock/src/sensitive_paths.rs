@@ -7,6 +7,35 @@ use glob::Pattern;
 use std::path::Path;
 use std::sync::LazyLock;
 
+/// Check if a path is a symbolic link.
+///
+/// Symlinks can be used to bypass path validation and access sensitive files
+/// outside the allowed directory tree.
+///
+/// # Arguments
+/// * `path` - The path to check
+///
+/// # Returns
+/// `Ok(())` if the path is safe (not a symlink), `Err` with description if it's a symlink.
+pub fn check_symlink(path: &Path) -> Result<(), String> {
+    match path.symlink_metadata() {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() {
+                Err(format!(
+                    "Symbolic link not allowed: {}. Symlinks can bypass path validation.",
+                    path.display()
+                ))
+            } else {
+                Ok(())
+            }
+        }
+        Err(e) => {
+            // If we can't read metadata, treat as error
+            Err(format!("Cannot read metadata for {}: {}", path.display(), e))
+        }
+    }
+}
+
 /// System default sensitive path patterns
 /// These always require ADMIN permission
 const SYSTEM_SENSITIVE_PATTERNS: &[&str] = &[
@@ -294,5 +323,23 @@ mod tests {
         // Absolute paths are rejected as sensitive for security
         assert!(is_in_sensitive_directory("/"));
         assert!(is_sensitive_path("/etc/passwd"));
+    }
+
+    #[test]
+    fn test_check_symlink_nonexistent() {
+        // Non-existent path should return error (can't read metadata)
+        let result = check_symlink(Path::new("/nonexistent/path/that/does/not/exist"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_check_symlink_regular_file() {
+        // Create a temporary regular file and verify it passes
+        let temp_dir = std::env::temp_dir();
+        let temp_file = temp_dir.join("ergatai_test_regular_file.txt");
+        std::fs::write(&temp_file, "test").unwrap();
+        let result = check_symlink(&temp_file);
+        assert!(result.is_ok());
+        std::fs::remove_file(&temp_file).ok();
     }
 }

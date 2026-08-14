@@ -340,9 +340,12 @@ impl ErgataiMcpServer {
         // For now, we trust the agent_id parameter, but in production
         // we should validate against the MCP session's authenticated agent
         info!("✅ Agent {} registering ACP endpoint: {}", agent_id, endpoint);
-        self.registry
+        if let Err(e) = self.registry
             .set_acp_endpoint(&agent_id, endpoint.to_string())
-            .await;
+            .await
+        {
+            return Err(ErrorData::invalid_params(format!("Invalid ACP endpoint: {}", e), None::<serde_json::Value>));
+        }
 
         // Verify it was stored
         let stored = self.registry.get_acp_endpoint(&agent_id).await;
@@ -446,9 +449,12 @@ impl ServerHandler for ErgataiMcpServer {
         *self.session_agent_id.write().await = Some(unique_agent_id.clone());
 
         // Register agent in registry with unique ID
-        self.registry
+        if let Err(e) = self.registry
             .register_agent(unique_agent_id.clone(), connection_id.clone(), None, None)
-            .await;
+            .await
+        {
+            return Err(ErrorData::invalid_params(format!("Failed to register agent: {}", e), None::<serde_json::Value>));
+        }
 
         info!("Agent registered: {} (connection: {})", unique_agent_id, connection_id);
 

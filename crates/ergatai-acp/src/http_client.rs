@@ -5,6 +5,7 @@
 //! via this module instead of spawning agent processes.
 
 use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use agent_client_protocol::{Client, ConnectionTo, Agent};
 use agent_client_protocol_http::HttpClient;
@@ -13,6 +14,134 @@ use tokio::sync::{mpsc, oneshot, RwLock};
 use tracing::{error, info, warn};
 
 use crate::manager::{SessionCommand, SessionKind};
+
+/// Circuit breaker states
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CircuitState {
+    /// Circuit is closed, requests flow normally
+    Closed,
+    /// Circuit is open, requests are rejected
+    Open,
+    /// Circuit is half-open, testing if service recovered
+    HalfOpen,
+}
+
+/// Circuit breaker for ACP HTTP connections.
+///
+/// Prevents cascading failures by stopping requests to unhealthy agents.
+/// After N consecutive failures, the circuit opens for M seconds.
+/// In half-open state, one successful request closes the circuit.
+pub struct CircuitBreaker {
+    /// Current state
+    state: Arc<RwLock<CircuitState>>,
+    /// Consecutive failure count
+    failures: Arc<AtomicU32>,
+    /// Failure threshold to open circuit
+    failure_threshold: u32,
+    /// Recovery timeout in seconds
+    recovery_timeout_secs: u64,
+    /// Timestamp when circuit was opened
+    opened_at: Arc<AtomicU64>,
+}
+
+impl CircuitBreaker {
+    /// Create a new circuit breaker with default settings.
+    ///
+    /// Default: 5 failures threshold, 30 seconds recovery timeout.
+    pub fn new() -> Self {
+        Self::with_config(5, 30)
+    }
+
+    /// Create a circuit breaker with custom configuration.
+    ///
+    /// # Arguments
+    /// * `failure_threshold` - Number of consecutive failures before opening
+    /// * `recovery_timeout_secs` - Seconds to wait before trying half-open
+    pub fn with_config(failure_threshold: u32, recovery_timeout_secs: u64) -> Self {
+        Self {
+            state: Arc::new(RwLock::new(CircuitState::Closed)),
+            failures: Arc::new(AtomicU32::new(0)),
+            failure_threshold,
+            recovery_timeout_secs,
+            opened_at: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// Check if the circuit allows requests.
+    ///
+    /// Returns Ok(()) if requests are allowed, Err if circuit is open.
+    pub async fn check(&self) -> Result<()> {
+        let state = *self.state.read().await;
+        match state {
+            CircuitState::Closed => Ok(()),
+            CircuitState::Open => {
+                // Check if recovery timeout has elapsed
+                let opened_at = self.opened_at.load(Ordering::SeqCst);
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+
+                if now - opened_at >= self.recovery_timeout_secs {
+                    // Transition to half-open
+                    let mut state = self.state.write().await;
+                    *state = CircuitState::HalfOpen;
+                    info!("Circuit breaker transitioning to half-open state");
+                    Ok(())
+                } else {
+                    Err(anyhow::anyhow!(
+                        "Circuit breaker is open, rejecting request. Retry after {} seconds",
+                        self.recovery_timeout_secs - (now - opened_at)
+                    ))
+                }
+            }
+            CircuitState::HalfOpen => Ok(()), // Allow one test request
+        }
+    }
+
+    /// Record a successful request.
+    pub async fn record_success(&self) {
+        self.failures.store(0, Ordering::SeqCst);
+        let mut state = self.state.write().await;
+        if *state == CircuitState::HalfOpen {
+            *state = CircuitState::Closed;
+            info!("Circuit breaker closed after successful request");
+        }
+    }
+
+    /// Record a failed request.
+    pub async fn record_failure(&self) {
+        let failures = self.failures.fetch_add(1, Ordering::SeqCst) + 1;
+
+        if failures >= self.failure_threshold {
+            let mut state = self.state.write().await;
+            if *state != CircuitState::Open {
+                *state = CircuitState::Open;
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                self.opened_at.store(now, Ordering::SeqCst);
+                warn!(
+                    "Circuit breaker opened after {} consecutive failures. \
+                     Will retry after {} seconds",
+                    failures, self.recovery_timeout_secs
+                );
+            }
+        }
+    }
+
+    /// Get current circuit state.
+    pub async fn state(&self) -> CircuitState {
+        *self.state.read().await
+    }
+}
+
+impl Default for CircuitBreaker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// Connection to a remote agent via HTTP ACP.
 ///
@@ -103,29 +232,38 @@ impl HttpAcpClient {
                             );
                         }
 
-                        // Auto-approve for now (middleware doesn't have UI for approval)
-                        // TODO(security): Implement proper approval flow with user consent
-                        // For production use, this should:
-                        // 1. Queue the request for user approval
-                        // 2. Support configurable policies (auto-approve read-only, require approval for writes)
-                        // 3. Log the approval decision with timestamp and reason
-                        tracing::warn!(
-                            "⚠️  AUTO-APPROVING permission request (first option selected). \
-                             This is a security-sensitive operation. Configure approval policy for production use."
-                        );
+                        // Check permission policy
+                        if crate::permission::is_auto_approve() {
+                            tracing::warn!(
+                                "⚠️  AUTO-APPROVING permission request (first option selected). \
+                                 Auto-approve is enabled via --auto-approve flag."
+                            );
 
-                        let option_id = request.options.first().map(|o| o.option_id.clone());
-                        if let Some(id) = option_id {
+                            let option_id = request.options.first().map(|o| o.option_id.clone());
+                            if let Some(id) = option_id {
+                                let _ = responder.respond(
+                                    agent_client_protocol::schema::v2::RequestPermissionResponse::new(
+                                        agent_client_protocol::schema::v2::RequestPermissionOutcome::Selected(
+                                            agent_client_protocol::schema::v2::SelectedPermissionOutcome::new(id),
+                                        ),
+                                    ),
+                                );
+                                tracing::info!("✅ Permission granted (auto-approved)");
+                            } else {
+                                tracing::error!("❌ No permission options available, denying request");
+                            }
+                        } else {
+                            // Deny permission request when auto-approve is disabled
+                            tracing::warn!(
+                                "🔒 DENYING permission request (auto-approve disabled). \
+                                 Use --auto-approve to enable automatic approval."
+                            );
+                            // Deny: send Cancelled outcome
                             let _ = responder.respond(
                                 agent_client_protocol::schema::v2::RequestPermissionResponse::new(
-                                    agent_client_protocol::schema::v2::RequestPermissionOutcome::Selected(
-                                        agent_client_protocol::schema::v2::SelectedPermissionOutcome::new(id),
-                                    ),
+                                    agent_client_protocol::schema::v2::RequestPermissionOutcome::Cancelled,
                                 ),
                             );
-                            tracing::info!("✅ Permission granted (auto-approved)");
-                        } else {
-                            tracing::error!("❌ No permission options available, denying request");
                         }
                         Ok(())
                     },
@@ -332,6 +470,21 @@ impl HttpConnectionManager {
         Ok(())
     }
 
+    /// Disconnect from all agents. Used during graceful shutdown.
+    pub async fn disconnect_all(&self) {
+        let mut connections = self.connections.write().await;
+        let agent_ids: Vec<String> = connections.keys().cloned().collect();
+        for agent_id in agent_ids {
+            if let Some(handle) = connections.remove(&agent_id) {
+                if let Err(e) = handle.close().await {
+                    warn!("Error disconnecting from agent {}: {}", agent_id, e);
+                } else {
+                    info!("Disconnected from agent {}", agent_id);
+                }
+            }
+        }
+    }
+
     /// Send a prompt to a connected agent.
     pub async fn send_prompt(&self, agent_id: &str, text: String) -> Result<()> {
         let connections = self.connections.read().await;
@@ -381,5 +534,40 @@ mod tests {
     async fn test_connection_manager_is_connected() {
         let manager = HttpConnectionManager::new();
         assert!(!manager.is_connected("nonexistent").await);
+    }
+
+    #[tokio::test]
+    async fn test_circuit_breaker_starts_closed() {
+        let cb = CircuitBreaker::new();
+        assert_eq!(cb.state().await, CircuitState::Closed);
+        assert!(cb.check().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_circuit_breaker_opens_after_failures() {
+        let cb = CircuitBreaker::with_config(3, 30);
+
+        // Record 3 failures
+        cb.record_failure().await;
+        cb.record_failure().await;
+        cb.record_failure().await;
+
+        // Circuit should be open
+        assert_eq!(cb.state().await, CircuitState::Open);
+        assert!(cb.check().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_circuit_breaker_success_resets_failures() {
+        let cb = CircuitBreaker::with_config(3, 30);
+
+        cb.record_failure().await;
+        cb.record_failure().await;
+        cb.record_success().await; // Reset
+        cb.record_failure().await;
+        cb.record_failure().await;
+
+        // Still closed (only 2 failures after reset)
+        assert_eq!(cb.state().await, CircuitState::Closed);
     }
 }

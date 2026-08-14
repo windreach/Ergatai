@@ -1,6 +1,7 @@
 pub mod manager;
 pub mod http_client;
 pub mod agent_registry;
+pub mod permission;
 // TODO(middleware): Re-enable after HTTP client migration
 // pub mod mcp;
 // pub mod persistence;

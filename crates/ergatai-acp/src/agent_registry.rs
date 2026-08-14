@@ -62,6 +62,37 @@ pub enum AgentStatus {
     Disconnected,
 }
 
+/// Validate an ACP endpoint URL for security.
+///
+/// Returns Ok(()) if the endpoint is valid and safe (localhost-only).
+/// Returns Err with a description if validation fails.
+fn validate_acp_endpoint(endpoint: &str) -> Result<(), String> {
+    // Parse URL
+    let parsed = url::Url::parse(endpoint)
+        .map_err(|e| format!("Invalid URL: {}", e))?;
+
+    // Ensure HTTP or HTTPS scheme
+    match parsed.scheme() {
+        "http" | "https" => {}
+        scheme => return Err(format!("Invalid scheme '{}': only http/https allowed", scheme)),
+    }
+
+    // Extract and validate host
+    let host = parsed.host_str()
+        .ok_or_else(|| "Missing host in URL".to_string())?;
+
+    // Security: only allow localhost addresses to prevent SSRF
+    let allowed_hosts = ["localhost", "127.0.0.1", "::1"];
+    if !allowed_hosts.contains(&host) {
+        return Err(format!(
+            "Invalid host '{}': only localhost addresses allowed (localhost, 127.0.0.1, ::1)",
+            host
+        ));
+    }
+
+    Ok(())
+}
+
 impl AgentRegistry {
     /// Create a new agent registry
     pub fn new() -> Self {
@@ -79,13 +110,21 @@ impl AgentRegistry {
     /// * `acp_endpoint` - Optional ACP HTTP endpoint (e.g., "http://localhost:8080")
     ///   for Ergatai to push tasks/messages to the agent. If None, Ergatai can
     ///   only respond to tool calls from this agent.
+    ///
+    /// # Errors
+    /// Returns error if acp_endpoint is provided but fails validation (invalid URL or non-localhost).
     pub async fn register_agent(
         &self,
         agent_id: String,
         mcp_connection_id: String,
         capabilities: Option<Vec<String>>,
         acp_endpoint: Option<String>,
-    ) {
+    ) -> Result<(), String> {
+        // Validate endpoint if provided
+        if let Some(ref endpoint) = acp_endpoint {
+            validate_acp_endpoint(endpoint)?;
+        }
+
         let now = Utc::now().to_rfc3339();
         let info = AgentInfo {
             agent_id: agent_id.clone(),
@@ -104,20 +143,28 @@ impl AgentRegistry {
 
         let mut agents = self.agents.write().await;
         agents.insert(agent_id, record);
+        Ok(())
     }
 
     /// Update the ACP endpoint for an agent.
     ///
     /// This is called when an agent re-registers or updates its endpoint.
+    ///
+    /// # Errors
+    /// Returns error if the endpoint fails validation (invalid URL or non-localhost).
     pub async fn set_acp_endpoint(
         &self,
         agent_id: &str,
         acp_endpoint: String,
-    ) {
+    ) -> Result<(), String> {
+        // Validate endpoint before storing
+        validate_acp_endpoint(&acp_endpoint)?;
+
         let mut agents = self.agents.write().await;
         if let Some(record) = agents.get_mut(agent_id) {
             record.info.acp_endpoint = Some(acp_endpoint);
         }
+        Ok(())
     }
 
     /// Get the ACP endpoint for an agent.

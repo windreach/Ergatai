@@ -139,17 +139,18 @@ async fn graceful_shutdown() -> ErgataiResult<()> {
     use std::time::Duration;
     const STEP_TIMEOUT: Duration = Duration::from_secs(5);
 
-    // 1. Agent pools
-    // TODO(middleware): Re-enable after HTTP client migration
-    // tracing::info!("Step 1/5: shutting down agent pools...");
-    // match tokio::time::timeout(STEP_TIMEOUT, async {
-    //     crate::acp::sdk_pool_manager::acp_pool_shutdown_all().await;
-    // })
-    // .await
-    // {
-    //     Ok(()) => {}
-    //     Err(_) => tracing::warn!("Agent pool shutdown timed out after {:?}", STEP_TIMEOUT),
-    // }
+    // 1. HTTP ACP connections (disconnect from all agents)
+    tracing::info!("Step 1/5: disconnecting HTTP ACP connections...");
+    match tokio::time::timeout(STEP_TIMEOUT, async {
+        ergatai_acp::http_client::http_connection_manager()
+            .disconnect_all()
+            .await;
+    })
+    .await
+    {
+        Ok(()) => {}
+        Err(_) => tracing::warn!("HTTP ACP connection shutdown timed out after {:?}", STEP_TIMEOUT),
+    }
 
     // 2. ACP sessions
     tracing::info!("Step 2/5: closing ACP sessions...");

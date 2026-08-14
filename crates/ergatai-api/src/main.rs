@@ -25,9 +25,13 @@ use axum::{
 };
 use clap::Parser;
 use serde::{Deserialize, Serialize};
-use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info};
+use tower_governor::{
+    GovernorLayer,
+    governor::GovernorConfigBuilder,
+    key_extractor::KeyExtractor,
+};
+use tracing::{error, info, warn};
 
 use ergatai_core::acp::manager::{self as acp_manager, SessionKind};
 // TODO(middleware): Re-enable after HTTP client migration
@@ -64,6 +68,37 @@ fn app_state_with_token(token: Option<String>) -> &'static AppState {
     })
 }
 
+/// Prometheus metrics handle, stored globally for /metrics endpoint access.
+static PROMETHEUS_HANDLE: OnceLock<metrics_exporter_prometheus::PrometheusHandle> = OnceLock::new();
+
+/// Custom key extractor for rate limiting by Agent ID.
+///
+/// Extracts agent identifier from MCP session header or falls back to IP address.
+/// This prevents individual agents from spamming while allowing normal conversation flow.
+#[derive(Clone)]
+struct AgentKeyExtractor;
+
+impl KeyExtractor for AgentKeyExtractor {
+    type Key = String;
+
+    fn extract<B>(&self, req: &Request<B>) -> Result<Self::Key, tower_governor::errors::GovernorError> {
+        // Try to extract agent ID from Mcp-Session-Id header
+        if let Some(session_id) = req.headers().get("mcp-session-id") {
+            if let Ok(session_str) = session_id.to_str() {
+                return Ok(format!("agent:{}", session_str));
+            }
+        }
+
+        // Fall back to IP address for non-MCP requests
+        if let Some(peer_addr) = req.extensions().get::<std::net::SocketAddr>() {
+            return Ok(format!("ip:{}", peer_addr.ip()));
+        }
+
+        // Last resort: use a default key
+        Ok("unknown".to_string())
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "ergatai-api")]
 #[command(author, version, about, long_about = None)]
@@ -84,6 +119,23 @@ struct Args {
     /// Can also be set via ERGATAI_API_TOKEN environment variable.
     #[arg(long, env = "ERGATAI_API_TOKEN")]
     api_token: Option<String>,
+
+    /// TLS certificate file (PEM format) for HTTPS support.
+    /// Can also be set via ERGATAI_TLS_CERT environment variable.
+    #[arg(long, env = "ERGATAI_TLS_CERT")]
+    tls_cert: Option<PathBuf>,
+
+    /// TLS private key file (PEM format) for HTTPS support.
+    /// Can also be set via ERGATAI_TLS_KEY environment variable.
+    #[arg(long, env = "ERGATAI_TLS_KEY")]
+    tls_key: Option<PathBuf>,
+
+    /// Automatically approve all agent permission requests.
+    /// WARNING: This bypasses security controls. Only use in trusted development environments.
+    /// Without this flag, all permission requests from agents will be denied.
+    /// Can also be set via ERGATAI_AUTO_APPROVE environment variable.
+    #[arg(long, env = "ERGATAI_AUTO_APPROVE")]
+    auto_approve: bool,
 }
 
 /// Parse arguments and set environment variables BEFORE the tokio runtime starts.
@@ -114,6 +166,13 @@ async fn async_main(args: Args) -> Result<()> {
     ergatai_core::init_logging();
     ergatai_core::init_panic_hook();
 
+    // Initialize Prometheus metrics exporter
+    let prometheus_handle = metrics_exporter_prometheus::PrometheusBuilder::new()
+        .install_recorder()
+        .map_err(|e| anyhow::anyhow!("Failed to install Prometheus recorder: {}", e))?;
+    let _ = PROMETHEUS_HANDLE.set(prometheus_handle);
+    tracing::info!("Prometheus metrics exporter initialized");
+
     // Install OS signal handlers (SIGINT/SIGTERM) so child processes
     // (NATS, MCP, ACP sessions) are cleaned up gracefully on Ctrl+C.
     if let Err(e) = ergatai_core::setup_signal_handlers().await {
@@ -122,11 +181,40 @@ async fn async_main(args: Args) -> Result<()> {
 
     tracing::info!("Starting Ergatai API server on {}:{}", args.host, args.port);
 
+    // Authentication is optional - only enabled if --api-token is provided
     if args.api_token.is_some() {
         tracing::info!("API authentication enabled");
     } else {
-        tracing::warn!("API authentication disabled - API is open to all local clients");
+        tracing::info!("API authentication disabled - API is open to all clients");
     }
+
+    // Validate TLS configuration
+    let tls_enabled = args.tls_cert.is_some() || args.tls_key.is_some();
+    if tls_enabled {
+        match (&args.tls_cert, &args.tls_key) {
+            (Some(cert), Some(key)) => {
+                if !cert.exists() {
+                    return Err(anyhow::anyhow!("TLS certificate file not found: {}", cert.display()));
+                }
+                if !key.exists() {
+                    return Err(anyhow::anyhow!("TLS key file not found: {}", key.display()));
+                }
+                tracing::info!("TLS enabled with certificate: {}", cert.display());
+            }
+            (Some(_), None) => {
+                return Err(anyhow::anyhow!("--tls-key is required when --tls-cert is provided"));
+            }
+            (None, Some(_)) => {
+                return Err(anyhow::anyhow!("--tls-cert is required when --tls-key is provided"));
+            }
+            (None, None) => unreachable!(),
+        }
+    } else {
+        tracing::warn!("TLS disabled - using plaintext HTTP. Provide --tls-cert and --tls-key for HTTPS.");
+    }
+
+    // Configure permission approval policy
+    ergatai_acp::permission::set_auto_approve(args.auto_approve);
 
     // Initialize MCP server with Streamable HTTP transport
     let mcp_registry = std::sync::Arc::new(mcp::AgentRegistry::new());
@@ -158,9 +246,21 @@ async fn async_main(args: Args) -> Result<()> {
 
     // Build application router
     let state = app_state_with_token(args.api_token.clone()).clone();
+    // Rate limiting: 20 requests per second per Agent ID (prevents spam loops)
+    let governor_conf = std::sync::Arc::new(
+        GovernorConfigBuilder::default()
+            .per_second(1)
+            .burst_size(20)
+            .key_extractor(AgentKeyExtractor)
+            .finish()
+            .expect("Failed to build rate limiter config")
+    );
+
     let app = Router::new()
         // REST API routes
         .route("/health", get(health_check))
+        .route("/ready", get(readiness_check))
+        .route("/metrics", get(metrics_endpoint))
         // TODO(middleware): Re-enable after HTTP client migration
         // .route("/api/v1/chat", post(create_chat))
         // .route("/api/v1/agents", get(list_agents))
@@ -169,10 +269,13 @@ async fn async_main(args: Args) -> Result<()> {
         .route("/api/v1/dag/status", get(dag_status))
         // MCP Streamable HTTP endpoint (POST/GET/DELETE /mcp)
         .nest_service("/mcp", mcp_service)
+        // Auth middleware (exempts /health and /ready)
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
         ))
+        // Rate limiting layer (applies to all routes)
+        .layer(GovernorLayer { config: governor_conf })
         .with_state(state);
 
     // Start server
@@ -182,14 +285,100 @@ async fn async_main(args: Args) -> Result<()> {
 
     tracing::info!("API server listening on {}", addr);
 
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    // Start server with or without TLS
+    if let (Some(cert_path), Some(key_path)) = (&args.tls_cert, &args.tls_key) {
+        // TLS mode: use axum-server with rustls
+        tracing::info!("Starting HTTPS server on {}", addr);
+        let tls_config = axum_server::tls_rustls::RustlsConfig::from_pem_file(cert_path, key_path)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to load TLS certificate: {}", e))?;
+        tracing::info!("TLS certificate loaded successfully");
+        axum_server::bind_rustls(addr, tls_config)
+            .serve(app.into_make_service())
+            .await?;
+    } else {
+        // Plain HTTP mode
+        tracing::info!("Starting HTTP server on {}", addr);
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        axum::serve(listener, app).await?;
+    }
 
     Ok(())
 }
 
-async fn health_check() -> &'static str {
-    "OK"
+async fn health_check() -> impl IntoResponse {
+    // Record health check request
+    metrics::counter!("api_requests_total", "endpoint" => "health").increment(1);
+
+    let mut checks = serde_json::Map::new();
+    let mut all_healthy = true;
+
+    // Check NATS connectivity
+    let nats_ok = nats::is_nats_initialized().await;
+    checks.insert("nats".to_string(), serde_json::Value::Bool(nats_ok));
+    if !nats_ok {
+        all_healthy = false;
+    }
+
+    // Check NATS connection is actually alive
+    let nats_connected = if let Some(conn) = nats::get_nats_connection().await {
+        conn.is_connected()
+    } else {
+        false
+    };
+    checks.insert("nats_connected".to_string(), serde_json::Value::Bool(nats_connected));
+    if !nats_connected {
+        all_healthy = false;
+    }
+
+    // Check NATS server port
+    let nats_port = nats::get_nats_server_port().await;
+    checks.insert("nats_port".to_string(), serde_json::Value::Number(
+        nats_port.map(|p| p as u64).unwrap_or(0).into()
+    ));
+
+    let status = if all_healthy { "healthy" } else { "unhealthy" };
+    let status_code = if all_healthy { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
+
+    (
+        status_code,
+        Json(serde_json::json!({
+            "status": status,
+            "checks": checks,
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+        })),
+    )
+}
+
+/// Kubernetes readiness probe — checks if the server is ready to accept traffic.
+/// Returns 503 if any critical subsystem is down.
+async fn readiness_check() -> impl IntoResponse {
+    let nats_ready = nats::is_nats_initialized().await
+        && nats::get_nats_connection().await.map(|c| c.is_connected()).unwrap_or(false);
+
+    if nats_ready {
+        (StatusCode::OK, Json(serde_json::json!({"ready": true})))
+    } else {
+        (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"ready": false})))
+    }
+}
+
+/// GET /metrics — Prometheus metrics endpoint.
+/// Returns metrics in Prometheus text exposition format.
+async fn metrics_endpoint() -> impl IntoResponse {
+    match PROMETHEUS_HANDLE.get() {
+        Some(handle) => {
+            let output = handle.render();
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+                output,
+            ).into_response()
+        }
+        None => {
+            (StatusCode::INTERNAL_SERVER_ERROR, "Metrics not initialized").into_response()
+        }
+    }
 }
 
 // ── Request / response types ──
@@ -256,8 +445,9 @@ async fn auth_middleware(
     request: Request<Body>,
     next: Next,
 ) -> impl IntoResponse {
-    // Health check is always public
-    if request.uri().path() == "/health" {
+    // Health check, readiness probe, and metrics are always public
+    let path = request.uri().path();
+    if path == "/health" || path == "/ready" || path == "/metrics" {
         return next.run(request).await.into_response();
     }
 
@@ -327,6 +517,9 @@ fn validate_cwd(cwd: &str) -> Result<PathBuf, String> {
 ///
 /// Returns NATS connectivity status and the list of active ACP sessions.
 async fn get_status() -> impl IntoResponse {
+    // Record status request metric
+    metrics::counter!("api_requests_total", "endpoint" => "status").increment(1);
+
     let nats_initialized = nats::is_nats_initialized().await;
     let nats_port = nats::get_nats_server_port().await;
 
@@ -341,6 +534,9 @@ async fn get_status() -> impl IntoResponse {
             status: s.status,
         })
         .collect();
+
+    // Record active sessions gauge
+    metrics::gauge!("active_sessions").set(sessions.len() as f64);
 
     Json(StatusResponse {
         nats_initialized,
