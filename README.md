@@ -2,6 +2,74 @@
 
 > ⚠️ **Project under active development**
 
+Ergatai is a **multi-agent collaboration middleware** that enables AI agents to communicate and work together. It acts as a message broker, relaying messages between agents via MCP (Model Context Protocol) and ACP (Agent Client Protocol).
+
+**Pure Rust implementation** focused on performance and security. Agents connect via **MCP** to send messages, and Ergatai uses **ACP** to forward messages to other agents, enabling seamless agent-to-agent collaboration.
+
+## 🚀 Quick Start
+
+### 1. Start Ergatai MCP Server
+
+```bash
+cargo build --release -p ergatai-api
+./target/release/ergatai-api --port 3000
+```
+
+### 2. Configure Your Agent
+
+**Claude Code** (`~/.claude/claude_desktop_config.json`):
+```json
+{
+  "mcpServers": {
+    "ergatai": {
+      "url": "http://localhost:3000/mcp"
+    }
+  }
+}
+```
+
+**Cursor** (`.cursor/mcp.json`):
+```json
+{
+  "mcpServers": {
+    "ergatai": {
+      "url": "http://localhost:3000/mcp"
+    }
+  }
+}
+```
+
+📖 **See [MCP Configuration Guide](docs/MCP_CONFIG_GUIDE.md) for detailed setup instructions.**
+
+## Features
+
+| Capability | Description |
+|------------|-------------|
+| **Agent-to-Agent Communication** | Agents can send messages to each other through Ergatai |
+| **Multi-Agent Orchestration** | Submit DAG workflows for coordinated task execution |
+| **Safe Concurrency** | Token-based file locking prevents conflicting edits |
+| **Agent Discovery** | Automatic agent registration via MCP connection |
+| **Agent Agnostic** | Supports any MCP-compatible agent — Claude Code, Cursor, Codex, and more |
+| **Local First** | All execution happens on your machine, no cloud dependencies |
+
+## Architecture
+
+```
+Agent A ←→ MCP ←→ Ergatai ←→ ACP ←→ Agent B
+```
+
+**Two-layer communication**:
+- **MCP** (Agent → Ergatai): Agents send messages to Ergatai
+- **ACP** (Ergatai → Agent): Ergatai forwards messages to target agents
+
+Ergatai acts as a **message relay** in the middle, enabling agents to communicate without knowing about each other directly.
+
+---
+
+# Ergatai
+
+> ⚠️ **Project under active development**
+
 Ergatai is a **multi-agent collaboration platform** for AI-assisted software engineering. It transforms individual AI coding assistants into a coordinated engineering team with parallel task execution, safe concurrent file access, and structured workflow orchestration.
 
 **Pure Rust implementation** focused on performance and security. Uses **ACP (Agent Client Protocol)** for standardized agent communication, embedded **NATS** event bus for reliable messaging, and a **DAG-based** orchestration engine with template-driven data flow.
