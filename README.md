@@ -2,18 +2,23 @@
 
 > ⚠️ **Project under active development**
 
-Ergatai is a **multi-agent collaboration middleware** that enables AI agents to communicate and work together. It acts as a message broker, relaying messages between agents via MCP (Model Context Protocol) and ACP (Agent Client Protocol).
+Ergatai is a **multi-agent collaboration middleware** that enables AI agents to communicate and work together seamlessly. It acts as a message broker, relaying messages between agents via MCP (Model Context Protocol) and ACP (Agent Client Protocol).
 
-**Pure Rust implementation** focused on performance and security. Agents connect via **MCP** to send messages, and Ergatai uses **ACP** to forward messages to other agents, enabling seamless agent-to-agent collaboration.
+**Pure Rust implementation** focused on performance and security. Agents connect via **MCP** to send messages, and Ergatai uses **ACP** to forward messages to other agents, enabling seamless agent-to-agent collaboration without direct dependencies.
 
 ## 🚀 Quick Start
 
 ### 1. Start Ergatai MCP Server
 
 ```bash
+# Build
 cargo build --release -p ergatai-api
+
+# Start the server
 ./target/release/ergatai-api --port 3000
 ```
+
+MCP endpoint: `http://localhost:3000/mcp`
 
 ### 2. Configure Your Agent
 
@@ -41,6 +46,55 @@ cargo build --release -p ergatai-api
 
 📖 **See [MCP Configuration Guide](docs/MCP_CONFIG_GUIDE.md) for detailed setup instructions.**
 
+### 3. Start Collaborating
+
+Once configured, your agent can use Ergatai's MCP tools:
+
+```
+User: List all connected agents
+Claude: [calls list_agents tool]
+Claude: Currently connected agents:
+  - claude-code (active)
+  - cursor (active)
+
+User: Send a message to cursor agent
+Claude: [calls send_message tool]
+Claude: Message sent to cursor agent
+```
+
+## Architecture
+
+```
+┌─────────────┐         ┌─────────────┐         ┌─────────────┐
+│  Agent A    │ ←─MCP─→ │  Ergatai    │ ←─ACP─→ │  Agent B    │
+│ (Claude)    │         │  MCP Server │         │ (Cursor)    │
+└─────────────┘         └─────────────┘         └─────────────┘
+                               ↓
+                        ┌─────────────┐
+                        │  Agent C    │
+                        │ (Codex)     │
+                        └─────────────┘
+```
+
+### Two-Layer Communication
+
+**MCP (Model Context Protocol)** - Agent → Ergatai
+- Agents connect to Ergatai as MCP clients
+- Ergatai acts as MCP server
+- Agents send messages and orchestration requests via MCP
+
+**ACP (Agent Client Protocol)** - Ergatai → Agent
+- Ergatai connects to agents as ACP client
+- Agents act as ACP servers
+- Ergatai forwards messages to target agents via ACP
+
+### How It Works
+
+1. **Agent Registration**: When an agent connects via MCP, it's automatically registered
+2. **Message Sending**: Agent A calls `send_message` via MCP
+3. **Message Relay**: Ergatai receives the message and forwards it to Agent B via ACP
+4. **Response**: Agent B processes and responds through the same path
+
 ## Features
 
 | Capability | Description |
@@ -51,124 +105,88 @@ cargo build --release -p ergatai-api
 | **Agent Discovery** | Automatic agent registration via MCP connection |
 | **Agent Agnostic** | Supports any MCP-compatible agent — Claude Code, Cursor, Codex, and more |
 | **Local First** | All execution happens on your machine, no cloud dependencies |
+| **Crash Recovery** | Heartbeat monitoring and automatic lock reclamation |
 
-## Architecture
+## MCP Tools
 
-```
-Agent A ←→ MCP ←→ Ergatai ←→ ACP ←→ Agent B
-```
+Ergatai exposes the following MCP tools:
 
-**Two-layer communication**:
-- **MCP** (Agent → Ergatai): Agents send messages to Ergatai
-- **ACP** (Ergatai → Agent): Ergatai forwards messages to target agents
+### `list_agents`
 
-Ergatai acts as a **message relay** in the middle, enabling agents to communicate without knowing about each other directly.
+List all connected agents and their status.
 
----
-
-# Ergatai
-
-> ⚠️ **Project under active development**
-
-Ergatai is a **multi-agent collaboration platform** for AI-assisted software engineering. It transforms individual AI coding assistants into a coordinated engineering team with parallel task execution, safe concurrent file access, and structured workflow orchestration.
-
-**Pure Rust implementation** focused on performance and security. Uses **ACP (Agent Client Protocol)** for standardized agent communication, embedded **NATS** event bus for reliable messaging, and a **DAG-based** orchestration engine with template-driven data flow.
-
-## Features
-
-| Capability | Description |
-|------------|-------------|
-| **Parallel Execution** | Multiple agents work concurrently on different parts of the task graph |
-| **Safe Concurrency** | Token-based file locking prevents conflicting edits between agents |
-| **Workflow Orchestration** | Declarative DAG definitions with dependency tracking and automatic scheduling |
-| **Data Flow** | Template engine passes outputs between tasks (`{{node.output}}`) |
-| **Crash Recovery** | Heartbeat monitoring and automatic lock reclamation; git snapshots for rollback |
-| **Agent Agnostic** | Supports 13+ agents via ACP — Claude Code, Codex, Goose, and more |
-| **Local First** | All execution happens on your machine, no cloud dependencies |
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│  CLI (Rust + ratatui)                                               │
-│  Interactive chat · Agent selection · DAG management · Progress     │
-└──────────────────────────────┬──────────────────────────────────────┘
-                               │
-┌──────────────────────────────▼──────────────────────────────────────┐
-│  ergatai-core (Rust library)                                        │
-│                                                                     │
-│  ┌─────────────────┐  ┌──────────────────┐  ┌───────────────────┐  │
-│  │  ACP Protocol   │  │  NATS Event Bus  │  │  File Access      │  │
-│  │                  │  │                  │  │  Control          │  │
-│  │  Bidirectional   │  │  ┌────────────┐  │  │  Tokens (R/W/A)   │  │
-│  │  JSON-RPC over   │  │  │ DAG        │  │  │  Lock manager     │  │
-│  │  stdin/stdout    │  │  │ Scheduler  │  │  │  Watchdog         │  │
-│  │                  │  │  └─────┬──────┘  │  │  Snapshots (git)  │  │
-│  │  Session mgmt    │  │  ┌─────▼──────┐  │  │  Audit log        │  │
-│  │  Pool manager    │  │  │ Task       │  │  │  Arbitration      │  │
-│  │  Approval flow   │  │  │ Scheduler  │  │  │                   │  │
-│  └────────┬────────┘  │  └────────────┘  │  └───────────────────┘  │
-│           │            │                  │                         │
-│           └────────────┴──────────────────┴─────────────────────────│
-│                     Cross-Agent Collaboration Engine                │
-└─────────────────────────────────────────────────────────────────────┘
+```json
+{
+  "include_capabilities": true
+}
 ```
 
-### Core Components
-
-| Component | Description | Status |
-|-----------|-------------|--------|
-| **ergatai-core** | Core library: all business logic, ACP, NATS, file access control | ✅ Complete |
-| **ergatai-cli** | CLI binary: interactive chat interface | 🚧 In development |
-| **ergatai-api** | API server: HTTP/WebSocket interface (GUI-ready) | ✅ Basics complete |
-
-## Quick Start
-
-### Build
-
-```bash
-# Build all crates
-cargo build --workspace
-
-# Build release version
-cargo build --release --workspace
+**Response:**
+```json
+{
+  "agents": [
+    {
+      "agent_id": "claude-code",
+      "status": "active",
+      "capabilities": ["chat", "code"],
+      "connected_at": "2026-08-14T10:00:00Z",
+      "last_heartbeat": "2026-08-14T10:05:00Z"
+    }
+  ],
+  "total": 1
+}
 ```
 
-### Using the CLI
+### `send_message`
 
-```bash
-# Interactive chat (select agent)
-cargo run --bin ergatai -- chat
+Send a message to another agent.
 
-# Chat with a specific agent
-cargo run --bin ergatai -- chat --agent claude-code
-
-# One-off message
-cargo run --bin ergatai -- chat "Help me refactor this module"
-
-# List available agents
-cargo run --bin ergatai -- agents list
-
-# Submit a DAG workflow
-cargo run --bin ergatai -- dag submit workflow.md
-
-# Check DAG status
-cargo run --bin ergatai -- dag status <dag-id>
+```json
+{
+  "target_agent_id": "cursor",
+  "message": "Please help me refactor src/auth.rs",
+  "message_type": "request"
+}
 ```
 
-### Running the API Server
-
-```bash
-# Start API server
-cargo run --bin ergatai-api -- --port 3000
-
-# With authentication
-ERGATAI_API_TOKEN=your-token cargo run --bin ergatai-api -- --port 3000
+**Response:**
+```json
+{
+  "message_id": "msg-123",
+  "status": "sent",
+  "target_agent_id": "cursor",
+  "message_type": "request",
+  "session_id": "session-456",
+  "session_reused": true
+}
 ```
 
-## Agent Support
+### `submit_orchestration`
 
-Ergatai supports various AI coding assistants via the ACP protocol:
+Submit a DAG workflow for multi-agent collaboration.
+
+```json
+{
+  "dag_definition": "## Task A\n- agent: claude-code\n- task: analyze code\n\n## Task B\n- agent: cursor\n- task: write tests\n- depends_on: [Task A]",
+  "context": {
+    "project": "ergatai"
+  }
+}
+```
+
+### `check_dag_status`
+
+Check the status of a DAG execution.
+
+```json
+{
+  "dag_id": "dag-123"
+}
+```
+
+## Supported Agents
+
+Ergatai supports any agent that implements the MCP protocol:
 
 | Agent | Status | Description |
 |-------|--------|-------------|
@@ -178,90 +196,62 @@ Ergatai supports various AI coding assistants via the ACP protocol:
 | Goose | ✅ Supported | Block's AI assistant |
 | Cline | ✅ Supported | VS Code plugin |
 | Aider | ✅ Supported | Terminal AI coding tool |
-| Custom Agents | ✅ Supported | Any ACP-compatible agent |
+| Custom Agents | ✅ Supported | Any MCP-compatible agent |
 
-## Multi-Agent Collaboration Example
+## Project Structure
 
-### 1. Define a DAG Workflow
-
-Create `refactor-workflow.md`:
-
-```markdown
-## Task A (Code Analysis)
-- **agent**: claude-code
-- **task**: Analyze code structure and dependencies in src/ directory
-- **output**: analysis_result
-
-## Task B (Write Tests)
-- **agent**: cursor
-- **task**: Write unit tests for critical modules
-- **depends_on**: [Task A]
-- **input**: "Based on analysis: {{TaskA.analysis_result}}"
-- **output**: test_files
-
-## Task C (Refactor Implementation)
-- **agent**: claude-code
-- **task**: Refactor based on analysis and tests
-- **depends_on**: [Task A, Task B]
-- **input**: "Analysis: {{TaskA.analysis_result}}, Tests: {{TaskB.test_files}}"
-- **retry**: 3
-- **timeout**: 300
 ```
-
-### 2. Execute the Workflow
-
-```bash
-$ cargo run --bin ergatai -- dag submit refactor-workflow.md
-
-✓ DAG submitted: dag-12345
-
-Task scheduling:
-  [A] Code analysis (claude-code) .............. ✓ Done (23s)
-  [B] Write tests (cursor) ..................... ✓ Done (45s)
-  [C] Refactor (claude-code) ................... ✓ Done (67s)
-
-✓ DAG complete: dag-12345
-Total time: 135s
+ergatai/
+├── crates/
+│   ├── ergatai-core/      # Core library (business logic)
+│   ├── ergatai-api/       # MCP Server (main entry point)
+│   │   └── src/
+│   │       ├── main.rs
+│   │       └── mcp/
+│   │           ├── server.rs         # MCP server implementation
+│   │           ├── tools.rs          # MCP tool handlers
+│   │           ├── agent_registry.rs # Agent tracking
+│   │           └── message_relay.rs  # ACP message forwarding
+│   ├── ergatai-acp/       # ACP protocol implementation
+│   ├── ergatai-dag/       # DAG orchestration engine
+│   ├── ergatai-lock/      # File access control
+│   ├── ergatai-nats/      # NATS messaging
+│   ├── ergatai-agent/     # Agent management
+│   ├── ergatai-collab/    # Collaboration logic
+│   └── ergatai-error/     # Error handling
+├── docs/
+│   ├── MCP_CONFIG_GUIDE.md
+│   └── superpowers/specs/
+├── Cargo.toml
+└── README.md
 ```
-
-## File Access Control
-
-Safety guarantees when multiple agents edit files concurrently:
-
-```rust
-// Agent A acquires write lock
-let token = lock_manager.acquire_write("src/main.rs").await?;
-
-// Modify file
-fs::write("src/main.rs", new_content)?;
-
-// Automatic git snapshot
-snapshot_manager.create_snapshot("src/main.rs")?;
-
-// Release lock (other agents can now acquire it)
-lock_manager.release(token).await?;
-```
-
-**Features:**
-- Token-level locking (READ/WRITE/ADMIN)
-- Heartbeat monitoring and automatic timeout reclamation
-- Git snapshots for rollback support
-- Conflict detection and arbitration
-- Security audit logging
 
 ## Development
 
-### Running Tests
+### Build
+
+```bash
+# Build all crates
+cargo build --workspace
+
+# Build release version
+cargo build --release --workspace
+
+# Build specific crate
+cargo build -p ergatai-api
+```
+
+### Run Tests
 
 ```bash
 # Run all tests
 cargo test --workspace
 
 # Run tests for a specific crate
-cargo test -p ergatai-core
+cargo test -p ergatai-api
 
-# Run integration tests
-cargo test --test '*'
+# Run with output
+cargo test --workspace -- --nocapture
 ```
 
 ### Code Quality
@@ -277,32 +267,17 @@ cargo fmt --all
 cargo fmt --all -- --check
 ```
 
-### Project Structure
+### Run MCP Server
 
-```
-ergatai/
-├── crates/
-│   ├── ergatai-core/     # Core library
-│   │   ├── src/
-│   │   │   ├── acp/          # ACP protocol
-│   │   │   ├── nats/         # NATS messaging
-│   │   │   ├── orchestration/# DAG orchestration
-│   │   │   ├── cross_agent/  # Multi-agent collaboration
-│   │   │   ├── file_access/  # File access control
-│   │   │   └── agent/        # Agent management
-│   │   └── Cargo.toml
-│   ├── ergatai-cli/      # CLI binary
-│   │   ├── src/
-│   │   │   ├── main.rs       # Entry point
-│   │   │   ├── commands/     # Command handlers
-│   │   │   └── ui/           # TUI components
-│   │   └── Cargo.toml
-│   └── ergatai-api/      # API server
-│       ├── src/
-│       │   └── main.rs
-│       └── Cargo.toml
-├── Cargo.toml           # Workspace configuration
-└── README.md            # Project documentation
+```bash
+# Development mode
+cargo run -p ergatai-api -- --port 3000
+
+# With verbose logging
+RUST_LOG=debug cargo run -p ergatai-api -- --port 3000
+
+# With authentication
+ERGATAI_API_TOKEN=your-token cargo run -p ergatai-api -- --port 3000
 ```
 
 ## Tech Stack
@@ -310,60 +285,67 @@ ergatai/
 | Component | Technology | Version |
 |-----------|-----------|---------|
 | Language | Rust | 2021 edition |
+| MCP Protocol | Custom JSON-RPC | 2024-11-05 |
 | Agent Protocol | agent-client-protocol | 2.x |
 | Messaging | async-nats + JetStream | 0.38 |
 | Database | rusqlite (SQLite) | 0.31 |
-| CLI Framework | clap | 4.5 |
-| TUI | ratatui + crossterm | 0.26 / 0.27 |
 | HTTP Server | axum | 0.7 |
 | Async Runtime | tokio | 1.36 |
+| Serialization | serde + serde_json | 1.0 |
+
+## File Access Control
+
+When multiple agents collaborate on the same codebase, Ergatai provides safe concurrent file access:
+
+- **Token-based locking**: READ/WRITE/ADMIN modes
+- **Heartbeat monitoring**: Automatic timeout and lock reclamation
+- **Git snapshots**: Automatic snapshots before writes for rollback
+- **Conflict arbitration**: Priority-based conflict resolution
+- **Audit logging**: Complete security audit trail
 
 ## Roadmap
 
-### Current Release (v0.1.0)
+### Current Phase (v0.1.0)
 
-- [x] Rust workspace architecture
-- [x] ACP protocol integration
-- [x] NATS messaging system
-- [x] DAG orchestration engine
-- [x] File access control
-- [x] CLI basic framework
+- [x] MCP Server implementation
+- [x] Agent auto-registration
+- [x] Message relay infrastructure
+- [x] Agent discovery
+- [ ] Complete ACP message forwarding
+- [ ] DAG orchestration integration
+- [ ] End-to-end testing
 
 ### Near-term Plans
 
-- [ ] Complete CLI chat interface
-- [ ] Agent selection and configuration UI
-- [ ] Real-time DAG progress display
-- [ ] Session persistence
-- [ ] Integration test suite
+- [ ] On-demand ACP session spawning
+- [ ] Agent health checks and heartbeat
+- [ ] Enhanced error handling
+- [ ] Performance optimization
+- [ ] Documentation improvements
 
 ### Future Plans
 
-**v0.x (Current Phase) - CLI Conversational Version**
-- [ ] CLI chat interface refinement (permission confirmation UI, real-time progress)
-- [ ] DAG visualization (terminal UI)
-- [ ] Agent performance statistics and analysis
-- [ ] Plugin system
-- [ ] More agent support
+- [ ] Web dashboard for monitoring
+- [ ] Plugin system for custom tools
+- [ ] Agent performance analytics
+- [ ] Multi-workspace support
+- [ ] Enterprise features
 
-**Note**: Current development focus is on the **CLI conversational version**.
+## Security
 
-## Recent Security Improvements
-
-2026-08-13: Completed comprehensive code security audit and fixes:
+Recent security improvements (2026-08-13):
 
 - ✅ API path traversal protection + Bearer token authentication
-- ✅ Sensitive file detection enhanced (`*.env` patterns + path validation)
+- ✅ Sensitive file detection enhanced
 - ✅ Configuration file permission protection (`0o600`)
-- ✅ Install command whitelist hardening (shell injection prevention)
+- ✅ Install command whitelist hardening
 - ✅ NATS zombie process fix
 - ✅ Signal handler improvements
 - ✅ Lock manager correctness enhancements
-- ✅ CLI command conflict resolution
 
 ## Contributing
 
-Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for more information.
+Contributions are welcome! Please feel free to submit issues and pull requests.
 
 ## License
 
@@ -373,5 +355,6 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 - [agent-client-protocol](https://github.com/anthropics/agent-client-protocol) - ACP protocol implementation
 - [async-nats](https://github.com/nats-io/nats.rs) - NATS client
-- [ratatui](https://github.com/ratatui-org/ratatui) - Terminal UI library
-- [clap](https://github.com/clap-rs/clap) - Command-line argument parsing
+- [axum](https://github.com/tokio-rs/axum) - Web framework
+- [tokio](https://tokio.rs/) - Async runtime
+- [Model Context Protocol](https://modelcontextprotocol.io/) - MCP specification
