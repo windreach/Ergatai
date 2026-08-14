@@ -155,7 +155,7 @@ async fn graceful_shutdown() -> ErgataiResult<()> {
     // 3. MCP servers
     tracing::info!("Step 3/5: stopping MCP servers...");
     match tokio::time::timeout(STEP_TIMEOUT, async {
-        crate::mcp::stop_all_mcp_servers().await;
+        ergatai_acp::mcp::stop_all_mcp_servers().await;
     })
     .await
     {

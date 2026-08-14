@@ -4,19 +4,15 @@
 //!
 //! ```text
 //! ┌─────────────────────────────────────────────────────────┐
-//! │ Business logic                                          │
-//! │   acp/          — ACP session management (SDK-based)    │
-//! │   agent/        — agent config and discovery            │
-//! │   cross_agent/  — multi-agent task coordination         │
-//! │   file_access/  — file locking and access control       │
-//! │   nats/         — NATS messaging infrastructure         │
-//! │   orchestration/— DAG orchestration engine              │
-//! │   mcp.rs        — MCP server config scanning            │
-//! │   skills.rs     — skill file discovery                  │
-//! └───────────────────────┬─────────────────────────────────┘
-//!                         │
-//! ┌───────────────────────▼─────────────────────────────────┐
-//! │ ergatai-error — unified error enum (ErgataiError)       │
+//! │ Ergatai Workspace Crates                                │
+//! │   ergatai-error     — unified error types               │
+//! │   ergatai-nats      — NATS messaging infrastructure     │
+//! │   ergatai-dag       — DAG orchestration engine          │
+//! │   ergatai-lock      — file locking & access control     │
+//! │   ergatai-agent     — agent config & discovery          │
+//! │   ergatai-acp       — ACP session management            │
+//! │   ergatai-collab    — multi-agent task coordination     │
+//! │   ergatai-core      — glue crate (init, re-exports)     │
 //! └─────────────────────────────────────────────────────────┘
 //! ```
 //!
@@ -30,13 +26,7 @@
 //! The library is used by both the CLI (ergatai-cli) and API server (ergatai-api).
 
 // ── Business logic modules ──
-pub mod acp;
-pub mod cross_agent;
 pub mod signal;
-
-// Internal modules
-mod mcp;
-mod skills;
 
 // ── Re-export extracted crates ──
 pub use ergatai_error as error;
@@ -44,6 +34,9 @@ pub use ergatai_nats as nats;
 pub use ergatai_dag as orchestration;
 pub use ergatai_lock as file_access;
 pub use ergatai_agent as agent;
+pub use ergatai_acp as acp;
+pub use ergatai_acp::mcp;
+pub use ergatai_collab as cross_agent;
 
 use std::path::PathBuf;
 use std::sync::Mutex;

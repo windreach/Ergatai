@@ -12,8 +12,8 @@ use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::{AcpAgent, Agent, Client, ConnectionTo};
 
 use super::manager::{event_tx, manager, SessionCommand, SessionEvent, SessionHandle, SessionKind};
-use crate::agent::config::{build_acp_agent_config, AgentConfig};
-use crate::error::{ErgataiError, ErgataiResult};
+use ergatai_agent::config::{build_acp_agent_config, AgentConfig};
+use ergatai_error::{ErgataiError, ErgataiResult};
 
 const SESSION_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_TURN_DURATION: Duration = Duration::from_secs(7200); // 2 hours (matches sdk_session.rs)
@@ -241,7 +241,7 @@ pub fn load_session_task(
                         }).await;
 
                         // Register with file access control for single-agent mode detection
-                        if let Ok(lock_manager) = crate::file_access::get_lock_manager(&cwd_clone).await {
+                        if let Ok(lock_manager) = ergatai_lock::get_lock_manager(&cwd_clone).await {
                             lock_manager.register_session();
                         }
 
@@ -319,7 +319,7 @@ pub fn load_session_task(
                                         data: serde_json::Value::Null,
                                     });
                                     // Unregister from file access control (single-agent mode detection)
-                                    if let Ok(lock_manager) = crate::file_access::get_lock_manager(&cwd_clone).await {
+                                    if let Ok(lock_manager) = ergatai_lock::get_lock_manager(&cwd_clone).await {
                                         lock_manager.unregister_session();
                                     }
                                     manager().unregister(&session_id_clone).await;
@@ -336,7 +336,7 @@ pub fn load_session_task(
                                         Err(_) => tracing::warn!("CloseSession request timed out"),
                                     }
                                     // Unregister from file access control (single-agent mode detection)
-                                    if let Ok(lock_manager) = crate::file_access::get_lock_manager(&cwd_clone).await {
+                                    if let Ok(lock_manager) = ergatai_lock::get_lock_manager(&cwd_clone).await {
                                         lock_manager.unregister_session();
                                     }
                                     manager().unregister(&session_id_clone).await;
@@ -498,7 +498,7 @@ pub fn resume_session_task(
                         }).await;
 
                         // Register with file access control for single-agent mode detection
-                        if let Ok(lock_manager) = crate::file_access::get_lock_manager(&cwd_clone).await {
+                        if let Ok(lock_manager) = ergatai_lock::get_lock_manager(&cwd_clone).await {
                             lock_manager.register_session();
                         }
 
@@ -571,7 +571,7 @@ pub fn resume_session_task(
                                         data: serde_json::Value::Null,
                                     });
                                     // Unregister from file access control (single-agent mode detection)
-                                    if let Ok(lock_manager) = crate::file_access::get_lock_manager(&cwd_clone).await {
+                                    if let Ok(lock_manager) = ergatai_lock::get_lock_manager(&cwd_clone).await {
                                         lock_manager.unregister_session();
                                     }
                                     manager().unregister(&session_id_clone).await;
@@ -588,7 +588,7 @@ pub fn resume_session_task(
                                         Err(_) => tracing::warn!("CloseSession request timed out"),
                                     }
                                     // Unregister from file access control (single-agent mode detection)
-                                    if let Ok(lock_manager) = crate::file_access::get_lock_manager(&cwd_clone).await {
+                                    if let Ok(lock_manager) = ergatai_lock::get_lock_manager(&cwd_clone).await {
                                         lock_manager.unregister_session();
                                     }
                                     manager().unregister(&session_id_clone).await;

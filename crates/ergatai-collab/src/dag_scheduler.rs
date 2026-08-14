@@ -8,12 +8,12 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::error::{ErgataiError, ErgataiResult};
-use crate::orchestration::context::DagContext;
+use ergatai_error::{ErgataiError, ErgataiResult};
+use ergatai_dag::context::DagContext;
 use tokio::sync::Mutex;
 
 use super::task_scheduler::{global_scheduler, TaskScheduler};
-use crate::orchestration::{TaskGraph, TaskNode, TaskStatus};
+use ergatai_dag::{TaskGraph, TaskNode, TaskStatus};
 
 /// DAG Scheduler - manages DAG-based task orchestration
 #[derive(Clone)]
@@ -120,19 +120,19 @@ impl DagScheduler {
         let plan_file = self.generate_node_plan(node).await?;
         let task_id = node.id.clone();
 
-        if crate::nats::is_nats_initialized().await {
+        if ergatai_nats::is_nats_initialized().await {
             // NATS path: publish task submission event with inline plan content
-            if let Some(conn) = crate::nats::get_nats_connection().await {
-                let bus = crate::nats::EventBus::new(conn);
+            if let Some(conn) = ergatai_nats::get_nats_connection().await {
+                let bus = ergatai_nats::EventBus::new(conn);
                 let plan_content = tokio::fs::read_to_string(&plan_file).await?;
                 let dag_id = self.dag_id();
 
-                let payload = crate::nats::TaskSubmitPayload {
+                let payload = ergatai_nats::TaskSubmitPayload {
                     task_id: task_id.clone(),
                     plan_content,
                     plan_file: plan_file.to_string_lossy().to_string(),
                     target_agent: node.agent.clone(),
-                    priority: crate::file_access::conflict_arbitration::priority_to_number(
+                    priority: ergatai_lock::conflict_arbitration::priority_to_number(
                         &node.priority,
                     )
                     .map(|p| p as u32)
@@ -169,7 +169,7 @@ impl DagScheduler {
     /// Returns a `JoinHandle` that can be aborted to stop listening.
     pub fn start_event_listener(self) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
-            let conn = match crate::nats::get_nats_connection().await {
+            let conn = match ergatai_nats::get_nats_connection().await {
                 Some(c) => c,
                 None => {
                     tracing::warn!("NATS not initialized, event listener not started");
@@ -177,7 +177,7 @@ impl DagScheduler {
                 }
             };
 
-            let bus = crate::nats::EventBus::new(conn);
+            let bus = ergatai_nats::EventBus::new(conn);
 
             // Subscribe to all node completion events
             let mut complete_sub = match bus.subscribe_all_node_complete().await {
@@ -206,7 +206,7 @@ impl DagScheduler {
                     msg = complete_sub.next() => {
                         match msg {
                             Some(nats_msg) => {
-                                match serde_json::from_slice::<crate::nats::NodeCompletePayload>(&nats_msg.payload) {
+                                match serde_json::from_slice::<ergatai_nats::NodeCompletePayload>(&nats_msg.payload) {
                                     Ok(payload) => {
                                         tracing::info!(
                                             node_id = %payload.node_id,
@@ -250,7 +250,7 @@ impl DagScheduler {
                     msg = failed_sub.next() => {
                         match msg {
                             Some(nats_msg) => {
-                                match serde_json::from_slice::<crate::nats::NodeFailedPayload>(&nats_msg.payload) {
+                                match serde_json::from_slice::<ergatai_nats::NodeFailedPayload>(&nats_msg.payload) {
                                     Ok(payload) => {
                                         tracing::info!(
                                             node_id = %payload.node_id,
@@ -456,9 +456,9 @@ impl DagScheduler {
             tracing::info!("All nodes completed! DAG execution complete.");
 
             // Publish DAG completion event via NATS
-            if crate::nats::is_nats_initialized().await {
-                if let Some(conn) = crate::nats::get_nats_connection().await {
-                    let bus = crate::nats::EventBus::new(conn);
+            if ergatai_nats::is_nats_initialized().await {
+                if let Some(conn) = ergatai_nats::get_nats_connection().await {
+                    let bus = ergatai_nats::EventBus::new(conn);
                     let graph = self.graph.lock().await;
                     let total = graph.nodes.len() as u32;
                     let (completed, failed) =
@@ -472,7 +472,7 @@ impl DagScheduler {
                             });
                     drop(graph);
 
-                    let payload = crate::nats::DagCompletePayload {
+                    let payload = ergatai_nats::DagCompletePayload {
                         dag_id: self.dag_id(),
                         total_nodes: total,
                         completed_nodes: completed,
@@ -727,7 +727,7 @@ pub fn clear_dag_scheduler() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::orchestration::TaskNode;
+    use ergatai_dag::TaskNode;
 
     fn sample_graph() -> TaskGraph {
         TaskGraph::new(vec![

@@ -17,15 +17,15 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
-use crate::error::ErgataiResult;
-use crate::file_access::{FileMode, FileToken, SystemToken};
+use ergatai_error::ErgataiResult;
+use ergatai_lock::{FileMode, FileToken, SystemToken};
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{oneshot, Mutex};
 use tracing::info;
 
 use super::task_coordinator::{AgentAssignment, TaskCoordinator, TaskPlan};
-use crate::acp::manager::{manager as session_manager, SessionCommand, SessionKind};
+use ergatai_acp::manager::{manager as session_manager, SessionCommand, SessionKind};
 
 /// Agent session status
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -122,10 +122,10 @@ impl AgentLauncher {
         let project_root = self.coordinator.project_root.clone();
 
         // Initialize file access control for the project (idempotent)
-        crate::file_access::init_file_access(project_id, &project_root).await?;
+        ergatai_lock::init_file_access(project_id, &project_root).await?;
 
         // Get FileLockManager
-        let lock_manager = crate::file_access::get_lock_manager(project_id).await?;
+        let lock_manager = ergatai_lock::get_lock_manager(project_id).await?;
 
         // Register System Token for this agent
         let session_id = format!("session-{}", agent_id);
@@ -175,7 +175,7 @@ impl AgentLauncher {
 
         // Request File Token
         let priority =
-            crate::file_access::conflict_arbitration::priority_to_number(&assignment.priority);
+            ergatai_lock::conflict_arbitration::priority_to_number(&assignment.priority);
         let file_token = FileToken::with_priority(
             assignment.agent_name.clone(),
             session_id.clone(),
@@ -197,7 +197,7 @@ impl AgentLauncher {
         );
 
         // Start Watchdog heartbeat for this session
-        let watchdog = crate::file_access::get_watchdog(project_id).await?;
+        let watchdog = ergatai_lock::get_watchdog(project_id).await?;
         {
             let watchdog = watchdog.write().await;
             watchdog.mark_busy(&session_id, 3600).await?;
@@ -429,9 +429,9 @@ Write your results in markdown:
         node_id: Option<String>,
     ) -> ErgataiResult<()> {
         // Load agent config (handles both legacy and hosted formats internally)
-        let mut config = crate::agent::config::get_agent_config(agent_name)
+        let mut config = ergatai_agent::config::get_agent_config(agent_name)
             .with_context(|| format!("Failed to load config for agent '{}'", agent_name))?;
-        crate::agent::config::normalize_agent_config(&mut config);
+        ergatai_agent::config::normalize_agent_config(&mut config);
 
         tracing::info!(
             agent = %agent_id,
@@ -444,15 +444,15 @@ Write your results in markdown:
         let (session_id_tx, session_id_rx) = oneshot::channel();
         let cwd = worktree_path.to_string_lossy().to_string();
 
-        let mcp_config = crate::acp::sdk_session::McpServerConfig {
-            session_mode: crate::acp::sdk_session::SessionMode::Sub,
+        let mcp_config = ergatai_acp::sdk_session::McpServerConfig {
+            session_mode: ergatai_acp::sdk_session::SessionMode::Sub,
             agent_id: Some(agent_id.to_string()),
             node_id: node_id.clone(),
             dag_id: None,           // Will be set by DagScheduler if available
             available_agents: None, // Will use fallback list
         };
 
-        crate::acp::sdk_session::spawn_session_task_with_mcp(
+        ergatai_acp::sdk_session::spawn_session_task_with_mcp(
             config,
             cwd,
             SessionKind::Dag,
@@ -491,12 +491,12 @@ Write your results in markdown:
 
         // Build the full instruction with all prompt guides
         // Always load all guides (treated as "skill token" overhead)
-        let base_prompt = include_str!("../../prompts/base.md");
-        let gen_prompt = include_str!("../../prompts/dag_generation.md");
-        let orchestration_prompt = include_str!("../../prompts/dag_orchestration.md");
+        let base_prompt = include_str!("../prompts/base.md");
+        let gen_prompt = include_str!("../prompts/dag_generation.md");
+        let orchestration_prompt = include_str!("../prompts/dag_orchestration.md");
 
         // Get list of available agents for template substitution
-        let agents = crate::agent::discovery::discover_acp_runtimes();
+        let agents = ergatai_agent::discovery::discover_acp_runtimes();
         let agent_list = agents
             .iter()
             .map(|a| format!("- **{}** — {}", a.id, a.label))
@@ -592,12 +592,12 @@ Write your results in markdown:
             // Prefer NATS event publishing (event-driven, decoupled).
             // Fallback to direct function call if NATS is unavailable.
             if let Some(nid) = node_id_owned {
-                if crate::nats::is_nats_initialized().await {
+                if ergatai_nats::is_nats_initialized().await {
                     // NATS path: publish event, let DagScheduler subscribe and react
-                    if let Some(conn) = crate::nats::get_nats_connection().await {
-                        let bus = crate::nats::EventBus::new(conn);
+                    if let Some(conn) = ergatai_nats::get_nats_connection().await {
+                        let bus = ergatai_nats::EventBus::new(conn);
                         if completed_ok {
-                            let payload = crate::nats::NodeCompletePayload {
+                            let payload = ergatai_nats::NodeCompletePayload {
                                 node_id: nid.clone(),
                                 task_id: nid.clone(),
                                 agent_name: agent_id_owned.clone(),
@@ -620,7 +620,7 @@ Write your results in markdown:
                         } else {
                             let err_msg =
                                 format!("ACP session failed for agent {}", agent_id_owned);
-                            let payload = crate::nats::NodeFailedPayload {
+                            let payload = ergatai_nats::NodeFailedPayload {
                                 node_id: nid.clone(),
                                 task_id: nid.clone(),
                                 agent_name: agent_id_owned.clone(),
@@ -725,7 +725,7 @@ Write your results in markdown:
                 }
 
                 // Clear watchdog busy status
-                if let Ok(watchdog) = crate::file_access::get_watchdog(&agent.task_id).await {
+                if let Ok(watchdog) = ergatai_lock::get_watchdog(&agent.task_id).await {
                     let watchdog = watchdog.write().await;
                     let _ = watchdog.clear_busy(session_id).await;
                 }
@@ -821,7 +821,7 @@ Write your results in markdown:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cross_agent::task_coordinator::TaskType;
+    use ergatai_collab::task_coordinator::TaskType;
 
     #[test]
     fn test_make_and_parse_agent_id() {

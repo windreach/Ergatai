@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::error::{ErgataiError, ErgataiResult};
+use ergatai_error::{ErgataiError, ErgataiResult};
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use tokio::fs;
@@ -339,8 +339,8 @@ fn parse_depends_on(s: &str) -> Vec<String> {
 impl TaskPlan {
     /// Convert TaskPlan to TaskGraph for DAG-based scheduling
     /// Node IDs are auto-generated UUIDs
-    pub fn to_task_graph(&self) -> crate::orchestration::TaskGraph {
-        use crate::orchestration::{TaskGraph, TaskNode};
+    pub fn to_task_graph(&self) -> ergatai_dag::TaskGraph {
+        use ergatai_dag::{TaskGraph, TaskNode};
         use std::collections::HashMap;
         use uuid::Uuid;
 

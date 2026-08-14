@@ -15,7 +15,7 @@ use std::sync::Arc;
 use tokio::process::Child;
 use tokio::process::Command;
 
-use crate::error::{ErgataiError, ErgataiResult};
+use ergatai_error::{ErgataiError, ErgataiResult};
 
 /// MCP server information
 #[derive(Debug, Clone, Serialize, Deserialize)]

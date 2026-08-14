@@ -1,0 +1,28 @@
+[package]
+name = "ergatai-collab"
+version = "0.1.0"
+edition = "2021"
+authors = ["Ergatai Team"]
+license = "MIT"
+repository = "https://github.com/ergatai/ergatai"
+description = "Multi-agent collaboration and DAG scheduling for Ergatai"
+
+[dependencies]
+ergatai-error = { path = "../ergatai-error" }
+ergatai-nats = { path = "../ergatai-nats" }
+ergatai-dag = { path = "../ergatai-dag" }
+ergatai-lock = { path = "../ergatai-lock" }
+ergatai-agent = { path = "../ergatai-agent" }
+ergatai-acp = { path = "../ergatai-acp" }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+async-nats.workspace = true
+async-trait.workspace = true
+futures = "0.3"
+futures-util = "0.3"
+anyhow.workspace = true
+regex = "1.10"

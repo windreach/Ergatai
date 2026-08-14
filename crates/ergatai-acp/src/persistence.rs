@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-use crate::error::{ConfigError, ErgataiResult};
+use ergatai_error::{ConfigError, ErgataiResult};
 
 /// 本地保存的会话元数据（用于离线浏览和历史记录）
 #[derive(Debug, Clone, Serialize, Deserialize)]

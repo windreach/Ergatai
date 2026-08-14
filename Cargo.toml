@@ -6,6 +6,8 @@ members = [
     "crates/ergatai-dag",
     "crates/ergatai-lock",
     "crates/ergatai-agent",
+    "crates/ergatai-acp",
+    "crates/ergatai-collab",
     "crates/ergatai-core",
     "crates/ergatai-cli",
     "crates/ergatai-api",

@@ -1126,6 +1126,32 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 
 [[package]]
+name = "ergatai-acp"
+version = "0.1.0"
+dependencies = [
+ "agent-client-protocol 2.0.0",
+ "agent-client-protocol-tokio",
+ "anyhow",
+ "async-nats",
+ "async-trait",
+ "chrono",
+ "dirs",
+ "ergatai-agent",
+ "ergatai-error",
+ "ergatai-lock",
+ "ergatai-nats",
+ "futures",
+ "futures-util",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "ergatai-agent"
 version = "0.1.0"
 dependencies = [
@@ -1193,6 +1219,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "ergatai-collab"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-nats",
+ "async-trait",
+ "chrono",
+ "ergatai-acp",
+ "ergatai-agent",
+ "ergatai-dag",
+ "ergatai-error",
+ "ergatai-lock",
+ "ergatai-nats",
+ "futures",
+ "futures-util",
+ "regex",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "ergatai-core"
 version = "0.1.0"
 dependencies = [
@@ -1204,7 +1254,9 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "dirs",
+ "ergatai-acp",
  "ergatai-agent",
+ "ergatai-collab",
  "ergatai-dag",
  "ergatai-error",
  "ergatai-lock",

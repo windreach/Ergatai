@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::error::{ErgataiError, ErgataiResult};
+use ergatai_error::{ErgataiError, ErgataiResult};
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -402,7 +402,7 @@ impl TaskScheduler {
         let scheduler = Arc::clone(self);
 
         tokio::spawn(async move {
-            let conn = match crate::nats::get_nats_connection().await {
+            let conn = match ergatai_nats::get_nats_connection().await {
                 Some(c) => c,
                 None => {
                     tracing::warn!("NATS not initialized, consumer not started");
@@ -410,7 +410,7 @@ impl TaskScheduler {
                 }
             };
 
-            let bus = crate::nats::EventBus::new(conn);
+            let bus = ergatai_nats::EventBus::new(conn);
 
             // Subscribe to ALL task submissions (across all agents)
             let mut sub = match bus.subscribe_all_task_submits().await {
@@ -425,7 +425,7 @@ impl TaskScheduler {
 
             use futures_util::StreamExt;
             while let Some(nats_msg) = sub.next().await {
-                match serde_json::from_slice::<crate::nats::TaskSubmitPayload>(&nats_msg.payload) {
+                match serde_json::from_slice::<ergatai_nats::TaskSubmitPayload>(&nats_msg.payload) {
                     Ok(payload) => {
                         tracing::info!(
                             task_id = %payload.task_id,
@@ -451,7 +451,7 @@ impl TaskScheduler {
     ///
     /// Writes the inline plan content to a file (for agent readability),
     /// then processes it through the normal scheduling pipeline.
-    async fn handle_nats_task(&self, payload: crate::nats::TaskSubmitPayload) -> ErgataiResult<()> {
+    async fn handle_nats_task(&self, payload: ergatai_nats::TaskSubmitPayload) -> ErgataiResult<()> {
         use std::time::{SystemTime, UNIX_EPOCH};
 
         // Validate plan_file path: must reside within <project_root>/.ergatai/.dag-plans/

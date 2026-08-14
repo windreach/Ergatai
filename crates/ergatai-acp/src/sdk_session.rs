@@ -28,11 +28,11 @@ use super::manager::{
     event_tx, manager, NapiPermissionOption, NapiPermissionRequest, SessionCommand, SessionEvent,
     SessionHandle, SessionKind,
 };
-use crate::agent::config::{
+use ergatai_agent::config::{
     build_acp_agent_config, normalize_agent_args, normalize_agent_command_identity, AgentConfig,
 };
-use crate::error::{ErgataiError, ErgataiResult};
-use crate::file_access::FileMode;
+use ergatai_error::{ErgataiError, ErgataiResult};
+use ergatai_lock::FileMode;
 
 const SESSION_TIMEOUT: Duration = Duration::from_secs(30);
 const _IDLE_TIMEOUT: Duration = Duration::from_secs(900); // 15 minutes (reserved for future idle-close)
@@ -148,7 +148,7 @@ pub fn spawn_session_task_with_mcp(
             }
             Err(_) => {
                 tracing::error!(agent = %agent_name, "Session ready channel dropped");
-                let _ = session_id_tx.send(Err(crate::error::ErgataiError::ChannelError(
+                let _ = session_id_tx.send(Err(ergatai_error::ErgataiError::ChannelError(
                     "Session ready channel dropped".into(),
                 )));
             }
@@ -168,7 +168,7 @@ async fn acquire_file_locks_for_permission(
     file_paths: &[String],
     evt_tx: &mpsc::UnboundedSender<SessionEvent>,
 ) -> ErgataiResult<()> {
-    use crate::file_access::get_lock_manager;
+    use ergatai_lock::get_lock_manager;
 
     let lock_manager = get_lock_manager(project_id).await?;
 
@@ -577,7 +577,7 @@ async fn run_sdk_session(
                 // Register with file access control for single-agent mode detection.
                 // Uses cwd as project_id (same convention as acquire_file_locks_for_permission).
                 // If file access is not initialized for this project, this is a no-op.
-                if let Ok(lock_manager) = crate::file_access::get_lock_manager(&cwd_clone).await {
+                if let Ok(lock_manager) = ergatai_lock::get_lock_manager(&cwd_clone).await {
                     lock_manager.register_session();
                 }
 
@@ -664,7 +664,7 @@ async fn run_sdk_session(
                                 data: serde_json::Value::Null,
                             });
                             // Unregister from file access control (single-agent mode detection)
-                            if let Ok(lock_manager) = crate::file_access::get_lock_manager(&cwd_clone).await {
+                            if let Ok(lock_manager) = ergatai_lock::get_lock_manager(&cwd_clone).await {
                                 lock_manager.unregister_session();
                             }
                             manager().unregister(&session_id).await;
@@ -682,7 +682,7 @@ async fn run_sdk_session(
                                 Err(_) => tracing::warn!("CloseSession request timed out"),
                             }
                             // Unregister from file access control (single-agent mode detection)
-                            if let Ok(lock_manager) = crate::file_access::get_lock_manager(&cwd_clone).await {
+                            if let Ok(lock_manager) = ergatai_lock::get_lock_manager(&cwd_clone).await {
                                 lock_manager.unregister_session();
                             }
                             manager().unregister(&session_id).await;

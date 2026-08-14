@@ -12,6 +12,8 @@ ergatai-nats = { path = "../ergatai-nats" }
 ergatai-dag = { path = "../ergatai-dag" }
 ergatai-lock = { path = "../ergatai-lock" }
 ergatai-agent = { path = "../ergatai-agent" }
+ergatai-acp = { path = "../ergatai-acp" }
+ergatai-collab = { path = "../ergatai-collab" }
 
 # Async
 tokio.workspace = true

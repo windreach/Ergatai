@@ -13,8 +13,8 @@ use regex::Regex;
 use std::sync::LazyLock;
 use tracing::{debug, info, warn};
 
-use crate::error::ErgataiResult;
-use crate::nats::{get_nats_connection, is_nats_initialized, AgentMessagePayload, EventBus};
+use ergatai_error::ErgataiResult;
+use ergatai_nats::{get_nats_connection, is_nats_initialized, AgentMessagePayload, EventBus};
 
 // Compile regex once at startup.
 static MENTION_RE: LazyLock<Regex> =
