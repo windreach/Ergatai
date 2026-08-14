@@ -31,7 +31,6 @@
 
 // ── Business logic modules ──
 pub mod acp;
-pub mod agent;
 pub mod cross_agent;
 pub mod signal;
 
@@ -44,6 +43,7 @@ pub use ergatai_error as error;
 pub use ergatai_nats as nats;
 pub use ergatai_dag as orchestration;
 pub use ergatai_lock as file_access;
+pub use ergatai_agent as agent;
 
 use std::path::PathBuf;
 use std::sync::Mutex;

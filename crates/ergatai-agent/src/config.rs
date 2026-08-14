@@ -3,12 +3,12 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use url::Url;
 
-use crate::agent::global_config::load_global_agent_config;
-use crate::agent::runtime_metadata::{
+use crate::global_config::load_global_agent_config;
+use crate::runtime_metadata::{
     default_agent_args as runtime_default_agent_args, known_acp_runtime,
     normalize_command_identity as runtime_normalize_command_identity,
 };
-use crate::error::{ConfigError, ErgataiError, ErgataiResult};
+use ergatai_error::{ConfigError, ErgataiError, ErgataiResult};
 
 /// Normalize agent command to canonical identity.
 ///
@@ -413,10 +413,10 @@ pub fn get_agent_config(name: &str) -> ErgataiResult<AgentConfig> {
     }
 
     // 2. Try hosted agent path
-    match crate::agent::hosted_config::load_hosted_agent(name) {
+    match crate::hosted_config::load_hosted_agent(name) {
         Ok(hosted_config) => {
             let mut config =
-                crate::agent::hosted_config::to_agent_config(&hosted_config).map_err(|e| {
+                crate::hosted_config::to_agent_config(&hosted_config).map_err(|e| {
                     ErgataiError::AgentNotFound(format!(
                         "Failed to convert hosted agent config for '{}': {}",
                         name, e

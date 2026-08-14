@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::{ConfigError, ErgataiError};
+use ergatai_error::{ConfigError, ErgataiError};
 
 /// Custom harness definition loaded from JSON.
 #[derive(Debug, Clone, Serialize, Deserialize)]

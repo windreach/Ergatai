@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
-use crate::error::{ConfigError, ErgataiError, ErgataiResult};
+use ergatai_error::{ConfigError, ErgataiError, ErgataiResult};
 
 /// Ergatai system metadata extracted from the `ergatai` group in settings.json.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -248,7 +248,7 @@ pub fn create_hosted_agent(name: &str, settings: &serde_json::Value) -> ErgataiR
     validate_agent_name(name)?;
 
     // Check for legacy agent with same name (prevent naming conflicts)
-    let legacy_path = crate::agent::config::get_config_path(name)?;
+    let legacy_path = crate::config::get_config_path(name)?;
     if legacy_path.exists() {
         return Err(ErgataiError::InvalidArgument(format!(
             "Cannot create hosted agent '{}': a legacy agent with the same name already exists at {}",
@@ -486,8 +486,8 @@ pub fn proxy_env(config: &HostedAgentConfig) -> HashMap<String, String> {
 /// '-', '_' are allowed).
 pub fn to_agent_config(
     config: &HostedAgentConfig,
-) -> ErgataiResult<crate::agent::config::AgentConfig> {
-    use crate::agent::config::AgentConfig;
+) -> ErgataiResult<crate::config::AgentConfig> {
+    use crate::config::AgentConfig;
 
     // Security: validate agent_base only contains safe characters
     // This prevents arbitrary command execution if config is loaded from untrusted source

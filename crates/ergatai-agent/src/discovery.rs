@@ -254,26 +254,11 @@ pub fn discover_acp_runtimes() -> Vec<AcpRuntimeCatalogEntry> {
 
             // Construct avatar URL: use local file as base64 data URL if available
             let avatar_url = if !runtime.avatar_file.is_empty() {
-                let icon_path = if let Some(resources_path) = crate::get_resources_path() {
-                    let path = resources_path.join("agent-icons").join(runtime.avatar_file);
-                    if path.exists() {
-                        Some(path)
-                    } else {
-                        tracing::debug!(path = %path.display(), "Icon not found in resources path, trying dev path");
-                        // Fallback: try development path (project root/resources)
-                        std::env::current_dir()
-                            .ok()
-                            .map(|d| d.join("resources").join("agent-icons").join(runtime.avatar_file))
-                            .filter(|p| p.exists())
-                    }
-                } else {
-                    tracing::debug!(agent = %runtime.id, "Resources path not set, trying dev path");
-                    // No resources path set, try dev path directly
-                    std::env::current_dir()
-                        .ok()
-                        .map(|d| d.join("resources").join("agent-icons").join(runtime.avatar_file))
-                        .filter(|p| p.exists())
-                };
+                // TODO: Properly handle resources path (currently using dev path fallback)
+                let icon_path = std::env::current_dir()
+                    .ok()
+                    .map(|d| d.join("resources").join("agent-icons").join(&runtime.avatar_file))
+                    .filter(|p| p.exists());
 
                 if let Some(path) = icon_path {
                     tracing::debug!(path = %path.display(), "Loading agent icon");
@@ -401,7 +386,7 @@ pub fn clear_resolve_cache() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::runtime_metadata::normalize_command_identity;
+    use crate::runtime_metadata::normalize_command_identity;
 
     #[test]
     fn test_normalize_command_identity() {

@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::{ConfigError, ErgataiError};
+use ergatai_error::{ConfigError, ErgataiError};
 
 /// Global agent configuration record.
 ///

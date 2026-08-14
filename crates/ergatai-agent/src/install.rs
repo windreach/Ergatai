@@ -42,7 +42,7 @@ fn validate_install_command(cmd: &str) -> Result<()> {
 
 /// Install a specific ACP runtime by executing its install command
 pub async fn install_acp_runtime(runtime_id: &str) -> Result<String> {
-    let metadata = crate::agent::runtime_metadata::known_acp_runtime_exact(runtime_id)
+    let metadata = crate::runtime_metadata::known_acp_runtime_exact(runtime_id)
         .ok_or_else(|| anyhow::anyhow!("Unknown runtime: {}", runtime_id))?;
 
     let install_cmd = metadata
