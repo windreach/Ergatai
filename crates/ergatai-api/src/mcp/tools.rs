@@ -93,8 +93,8 @@ pub async fn handle_tool_call(
     match tool_name {
         "list_agents" => handle_list_agents(arguments, registry).await,
         "send_message" => handle_send_message(arguments, registry).await,
-        "submit_orchestration" => handle_submit_orchestration(arguments).await,
-        "check_dag_status" => handle_check_dag_status(arguments).await,
+        "submit_orchestration" => handle_submit_orchestration(arguments, registry).await,
+        "check_dag_status" => handle_check_dag_status(arguments, registry).await,
         _ => {
             warn!("Unknown tool: {}", tool_name);
             Ok(ToolCallResponse {
@@ -231,22 +231,33 @@ async fn handle_send_message(
 }
 
 /// Handle submit_orchestration tool
-async fn handle_submit_orchestration(arguments: serde_json::Value) -> Result<ToolCallResponse> {
-    let _dag_definition = arguments
+async fn handle_submit_orchestration(
+    arguments: serde_json::Value,
+    _registry: &AgentRegistry,
+) -> Result<ToolCallResponse> {
+    let dag_definition = arguments
         .get("dag_definition")
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("Missing dag_definition"))?;
 
-    let _context = arguments.get("context").cloned();
+    let context = arguments.get("context").cloned();
 
-    // TODO: Parse DAG and submit to scheduler
-    // For now, just acknowledge
+    info!("Submitting DAG orchestration");
+
+    // Parse the DAG definition
+    // TODO: Integrate with actual DAG scheduler
+    // For now, create a mock DAG ID and return success
+
     let dag_id = uuid::Uuid::new_v4().to_string();
+
+    // TODO: Submit to actual DAG scheduler
+    // let scheduler = get_dag_scheduler().await;
+    // scheduler.submit_dag(dag_definition, context).await?;
 
     let result = json!({
         "dag_id": dag_id,
         "status": "submitted",
-        "message": "DAG workflow submitted successfully"
+        "message": "DAG workflow submitted successfully (scheduler integration pending)"
     });
 
     Ok(ToolCallResponse {
@@ -258,13 +269,18 @@ async fn handle_submit_orchestration(arguments: serde_json::Value) -> Result<Too
 }
 
 /// Handle check_dag_status tool
-async fn handle_check_dag_status(arguments: serde_json::Value) -> Result<ToolCallResponse> {
+async fn handle_check_dag_status(
+    arguments: serde_json::Value,
+    _registry: &AgentRegistry,
+) -> Result<ToolCallResponse> {
     let dag_id = arguments
         .get("dag_id")
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("Missing dag_id"))?;
 
-    // TODO: Query DAG scheduler for status
+    info!("Checking DAG status for {}", dag_id);
+
+    // TODO: Query actual DAG scheduler
     // For now, return mock status
     let result = json!({
         "dag_id": dag_id,
@@ -274,7 +290,8 @@ async fn handle_check_dag_status(arguments: serde_json::Value) -> Result<ToolCal
             "completed_nodes": 1,
             "failed_nodes": 0
         },
-        "results": {}
+        "results": {},
+        "note": "Status query integration pending"
     });
 
     Ok(ToolCallResponse {
