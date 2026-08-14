@@ -88,26 +88,68 @@ async fn handle_mcp_request(
     Json(response)
 }
 
-/// Handle initialize request
+/// Handle initialize request - Auto-register agent on connection
 async fn handle_initialize(
     server: &Arc<McpServer>,
     request: JsonRpcRequest,
 ) -> JsonRpcResponse {
-    let response = InitializeResponse {
-        protocol_version: "2024-11-05".to_string(),
-        server_info: server.server_info.clone(),
-        capabilities: ServerCapabilities {
-            tools: Some(ToolsCapability {
-                list_changed: false,
-            }),
-        },
-    };
+    // Parse initialize request
+    let init_request: Result<InitializeRequest, _> = serde_json::from_value(request.params.clone());
 
-    JsonRpcResponse {
-        jsonrpc: "2.0".to_string(),
-        id: request.id,
-        result: Some(serde_json::to_value(response).unwrap()),
-        error: None,
+    match init_request {
+        Ok(req) => {
+            // Extract agent info from client_info
+            let agent_id = req.client_info.name.clone();
+            let agent_version = req.client_info.version.clone();
+
+            info!(
+                "Agent connecting: {} (version: {}, protocol: {})",
+                agent_id, agent_version, req.protocol_version
+            );
+
+            // Generate a unique connection ID
+            let connection_id = uuid::Uuid::new_v4().to_string();
+
+            // Register agent in registry
+            server.registry.register_agent(
+                agent_id.clone(),
+                connection_id.clone(),
+                None, // capabilities will be updated later if needed
+            ).await;
+
+            info!("Agent registered: {} (connection_id: {})", agent_id, connection_id);
+
+            // Return initialize response
+            let response = InitializeResponse {
+                protocol_version: "2024-11-05".to_string(),
+                server_info: server.server_info.clone(),
+                capabilities: ServerCapabilities {
+                    tools: Some(ToolsCapability {
+                        list_changed: false,
+                    }),
+                },
+            };
+
+            JsonRpcResponse {
+                jsonrpc: "2.0".to_string(),
+                id: request.id,
+                result: Some(serde_json::to_value(response).unwrap()),
+                error: None,
+            }
+        }
+        Err(e) => {
+            error!("Failed to parse initialize request: {}", e);
+            JsonRpcResponse {
+                jsonrpc: "2.0".to_string(),
+                id: request.id,
+                result: None,
+                error: Some(JsonRpcError {
+                    code: -32602,
+                    message: format!("Invalid initialize params: {}", e),
+                    data: None,
+                }),
+            }
+        }
     }
 }
 
