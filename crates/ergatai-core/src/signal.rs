@@ -89,18 +89,27 @@ async fn wait_for_first_signal() {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{signal, SignalKind};
-        let mut sigterm =
-            signal(SignalKind::terminate()).expect("Failed to install SIGTERM handler");
-        tokio::select! {
-            result = tokio::signal::ctrl_c() => {
-                if let Err(e) = result {
-                    tracing::error!(error = %e, "ctrl_c listener failed");
-                } else {
-                    tracing::info!("Received SIGINT (Ctrl+C)");
+        match signal(SignalKind::terminate()) {
+            Ok(mut sigterm) => {
+                tokio::select! {
+                    result = tokio::signal::ctrl_c() => {
+                        if let Err(e) = result {
+                            tracing::error!(error = %e, "ctrl_c listener failed");
+                        } else {
+                            tracing::info!("Received SIGINT (Ctrl+C)");
+                        }
+                    }
+                    _ = sigterm.recv() => {
+                        tracing::info!("Received SIGTERM");
+                    }
                 }
             }
-            _ = sigterm.recv() => {
-                tracing::info!("Received SIGTERM");
+            Err(e) => {
+                tracing::warn!("Failed to install SIGTERM handler (common in containers): {}. Falling back to SIGINT only.", e);
+                match tokio::signal::ctrl_c().await {
+                    Ok(()) => tracing::info!("Received SIGINT (Ctrl+C)"),
+                    Err(e) => tracing::error!(error = %e, "ctrl_c listener failed"),
+                }
             }
         }
     }
@@ -131,15 +140,16 @@ async fn graceful_shutdown() -> ErgataiResult<()> {
     const STEP_TIMEOUT: Duration = Duration::from_secs(5);
 
     // 1. Agent pools
-    tracing::info!("Step 1/5: shutting down agent pools...");
-    match tokio::time::timeout(STEP_TIMEOUT, async {
-        crate::acp::sdk_pool_manager::acp_pool_shutdown_all().await;
-    })
-    .await
-    {
-        Ok(()) => {}
-        Err(_) => tracing::warn!("Agent pool shutdown timed out after {:?}", STEP_TIMEOUT),
-    }
+    // TODO(middleware): Re-enable after HTTP client migration
+    // tracing::info!("Step 1/5: shutting down agent pools...");
+    // match tokio::time::timeout(STEP_TIMEOUT, async {
+    //     crate::acp::sdk_pool_manager::acp_pool_shutdown_all().await;
+    // })
+    // .await
+    // {
+    //     Ok(()) => {}
+    //     Err(_) => tracing::warn!("Agent pool shutdown timed out after {:?}", STEP_TIMEOUT),
+    // }
 
     // 2. ACP sessions
     tracing::info!("Step 2/5: closing ACP sessions...");
@@ -153,15 +163,16 @@ async fn graceful_shutdown() -> ErgataiResult<()> {
     }
 
     // 3. MCP servers
-    tracing::info!("Step 3/5: stopping MCP servers...");
-    match tokio::time::timeout(STEP_TIMEOUT, async {
-        ergatai_acp::mcp::stop_all_mcp_servers().await;
-    })
-    .await
-    {
-        Ok(()) => {}
-        Err(_) => tracing::warn!("MCP server shutdown timed out after {:?}", STEP_TIMEOUT),
-    }
+    // TODO(middleware): Re-enable after MCP migration
+    // tracing::info!("Step 3/5: stopping MCP servers...");
+    // match tokio::time::timeout(STEP_TIMEOUT, async {
+    //     ergatai_acp::mcp::stop_all_mcp_servers().await;
+    // })
+    // .await
+    // {
+    //     Ok(()) => {}
+    //     Err(_) => tracing::warn!("MCP server shutdown timed out after {:?}", STEP_TIMEOUT),
+    // }
 
     // 4. File access control
     tracing::info!("Step 4/5: shutting down file access control...");

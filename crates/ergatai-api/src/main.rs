@@ -26,19 +26,21 @@ use axum::{
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
 use ergatai_core::acp::manager::{self as acp_manager, SessionKind};
-use ergatai_core::acp::sdk_session::spawn_session_task_with_kind;
-use ergatai_core::agent::config::{get_agent_config, AgentConfig};
-use ergatai_core::agent::discovery::discover_acp_runtimes;
-use ergatai_core::agent::hosted_config::list_hosted_agents;
+// TODO(middleware): Re-enable after HTTP client migration
+// use ergatai_core::acp::sdk_session::spawn_session_task_with_kind;
+// use ergatai_core::agent::config::{get_agent_config, AgentConfig};
+// use ergatai_core::agent::discovery::discover_acp_runtimes;
+// use ergatai_core::agent::hosted_config::list_hosted_agents;
 use ergatai_core::cross_agent::{get_dag_scheduler, DagScheduler};
 use ergatai_core::nats;
 
 // MCP module
 mod mcp;
-use mcp::McpServer;
+use mcp::{create_mcp_service, start_nats_acp_forwarder};
 
 /// Shared application state available to all handlers.
 #[derive(Clone)]
@@ -71,7 +73,7 @@ struct Args {
     port: u16,
 
     /// Host to bind to
-    #[arg(short, long, default_value = "127.0.0.1")]
+    #[arg(long, default_value = "127.0.0.1")]
     host: String,
 
     /// Enable verbose logging
@@ -84,16 +86,31 @@ struct Args {
     api_token: Option<String>,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+/// Parse arguments and set environment variables BEFORE the tokio runtime starts.
+/// This is critical: std::env::set_var is unsafe to call after threads are spawned.
+fn setup_env_before_runtime() -> Args {
     let args = Args::parse();
 
-    // Initialize logging
+    // Set RUST_LOG before any threads are spawned
     if args.verbose {
-        // Safety: set_var is called before any threads are spawned
+        // Safety: This is called from main() BEFORE tokio runtime starts.
+        // At this point, only the main thread exists, so no data race is possible.
+        // tracing_subscriber reads RUST_LOG once during init_logging() later.
         unsafe { std::env::set_var("RUST_LOG", "debug") };
     }
 
+    args
+}
+
+fn main() -> Result<()> {
+    // Parse args and setup env BEFORE tokio runtime (for safe set_var)
+    let args = setup_env_before_runtime();
+
+    // Now start the tokio runtime and run the async main
+    tokio::runtime::Runtime::new()?.block_on(async_main(args))
+}
+
+async fn async_main(args: Args) -> Result<()> {
     ergatai_core::init_logging();
     ergatai_core::init_panic_hook();
 
@@ -111,22 +128,34 @@ async fn main() -> Result<()> {
         tracing::warn!("API authentication disabled - API is open to all local clients");
     }
 
-    // Initialize MCP server
-    let mcp_server = McpServer::new();
-    tracing::info!("MCP server initialized");
+    // Initialize MCP server with Streamable HTTP transport
+    let mcp_registry = std::sync::Arc::new(mcp::AgentRegistry::new());
+    let mcp_cancellation_token = CancellationToken::new();
+    let ergatai_own_address = format!("{}:{}", args.host, args.port);
+    let mcp_service = create_mcp_service(
+        mcp_registry.clone(),
+        mcp_cancellation_token.clone(),
+        ergatai_own_address,
+    );
+    tracing::info!("MCP server initialized (protocol 2025-06-18, Streamable HTTP)");
+
+    // Start NATS → ACP message forwarder
+    start_nats_acp_forwarder(mcp_registry.clone(), mcp_cancellation_token.clone());
+    tracing::info!("NATS → ACP message forwarder started");
 
     // Build application router
     let state = app_state_with_token(args.api_token.clone()).clone();
     let app = Router::new()
         // REST API routes
         .route("/health", get(health_check))
-        .route("/api/v1/chat", post(create_chat))
-        .route("/api/v1/agents", get(list_agents))
+        // TODO(middleware): Re-enable after HTTP client migration
+        // .route("/api/v1/chat", post(create_chat))
+        // .route("/api/v1/agents", get(list_agents))
         .route("/api/v1/status", get(get_status))
         .route("/api/v1/dag", post(submit_dag))
         .route("/api/v1/dag/status", get(dag_status))
-        // MCP routes
-        .merge(mcp_server.router())
+        // MCP Streamable HTTP endpoint (POST/GET/DELETE /mcp)
+        .nest_service("/mcp", mcp_service)
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
@@ -277,137 +306,9 @@ fn validate_cwd(cwd: &str) -> Result<PathBuf, String> {
 
 // ── Handlers ──
 
-/// POST /api/v1/chat — create a new ACP chat session.
-///
-/// Spawns an ACP session task for the requested agent and returns the
-/// `session_id` as soon as the session has been registered with the
-/// global session manager.
-async fn create_chat(
-    State(state): State<AppState>,
-    Json(req): Json<CreateChatRequest>,
-) -> impl IntoResponse {
-    // Validate and canonicalize the working directory
-    let cwd = match req.cwd.as_deref() {
-        Some(cwd_str) => match validate_cwd(cwd_str) {
-            Ok(path) => path.to_string_lossy().to_string(),
-            Err(e) => {
-                let body = Json(ErrorResponse { error: e });
-                return (StatusCode::BAD_REQUEST, body).into_response();
-            }
-        },
-        None => state.default_cwd.clone(),
-    };
-
-    // Resolve the agent config. This supports both built-in agents
-    // (legacy `~/.config/ergatai/agents/{name}.json`) and hosted agents
-    // (`~/.config/ergatai/agents/{name}/settings.json`).
-    let config: AgentConfig = match get_agent_config(&req.agent) {
-        Ok(cfg) => cfg,
-        Err(e) => {
-            let body = Json(ErrorResponse {
-                error: format!("Agent '{}' not found: {}", req.agent, e),
-            });
-            return (StatusCode::NOT_FOUND, body).into_response();
-        }
-    };
-
-    // Channel that receives the session_id once the session task has
-    // registered with the global session manager.
-    let (session_id_tx, session_id_rx) = oneshot::channel();
-
-    spawn_session_task_with_kind(config, cwd.clone(), SessionKind::Chat, session_id_tx);
-
-    // Wait for the session id with a bounded timeout — the ACP handshake
-    // can take a few seconds on a cold start.
-    let session_id =
-        match tokio::time::timeout(std::time::Duration::from_secs(30), session_id_rx).await {
-            Ok(Ok(Ok(id))) => id,
-            Ok(Ok(Err(e))) => {
-                error!("Failed to start ACP session: {}", e);
-                let body = Json(ErrorResponse {
-                    error: format!("Failed to start session: {}", e),
-                });
-                return (StatusCode::INTERNAL_SERVER_ERROR, body).into_response();
-            }
-            Ok(Err(_)) => {
-                error!("Session id sender dropped before returning session_id");
-                let body = Json(ErrorResponse {
-                    error: "Session task terminated unexpectedly".to_string(),
-                });
-                return (StatusCode::INTERNAL_SERVER_ERROR, body).into_response();
-            }
-            Err(_) => {
-                error!("Timed out waiting for ACP session to initialize");
-                let body = Json(ErrorResponse {
-                    error: "Timed out waiting for session to start".to_string(),
-                });
-                return (StatusCode::GATEWAY_TIMEOUT, body).into_response();
-            }
-        };
-
-    info!(session_id = %session_id, agent = %req.agent, "Created chat session");
-
-    let resp = CreateChatResponse {
-        session_id,
-        agent: req.agent,
-        cwd,
-    };
-    (StatusCode::CREATED, Json(resp)).into_response()
-}
-
-/// GET /api/v1/agents — list available agents.
-///
-/// Combines:
-/// - Hosted agents from `~/.config/ergatai/agents/{name}/settings.json`
-/// - Built-in ACP runtimes discovered via `discover_acp_runtimes`
-async fn list_agents() -> impl IntoResponse {
-    let mut agents: Vec<AgentSummary> = Vec::new();
-
-    // Hosted (user-created) agents.
-    match list_hosted_agents() {
-        Ok(names) => {
-            for name in names {
-                // Attempt to load the config to pull the display_name; if it
-                // fails we still include the entry but mark it unavailable.
-                let (display_name, available) = match get_agent_config(&name) {
-                    Ok(cfg) => (cfg.display_name, true),
-                    Err(_) => (None, false),
-                };
-                agents.push(AgentSummary {
-                    name,
-                    display_name,
-                    source: "hosted".to_string(),
-                    available,
-                });
-            }
-        }
-        Err(e) => {
-            tracing::warn!("Failed to list hosted agents: {}", e);
-        }
-    }
-
-    // Built-in ACP runtimes (claude, codex, goose, etc.).
-    for entry in discover_acp_runtimes() {
-        // Skip runtimes that already have a hosted counterpart — the
-        // hosted variant takes precedence and is more specific.
-        if agents.iter().any(|a| a.name == entry.id) {
-            continue;
-        }
-        let available = matches!(
-            entry.availability,
-            ergatai_core::agent::discovery::AcpAvailabilityStatus::Available
-        );
-        agents.push(AgentSummary {
-            name: entry.id,
-            display_name: Some(entry.label),
-            source: "builtin".to_string(),
-            available,
-        });
-    }
-
-    agents.sort_by(|a, b| a.name.cmp(&b.name));
-    Json(agents)
-}
+// TODO(middleware): Re-enable after HTTP client migration
+// POST /api/v1/chat and GET /api/v1/agents are disabled in middleware mode.
+// Agents now connect via MCP and are tracked in AgentRegistry.
 
 /// GET /api/v1/status — system status snapshot.
 ///

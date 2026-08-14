@@ -5,19 +5,7 @@ edition = "2021"
 authors = ["Ergatai Team"]
 license = "MIT"
 repository = "https://github.com/ergatai/ergatai"
-description = "Agent configuration and discovery for Ergatai"
+description = "Agent utilities for Ergatai (middleware mode - no hosting)"
 
 [dependencies]
-ergatai-error = { path = "../ergatai-error" }
-serde.workspace = true
-serde_json.workspace = true
-tracing.workspace = true
-tokio.workspace = true
-anyhow.workspace = true
-dirs = "5.0"
-toml = "1.0"
-glob = "0.3"
-walkdir = "2.4"
-agent-client-protocol = "2"
-base64 = "0.22"
-url = { version = "2.0", features = ["serde"] }
+# Placeholder — no dependencies needed in middleware mode

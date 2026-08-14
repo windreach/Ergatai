@@ -11,7 +11,8 @@ description = "ACP (Agent Client Protocol) implementation for Ergatai"
 ergatai-error = { path = "../ergatai-error" }
 ergatai-nats = { path = "../ergatai-nats" }
 ergatai-lock = { path = "../ergatai-lock" }
-ergatai-agent = { path = "../ergatai-agent" }
+# TODO(middleware): Re-enable after HTTP client migration
+# ergatai-agent = { path = "../ergatai-agent" }
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -21,6 +22,7 @@ chrono.workspace = true
 async-nats.workspace = true
 agent-client-protocol = "2"
 agent-client-protocol-tokio = "0.11"
+agent-client-protocol-http = { version = "2", features = ["client"] }
 async-trait.workspace = true
 futures = "0.3"
 futures-util = "0.3"

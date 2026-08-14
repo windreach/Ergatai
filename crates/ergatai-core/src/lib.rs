@@ -35,7 +35,8 @@ pub use ergatai_dag as orchestration;
 pub use ergatai_lock as file_access;
 pub use ergatai_agent as agent;
 pub use ergatai_acp as acp;
-pub use ergatai_acp::mcp;
+// TODO(middleware): Re-enable after MCP migration
+// pub use ergatai_acp::mcp;
 pub use ergatai_collab as cross_agent;
 
 use std::path::PathBuf;

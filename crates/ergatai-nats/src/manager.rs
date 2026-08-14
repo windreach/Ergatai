@@ -33,31 +33,39 @@ fn nats_state() -> &'static RwLock<NatsState> {
 /// Returns the connection if successful.
 pub async fn init_nats() -> ErgataiResult<NatsConnection> {
     let state = nats_state();
-    let mut state = state.write().await;
 
-    // Check if already initialized
-    if let Some(conn) = &state.connection {
-        if conn.is_connected() {
-            info!("NATS already initialized");
-            return Ok(conn.clone());
+    // Fast path: check if already initialized (read lock only)
+    {
+        let state = state.read().await;
+        if let Some(conn) = &state.connection {
+            if conn.is_connected() {
+                info!("NATS already initialized");
+                return Ok(conn.clone());
+            }
         }
-    }
+    } // read lock released
 
-    // Start nats-server
+    // Slow path: perform expensive I/O outside of any lock
     info!("Starting NATS server...");
     let server = NatsServer::start().await?;
     let port = server.port();
     info!(port = port, "NATS server started");
 
-    // Connect to server
     info!("Connecting to NATS server...");
     let connection = NatsConnection::connect_to_server(&server).await?;
     info!("Connected to NATS server");
 
-    // Initialize JetStream streams (fail-fast: a missing stream breaks persistence
-    // guarantees for file access control and task queues, so surface the error).
     info!("Initializing JetStream streams...");
     init_jetstream_streams(&connection).await?;
+
+    // Acquire write lock and double-check (another task may have initialized concurrently)
+    let mut state = state.write().await;
+    if let Some(existing_conn) = &state.connection {
+        if existing_conn.is_connected() {
+            info!("NATS initialized by another task while we were connecting");
+            return Ok(existing_conn.clone());
+        }
+    }
 
     state.server = Some(server);
     state.connection = Some(connection.clone());

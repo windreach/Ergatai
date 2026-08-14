@@ -1,13 +1,13 @@
 //! MCP (Model Context Protocol) module
 //!
-//! Implements the MCP server for agent communication.
+//! Implements the MCP server for agent communication using rmcp SDK.
+//! Supports MCP protocol 2025-06-18 with Streamable HTTP transport.
 
-pub mod types;
-pub mod agent_registry;
-pub mod tools;
-pub mod server;
 pub mod message_relay;
+pub mod server;
+pub mod message_forwarder;
 
-pub use server::McpServer;
-pub use agent_registry::AgentRegistry;
-pub use types::*;
+// Re-export AgentRegistry from ergatai-acp for backward compatibility
+pub use ergatai_acp::agent_registry::{AgentRegistry, AgentInfo, AgentStatus, agent_registry};
+pub use server::{ErgataiMcpServer, create_mcp_service};
+pub use message_forwarder::start_nats_acp_forwarder;

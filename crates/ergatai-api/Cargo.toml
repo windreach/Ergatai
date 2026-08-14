@@ -12,6 +12,14 @@ path = "src/main.rs"
 [dependencies]
 # Core library
 ergatai-core = { path = "../ergatai-core" }
+# ACP protocol (HTTP client)
+ergatai-acp = { path = "../ergatai-acp" }
+# NATS messaging
+ergatai-nats = { path = "../ergatai-nats" }
+
+# NATS client (for message forwarding)
+async-nats.workspace = true
+futures = "0.3"
 
 # Async
 tokio.workspace = true
@@ -31,6 +39,11 @@ tracing-subscriber.workspace = true
 # CLI
 clap.workspace = true
 
+# MCP protocol (rmcp SDK)
+rmcp = { version = "1.8", features = ["server", "transport-streamable-http-server", "macros"] }
+schemars = "1.0"
+tokio-util = "0.7"
+
 # HTTP server
 axum = { version = "0.7", features = ["ws"] }
 tower = "0.4"
@@ -40,6 +53,8 @@ tower-http = { version = "0.5", features = ["cors", "trace"] }
 uuid.workspace = true
 chrono.workspace = true
 
+# HTTP client (for ACP forwarding)
+reqwest = { version = "0.11", features = ["json"] }
+
 [dev-dependencies]
 tokio-test = "0.4"
-reqwest = { version = "0.11", features = ["json"] }

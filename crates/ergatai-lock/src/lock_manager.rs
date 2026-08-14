@@ -58,8 +58,10 @@ impl<'a> TransactionGuard<'a> {
 impl<'a> Drop for TransactionGuard<'a> {
     fn drop(&mut self) {
         if !self.committed {
-            // Best-effort rollback; ignore errors (connection may already be broken).
-            let _ = self.conn.execute_batch("ROLLBACK");
+            // Best-effort rollback; log warning if it fails (connection may already be broken).
+            if let Err(e) = self.conn.execute_batch("ROLLBACK") {
+                warn!("Transaction ROLLBACK failed (connection may be broken): {}", e);
+            }
         }
     }
 }

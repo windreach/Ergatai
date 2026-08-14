@@ -4,9 +4,41 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What is this?
 
-**Ergatai** - A multi-agent collaboration platform for AI-assisted software engineering. Transforms individual AI coding assistants into a coordinated engineering team with parallel task execution, safe concurrent file access, and DAG-based workflow orchestration.
+**Ergatai** - A multi-agent collaboration middleware for AI-assisted software engineering. Transforms individual AI coding assistants into a coordinated engineering team with parallel task execution, safe concurrent file access, and DAG-based workflow orchestration.
 
-**Pure Rust implementation** using **ACP (Agent Client Protocol)** for standardized agent communication, embedded **NATS** event bus for reliable messaging, and **DAG-based orchestration engine** with template-driven data flow.
+**Pure Rust implementation** using **MCP (Model Context Protocol)** for agent-to-Ergatai communication (tool calls), **ACP (Agent Client Protocol) HTTP** for Ergatai-to-agent push messages, embedded **NATS** event bus for reliable messaging, and **DAG-based orchestration engine** with template-driven data flow.
+
+### Middleware Architecture (Important!)
+
+Ergatai runs as a **middleware** - it does NOT spawn or manage agent processes. Instead:
+
+1. **Agents run independently** and manage their own lifecycle
+2. **Agents connect to Ergatai via MCP** to call tools (send_message, list_agents, etc.)
+3. **Agents expose ACP HTTP endpoints** so Ergatai can push tasks to them
+4. **Agents register their ACP endpoints** via the `set_acp_endpoint` MCP tool
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                      Agent (runs independently)                  │
+│  ┌──────────────┐         ┌──────────────────────────────────┐  │
+│  │   LLM/API    │         │     ACP HTTP Server              │  │
+│  │              │◄────────│  POST /acp/session/:id/prompt    │  │
+│  └──────────────┘         └──────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────┘
+         │ MCP (tools/call)                    ▲ ACP HTTP
+         ▼                                     │
+┌─────────────────────────────────────────────────────────────────┐
+│                        Ergatai (Middleware)                      │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐  │
+│  │  MCP Server  │  │ HTTP Client  │  │   NATS Event Bus     │  │
+│  │  (tools)     │  │ (ACP push)   │  │   (JetStream)        │  │
+│  └──────────────┘  └──────────────┘  └──────────────────────┘  │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐  │
+│  │  Agent       │  │  DAG         │  │  File Access         │  │
+│  │  Registry    │  │  Scheduler   │  │  Control             │  │
+│  └──────────────┘  └──────────────┘  └──────────────────────┘  │
+└─────────────────────────────────────────────────────────────────┘
+```
 
 ## Commands
 
@@ -24,7 +56,6 @@ cargo test --workspace
 
 # Run specific crate tests
 cargo test -p ergatai-core
-cargo test -p ergatai-cli
 cargo test -p ergatai-api
 
 # Lint
@@ -37,14 +68,14 @@ cargo fmt --all
 ### Run
 
 ```bash
-# Run CLI
-cargo run --bin ergatai -- chat
-cargo run --bin ergatai -- chat --agent claude-code
-cargo run --bin ergatai -- agents list
-cargo run --bin ergatai -- dag submit workflow.md
-
-# Run API server
+# Run API server (Ergatai middleware)
 cargo run --bin ergatai-api -- --port 3000
+
+# Run example agent (in another terminal)
+cargo run -p simple-agent -- --port 8080 --agent-id my-agent --ergatai http://localhost:3000
+
+# Run integration test
+./tests/integration_test.sh
 ```
 
 ## Architecture
@@ -53,33 +84,35 @@ cargo run --bin ergatai-api -- --port 3000
 
 | Layer | Crate | Responsibility |
 |-------|-------|----------------|
-| **CLI** | `ergatai-cli` | Interactive terminal interface, user interactions |
-| **Core** | `ergatai-core` | All business logic, ACP, NATS, file access control |
-| **API** | `ergatai-api` | HTTP/WebSocket server for future GUI |
+| **Core** | `ergatai-core` | Business logic facade, re-exports from sub-crates |
+| **ACP** | `ergatai-acp` | ACP protocol layer (HTTP client for middleware mode) |
+| **Collab** | `ergatai-collab` | Multi-agent collaboration (DAG scheduler, task coordinator) |
+| **DAG** | `ergatai-dag` | DAG parsing, template engine, context management |
+| **NATS** | `ergatai-nats` | Embedded NATS server and event bus |
+| **Lock** | `ergatai-lock` | File access control and token-based locking |
+| **API** | `ergatai-api` | HTTP server with MCP endpoints |
 
 ### Workspace Structure
 
 ```
 crates/
-├── ergatai-core/    # Core library (~30,000 lines)
-│   ├── src/
-│   │   ├── acp/          # ACP protocol layer
-│   │   ├── nats/         # NATS messaging system
-│   │   ├── orchestration/# DAG orchestration engine
-│   │   ├── cross_agent/  # Multi-agent collaboration
-│   │   ├── file_access/  # File locking and access control
-│   │   └── agent/        # Agent discovery and configuration
-│   └── Cargo.toml
-├── ergatai-cli/     # CLI binary
-│   ├── src/
-│   │   ├── main.rs       # Entry point, command parsing
-│   │   ├── commands/     # Command handlers
-│   │   └── ui/           # TUI components
-│   └── Cargo.toml
-└── ergatai-api/     # API server
-    ├── src/
-    │   └── main.rs       # HTTP/WebSocket endpoints
-    └── Cargo.toml
+├── ergatai-core/    # Core library facade
+├── ergatai-acp/     # ACP protocol (HTTP client)
+├── ergatai-collab/  # Multi-agent collaboration
+├── ergatai-dag/     # DAG parsing and orchestration
+├── ergatai-nats/    # NATS messaging
+├── ergatai-lock/    # File access control
+├── ergatai-agent/   # Placeholder (was: agent hosting)
+├── ergatai-error/   # Error types
+└── ergatai-api/     # HTTP/MCP server
+    └── src/
+        └── mcp/
+            ├── agent_registry.rs  # Tracks connected agents
+            ├── message_relay.rs   # HTTP ACP client for push
+            ├── tools.rs           # MCP tool implementations
+            └── server.rs          # MCP JSON-RPC handler
+examples/
+└── simple-agent/    # Example agent demonstrating middleware usage
 ```
 
 ### Communication Architecture (Critical!)
@@ -345,11 +378,11 @@ Binaries will be in `target/release/`:
 | Layer | Technology |
 |-------|-----------|
 | Language | Rust (100%) |
-| Agent Protocol | ACP (agent-client-protocol 2.x) |
+| Agent→Ergatai | MCP (JSON-RPC over HTTP) |
+| Ergatai→Agent | ACP HTTP (agent-client-protocol 2.x) |
 | Messaging | NATS (async-nats 0.38) + JetStream |
 | Database | SQLite (rusqlite 0.31) |
 | CLI Framework | clap 4.5 |
-| TUI | ratatui 0.26 + crossterm 0.27 |
 | HTTP Server | axum 0.7 |
 | Async Runtime | tokio 1.36 |
 
@@ -412,3 +445,129 @@ Comprehensive code security audit and fixes completed:
 - Removed hardcoded agent lists (now dynamic)
 - Fixed byte slicing panic in skills.rs
 - Improved error handling throughout
+
+## MCP Tools (Agent Interface)
+
+Agents connect to Ergatai via MCP and can call these tools:
+
+### `list_agents`
+List all connected agents and their status.
+
+```json
+{
+  "name": "list_agents",
+  "arguments": {
+    "include_capabilities": true
+  }
+}
+```
+
+### `set_acp_endpoint`
+Register the agent's ACP HTTP endpoint so Ergatai can push tasks to it.
+
+```json
+{
+  "name": "set_acp_endpoint",
+  "arguments": {
+    "agent_id": "my-agent",
+    "endpoint": "http://localhost:8080"
+  }
+}
+```
+
+### `send_message`
+Send a message to another agent via ACP HTTP.
+
+```json
+{
+  "name": "send_message",
+  "arguments": {
+    "target_agent_id": "other-agent",
+    "message": "Please review this code",
+    "message_type": "request"
+  }
+}
+```
+
+### `submit_orchestration`
+Submit a DAG workflow for multi-agent collaboration.
+
+```json
+{
+  "name": "submit_orchestration",
+  "arguments": {
+    "dag_definition": "## Task A\n- agent: agent-1\n..."
+  }
+}
+```
+
+### `check_dag_status`
+Check the status of a DAG execution.
+
+```json
+{
+  "name": "check_dag_status",
+  "arguments": {
+    "dag_id": "uuid-of-dag"
+  }
+}
+```
+
+## Agent Developer Guide
+
+To create an agent that works with Ergatai:
+
+### 1. Start an ACP HTTP server
+
+Your agent should expose these endpoints:
+
+```
+POST /acp/session/new        → Create a new session, returns {session_id}
+POST /acp/session/:id/prompt → Handle a prompt, returns {content: [{type, text}]}
+POST /acp/session/:id/close  → Close a session
+GET  /health                  → Health check
+```
+
+### 2. Connect to Ergatai MCP
+
+Send a JSON-RPC initialize request to Ergatai:
+
+```bash
+curl -X POST http://localhost:3000/mcp \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "initialize",
+    "params": {
+      "protocol_version": "2024-11-05",
+      "client_info": {"name": "my-agent", "version": "1.0.0"},
+      "capabilities": {}
+    }
+  }'
+```
+
+### 3. Register your ACP endpoint
+
+```bash
+curl -X POST http://localhost:3000/mcp \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 2,
+    "method": "tools/call",
+    "params": {
+      "name": "set_acp_endpoint",
+      "arguments": {
+        "agent_id": "my-agent",
+        "endpoint": "http://localhost:8080"
+      }
+    }
+  }'
+```
+
+### 4. Use Ergatai tools
+
+Now your agent can call `list_agents`, `send_message`, etc. to collaborate with other agents.
+
+See `examples/simple-agent/` for a complete implementation.

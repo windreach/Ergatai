@@ -100,7 +100,13 @@ impl DagScheduler {
                     tracing::error!("Failed to submit node {}: {}", node.id, e);
                     // Revert status so the node can be retried
                     let mut graph = self.graph.lock().await;
-                    let _ = graph.update_status(&node.id, TaskStatus::Pending);
+                    if let Err(revert_err) = graph.update_status(&node.id, TaskStatus::Pending) {
+                        tracing::warn!(
+                            "Failed to revert node {} status to Pending after submission error: {}. \
+                             Node may be stuck in incorrect state.",
+                            node.id, revert_err
+                        );
+                    }
                 }
             }
         }
@@ -439,7 +445,13 @@ impl DagScheduler {
                     tracing::error!("Failed to submit node {}: {}", node.id, e);
                     // Revert status so the node can be retried
                     let mut graph = self.graph.lock().await;
-                    let _ = graph.update_status(&node.id, TaskStatus::Pending);
+                    if let Err(revert_err) = graph.update_status(&node.id, TaskStatus::Pending) {
+                        tracing::warn!(
+                            "Failed to revert node {} status to Pending after submission error: {}. \
+                             Node may be stuck in incorrect state.",
+                            node.id, revert_err
+                        );
+                    }
                 }
             }
         }
@@ -547,12 +559,22 @@ impl DagScheduler {
             match self.generate_and_submit(&node_clone).await {
                 Ok(_task_id) => {
                     let mut graph = self.graph.lock().await;
-                    let _ = graph.update_status(node_id, TaskStatus::Running);
+                    if let Err(e) = graph.update_status(node_id, TaskStatus::Running) {
+                        tracing::warn!(
+                            "Failed to update node {} status to Running after successful retry: {}",
+                            node_id, e
+                        );
+                    }
                 }
                 Err(e) => {
                     tracing::error!("Failed to retry node {}: {}", node_id, e);
                     let mut graph = self.graph.lock().await;
-                    let _ = graph.update_status(node_id, TaskStatus::Failed);
+                    if let Err(status_err) = graph.update_status(node_id, TaskStatus::Failed) {
+                        tracing::warn!(
+                            "Failed to update node {} status to Failed: {}",
+                            node_id, status_err
+                        );
+                    }
                     drop(graph);
                     self.save_graph_unlocked().await?;
                 }
@@ -563,7 +585,12 @@ impl DagScheduler {
                 let mut graph = self.graph.lock().await;
                 // Status already set to Failed inside the claim lock above,
                 // but enforce it defensively in case of future edits.
-                let _ = graph.update_status(node_id, TaskStatus::Failed);
+                if let Err(e) = graph.update_status(node_id, TaskStatus::Failed) {
+                    tracing::warn!(
+                        "Failed to defensively set node {} status to Failed: {}",
+                        node_id, e
+                    );
+                }
             }
 
             // Propagate failure: skip all downstream nodes

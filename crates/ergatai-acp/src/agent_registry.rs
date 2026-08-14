@@ -1,13 +1,29 @@
 //! Agent Registry - Track connected agents
 //!
 //! Maintains a list of active agents that have connected to the MCP server.
+//! The registry is shared globally via `agent_registry()` to allow components
+//! like AgentLauncher to look up agent endpoints.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tokio::sync::RwLock;
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 
-use super::types::{AgentInfo, AgentStatus};
+/// Global agent registry instance.
+///
+/// This is used by components that need to look up agent information
+/// (e.g., AgentLauncher looking up ACP endpoints) without having the
+/// registry passed explicitly through the call chain.
+static AGENT_REGISTRY: OnceLock<AgentRegistry> = OnceLock::new();
+
+/// Get the global agent registry instance.
+///
+/// This is the single source of truth for tracking connected agents.
+/// Created lazily on first access.
+pub fn agent_registry() -> &'static AgentRegistry {
+    AGENT_REGISTRY.get_or_init(AgentRegistry::new)
+}
 
 /// Agent registry - tracks all connected agents
 #[derive(Clone)]
@@ -23,6 +39,29 @@ struct AgentRecord {
     pub acp_connection_id: Option<String>,
 }
 
+/// Agent information
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentInfo {
+    pub agent_id: String,
+    pub status: AgentStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<Vec<String>>,
+    pub connected_at: String,
+    pub last_heartbeat: String,
+    /// ACP HTTP endpoint for push messages (e.g., "http://localhost:8080").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub acp_endpoint: Option<String>,
+}
+
+/// Agent status
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentStatus {
+    Active,
+    Idle,
+    Disconnected,
+}
+
 impl AgentRegistry {
     /// Create a new agent registry
     pub fn new() -> Self {
@@ -31,12 +70,21 @@ impl AgentRegistry {
         }
     }
 
-    /// Register a new agent
+    /// Register a new agent.
+    ///
+    /// # Arguments
+    /// * `agent_id` - Unique identifier for the agent
+    /// * `mcp_connection_id` - The MCP connection ID (for tool calls from agent to Ergatai)
+    /// * `capabilities` - List of tool names the agent provides
+    /// * `acp_endpoint` - Optional ACP HTTP endpoint (e.g., "http://localhost:8080")
+    ///   for Ergatai to push tasks/messages to the agent. If None, Ergatai can
+    ///   only respond to tool calls from this agent.
     pub async fn register_agent(
         &self,
         agent_id: String,
         mcp_connection_id: String,
         capabilities: Option<Vec<String>>,
+        acp_endpoint: Option<String>,
     ) {
         let now = Utc::now().to_rfc3339();
         let info = AgentInfo {
@@ -45,6 +93,7 @@ impl AgentRegistry {
             capabilities,
             connected_at: now.clone(),
             last_heartbeat: now,
+            acp_endpoint,
         };
 
         let record = AgentRecord {
@@ -55,6 +104,26 @@ impl AgentRegistry {
 
         let mut agents = self.agents.write().await;
         agents.insert(agent_id, record);
+    }
+
+    /// Update the ACP endpoint for an agent.
+    ///
+    /// This is called when an agent re-registers or updates its endpoint.
+    pub async fn set_acp_endpoint(
+        &self,
+        agent_id: &str,
+        acp_endpoint: String,
+    ) {
+        let mut agents = self.agents.write().await;
+        if let Some(record) = agents.get_mut(agent_id) {
+            record.info.acp_endpoint = Some(acp_endpoint);
+        }
+    }
+
+    /// Get the ACP endpoint for an agent.
+    pub async fn get_acp_endpoint(&self, agent_id: &str) -> Option<String> {
+        let agents = self.agents.read().await;
+        agents.get(agent_id).and_then(|r| r.info.acp_endpoint.clone())
     }
 
     /// Update agent heartbeat

@@ -1,57 +1,92 @@
-//! ACP Message Relay
+//! ACP Message Relay (HTTP-based)
 //!
-//! Handles sending messages to agents via ACP protocol.
-//! In middleware mode, agents are already running and connected via MCP.
+//! In middleware mode, agents are already running and expose ACP HTTP endpoints.
+//! This module uses the HTTP ACP client to send messages to agents.
+//!
+//! Flow:
+//! 1. Agent connects to Ergatai via MCP (tool calls)
+//! 2. Agent registers its ACP endpoint (e.g., "http://localhost:8080")
+//! 3. Ergatai uses HttpAcpClient to push messages/tasks to the agent
+//! 4. Agent processes the message and returns the result
 
 use anyhow::Result;
-use tokio::sync::oneshot;
-use tracing::{info, warn};
+use tracing::info;
 
-use ergatai_core::acp::manager::{manager, SessionCommand};
+use ergatai_acp::http_client::http_connection_manager;
+use ergatai_acp::agent_registry::AgentRegistry;
+use ergatai_core::acp::manager::SessionKind;
 
-/// Send a message to an agent via ACP
+/// Send a message to an agent via ACP HTTP.
 ///
 /// In the middleware architecture:
-/// - Agents connect to Ergatai via MCP
-/// - Agents expose ACP server endpoints
-/// - Ergatai forwards messages via ACP
+/// - Agents connect to Ergatai via MCP and register their ACP endpoint
+/// - Ergatai uses HTTP ACP client to push messages to the agent
+/// - The agent processes the message and returns the result
 ///
-/// This function looks up the agent's ACP connection and sends the message.
+/// # Arguments
+/// * `target_agent_id` - The agent to send the message to
+/// * `message` - The message to send
+/// * `registry` - Agent registry to look up the ACP endpoint
+/// * `cwd` - Working directory for the session (used if creating a new connection)
 pub async fn send_message_to_agent(
     target_agent_id: &str,
     message: &str,
+    registry: &AgentRegistry,
+    cwd: &str,
 ) -> Result<MessageRelayResult> {
-    info!("Sending message to agent {} via ACP", target_agent_id);
+    info!("Sending message to agent {} via ACP HTTP", target_agent_id);
 
-    // Get ACP connection for the target agent
-    // In middleware mode, agents register their ACP endpoint when connecting via MCP
-    let session_manager = manager();
-    let sessions = session_manager.list_sessions().await;
+    // Look up the agent's ACP endpoint from the registry
+    let acp_endpoint = registry
+        .get_acp_endpoint(target_agent_id)
+        .await
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Agent {} has no ACP endpoint registered. \
+                 Agents must register their ACP endpoint via ergatai.set_acp_endpoint tool.",
+                target_agent_id
+            )
+        })?;
 
-    let existing_session = sessions.iter().find(|s| s.agent_name == target_agent_id);
+    info!("Agent {} ACP endpoint: {}", target_agent_id, acp_endpoint);
 
-    if let Some(session) = existing_session {
-        info!("Found ACP session {} for agent {}", session.session_id, target_agent_id);
+    // Check if we already have a connection to this agent
+    let manager = http_connection_manager();
+    let is_connected = manager.is_connected(target_agent_id).await;
 
-        // Send message via existing session
-        let result = send_via_session(&session.session_id, message).await?;
-
-        Ok(MessageRelayResult {
-            message_id: result.message_id,
-            status: "sent".to_string(),
-            session_id: session.session_id.clone(),
-            session_reused: true,
-            response: result.response,
-        })
+    let session_id = if is_connected {
+        info!("Reusing existing connection to agent {}", target_agent_id);
+        // Get the session ID from the existing connection
+        // For now, we'll use the agent_id as the key since HttpConnectionManager
+        // stores connections by agent_id
+        format!("session-{}", target_agent_id)
     } else {
-        // No existing ACP session - agent needs to connect first
-        warn!("No ACP session found for agent {}. Agent must connect via MCP first.", target_agent_id);
+        // Establish a new HTTP ACP connection to the agent
+        info!(
+            "Establishing new ACP connection to agent {} at {}",
+            target_agent_id, acp_endpoint
+        );
 
-        Err(anyhow::anyhow!(
-            "Agent {} is not connected. Agents must connect via MCP before receiving messages.",
-            target_agent_id
-        ))
-    }
+        manager
+            .connect(
+                target_agent_id,
+                &acp_endpoint,
+                cwd.to_string(),
+                SessionKind::Chat, // Default to Chat; could be parameterized
+            )
+            .await?
+    };
+
+    // Send the message via the HTTP connection
+    manager.send_prompt(target_agent_id, message.to_string()).await?;
+
+    Ok(MessageRelayResult {
+        message_id: uuid::Uuid::new_v4().to_string(),
+        status: "sent".to_string(),
+        session_id,
+        session_reused: is_connected,
+        response: Some("Message sent successfully via ACP HTTP".to_string()),
+    })
 }
 
 /// Result of message relay
@@ -63,47 +98,20 @@ pub struct MessageRelayResult {
     pub response: Option<String>,
 }
 
-/// Send message via existing session
-async fn send_via_session(session_id: &str, message: &str) -> Result<SendResult> {
-    let session_manager = manager();
-    let cmd_tx = session_manager
-        .get_cmd_tx(session_id)
-        .await
-        .ok_or_else(|| anyhow::anyhow!("Session {} not found", session_id))?;
-
-    // Create oneshot channel for reply
-    let (reply_tx, reply_rx) = oneshot::channel();
-
-    // Send prompt command
-    cmd_tx.send(SessionCommand::SendPrompt {
-        text: message.to_string(),
-        reply_tx,
-    })?;
-
-    // Wait for reply (with timeout)
-    let timeout_duration = std::time::Duration::from_secs(300); // 5 minutes
-    match tokio::time::timeout(timeout_duration, reply_rx).await {
-        Ok(Ok(result)) => {
-            result?;
-            Ok(SendResult {
-                message_id: uuid::Uuid::new_v4().to_string(),
-                session_id: session_id.to_string(),
-                response: Some("Message sent successfully".to_string()),
-            })
-        }
-        Ok(Err(e)) => {
-            warn!("Send failed: {}", e);
-            Err(anyhow::anyhow!("Send failed: {}", e))
-        }
-        Err(_) => {
-            warn!("Send timeout after 5 minutes");
-            Err(anyhow::anyhow!("Send timeout"))
-        }
+/// Disconnect from an agent.
+///
+/// Called when an agent disconnects or is no longer available.
+pub async fn disconnect_agent(agent_id: &str) -> Result<()> {
+    let manager = http_connection_manager();
+    if manager.is_connected(agent_id).await {
+        info!("Disconnecting from agent {} via ACP HTTP", agent_id);
+        manager.disconnect(agent_id).await?;
     }
+    Ok(())
 }
 
-struct SendResult {
-    message_id: String,
-    session_id: String,
-    response: Option<String>,
+/// List all active ACP HTTP connections.
+pub async fn list_connections() -> Vec<(String, String)> {
+    let manager = http_connection_manager();
+    manager.list_connections().await
 }

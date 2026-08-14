@@ -46,7 +46,7 @@ impl NatsServer {
         let store_dir = Self::get_store_dir()?;
 
         // Ensure store directory exists
-        std::fs::create_dir_all(&store_dir).map_err(|e| {
+        tokio::fs::create_dir_all(&store_dir).await.map_err(|e| {
             ErgataiError::internal(format!("Failed to create NATS store directory: {}", e))
         })?;
 

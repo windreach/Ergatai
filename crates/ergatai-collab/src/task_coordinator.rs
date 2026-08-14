@@ -8,6 +8,18 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 
+/// Join paths into a comma-separated string without intermediate Vec allocation.
+fn join_paths(paths: &[PathBuf]) -> String {
+    let mut s = String::new();
+    for (i, p) in paths.iter().enumerate() {
+        if i > 0 {
+            s.push(',');
+        }
+        s.push_str(&p.to_string_lossy());
+    }
+    s
+}
+
 /// Validate that a string is safe to use as a path component.
 ///
 /// Rejects `..`, slashes, backslashes, and any character that could escape the
@@ -360,34 +372,19 @@ impl TaskPlan {
             if !assignment.files_to_create.is_empty() {
                 node.metadata.insert(
                     "files_to_create".to_string(),
-                    assignment
-                        .files_to_create
-                        .iter()
-                        .map(|p| p.to_string_lossy().to_string())
-                        .collect::<Vec<_>>()
-                        .join(","),
+                    join_paths(&assignment.files_to_create),
                 );
             }
             if !assignment.files_to_modify.is_empty() {
                 node.metadata.insert(
                     "files_to_modify".to_string(),
-                    assignment
-                        .files_to_modify
-                        .iter()
-                        .map(|p| p.to_string_lossy().to_string())
-                        .collect::<Vec<_>>()
-                        .join(","),
+                    join_paths(&assignment.files_to_modify),
                 );
             }
             if !assignment.files_to_read.is_empty() {
                 node.metadata.insert(
                     "files_to_read".to_string(),
-                    assignment
-                        .files_to_read
-                        .iter()
-                        .map(|p| p.to_string_lossy().to_string())
-                        .collect::<Vec<_>>()
-                        .join(","),
+                    join_paths(&assignment.files_to_read),
                 );
             }
 

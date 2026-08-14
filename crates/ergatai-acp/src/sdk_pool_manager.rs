@@ -581,8 +581,9 @@ async fn pool_event_loop(
                         tracing::info!(task_id = %task_id, "Task added to cancelled set");
                     }
                     Some(PoolCommand::GetStatus { reply_tx }) => {
-                        let idle = agents.iter().filter(|a| !a.busy).count();
-                        let busy = agents.iter().filter(|a| a.busy).count();
+                        let (idle, busy) = agents.iter().fold((0, 0), |(i, b), a| {
+                            if a.busy { (i, b + 1) } else { (i + 1, b) }
+                        });
 
                         // Get pending count from NATS queue
                         let pending = nats_queue.pending_count().await.unwrap_or(0) as u32;
