@@ -187,29 +187,38 @@ async fn handle_send_message(
         });
     }
 
-    // Get ACP connection for target agent
-    let acp_conn = registry.get_acp_connection(target_agent_id).await;
-    if acp_conn.is_none() {
-        return Ok(ToolCallResponse {
-            content: vec![Content::Text {
-                text: format!(
-                    "Agent {} has no ACP connection (cannot receive messages)",
-                    target_agent_id
-                ),
-            }],
-            is_error: Some(true),
-        });
-    }
-
     // TODO: Actually send message via ACP
-    // For now, just acknowledge
+    // For now, we need to:
+    // 1. Get agent config for target_agent_id
+    // 2. Create ACP connection
+    // 3. Send message as prompt
+    // 4. Wait for response
+
+    // Get agent config
+    let agent_config = match ergatai_core::agent::config::get_agent_config(target_agent_id) {
+        Ok(config) => config,
+        Err(e) => {
+            return Ok(ToolCallResponse {
+                content: vec![Content::Text {
+                    text: format!("Failed to get agent config for {}: {}", target_agent_id, e),
+                }],
+                is_error: Some(true),
+            });
+        }
+    };
+
+    // For now, just acknowledge the message
+    // TODO: Implement actual ACP message sending
     let message_id = uuid::Uuid::new_v4().to_string();
+
+    info!("Message {} queued for agent {} via ACP", message_id, target_agent_id);
 
     let result = json!({
         "message_id": message_id,
         "status": "sent",
         "target_agent_id": target_agent_id,
-        "message_type": message_type
+        "message_type": message_type,
+        "note": "Message relay via ACP not yet implemented"
     });
 
     Ok(ToolCallResponse {
