@@ -4,7 +4,7 @@
 
 use anyhow::Result;
 use serde_json::json;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use super::types::{Content, Tool, ToolCallResponse};
 use super::agent_registry::AgentRegistry;
@@ -177,57 +177,47 @@ async fn handle_send_message(
         target_agent_id, message, message_type
     );
 
-    // Check if target agent exists
+    // Check if target agent exists in registry (connected via MCP)
     let target_agent = registry.get_agent(target_agent_id).await;
     if target_agent.is_none() {
         return Ok(ToolCallResponse {
             content: vec![Content::Text {
-                text: format!("Agent {} not found", target_agent_id),
+                text: format!("Agent {} not found. Agent must connect via MCP first.", target_agent_id),
             }],
             is_error: Some(true),
         });
     }
 
-    // TODO: Actually send message via ACP
-    // For now, we need to:
-    // 1. Get agent config for target_agent_id
-    // 2. Create ACP connection
-    // 3. Send message as prompt
-    // 4. Wait for response
+    // Send message via ACP relay
+    match message_relay::send_message_to_agent(target_agent_id, message).await {
+        Ok(result) => {
+            let response_json = json!({
+                "message_id": result.message_id,
+                "status": result.status,
+                "target_agent_id": target_agent_id,
+                "message_type": message_type,
+                "session_id": result.session_id,
+                "session_reused": result.session_reused,
+                "response": result.response
+            });
 
-    // Get agent config
-    let agent_config = match ergatai_core::agent::config::get_agent_config(target_agent_id) {
-        Ok(config) => config,
-        Err(e) => {
-            return Ok(ToolCallResponse {
+            Ok(ToolCallResponse {
                 content: vec![Content::Text {
-                    text: format!("Failed to get agent config for {}: {}", target_agent_id, e),
+                    text: serde_json::to_string_pretty(&response_json)?,
+                }],
+                is_error: None,
+            })
+        }
+        Err(e) => {
+            error!("Failed to send message to agent {}: {}", target_agent_id, e);
+            Ok(ToolCallResponse {
+                content: vec![Content::Text {
+                    text: format!("Failed to send message: {}", e),
                 }],
                 is_error: Some(true),
-            });
+            })
         }
-    };
-
-    // For now, just acknowledge the message
-    // TODO: Implement actual ACP message sending
-    let message_id = uuid::Uuid::new_v4().to_string();
-
-    info!("Message {} queued for agent {} via ACP", message_id, target_agent_id);
-
-    let result = json!({
-        "message_id": message_id,
-        "status": "sent",
-        "target_agent_id": target_agent_id,
-        "message_type": message_type,
-        "note": "Message relay via ACP not yet implemented"
-    });
-
-    Ok(ToolCallResponse {
-        content: vec![Content::Text {
-            text: serde_json::to_string_pretty(&result)?,
-        }],
-        is_error: None,
-    })
+    }
 }
 
 /// Handle submit_orchestration tool
