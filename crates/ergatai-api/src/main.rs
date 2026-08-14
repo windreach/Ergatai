@@ -36,6 +36,10 @@ use ergatai_core::agent::hosted_config::list_hosted_agents;
 use ergatai_core::cross_agent::{get_dag_scheduler, DagScheduler};
 use ergatai_core::nats;
 
+// MCP module
+mod mcp;
+use mcp::McpServer;
+
 /// Shared application state available to all handlers.
 #[derive(Clone)]
 struct AppState {
@@ -107,15 +111,22 @@ async fn main() -> Result<()> {
         tracing::warn!("API authentication disabled - API is open to all local clients");
     }
 
+    // Initialize MCP server
+    let mcp_server = McpServer::new();
+    tracing::info!("MCP server initialized");
+
     // Build application router
     let state = app_state_with_token(args.api_token.clone()).clone();
     let app = Router::new()
+        // REST API routes
         .route("/health", get(health_check))
         .route("/api/v1/chat", post(create_chat))
         .route("/api/v1/agents", get(list_agents))
         .route("/api/v1/status", get(get_status))
         .route("/api/v1/dag", post(submit_dag))
         .route("/api/v1/dag/status", get(dag_status))
+        // MCP routes
+        .merge(mcp_server.router())
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
