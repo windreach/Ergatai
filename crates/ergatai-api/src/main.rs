@@ -142,6 +142,12 @@ struct Args {
     /// Can also be set via ERGATAI_AUTO_APPROVE environment variable.
     #[arg(long, env = "ERGATAI_AUTO_APPROVE")]
     auto_approve: bool,
+
+    /// SSE keep-alive interval in seconds. Lower values detect dead clients faster
+    /// but increase network traffic. Default: 15.
+    /// Can also be set via ERGATAI_SSE_KEEP_ALIVE environment variable.
+    #[arg(long, env = "ERGATAI_SSE_KEEP_ALIVE", default_value = "15")]
+    sse_keep_alive: u64,
 }
 
 /// Parse arguments and set environment variables BEFORE the tokio runtime starts.
@@ -230,8 +236,12 @@ async fn async_main(args: Args) -> Result<()> {
         mcp_registry.clone(),
         peer_registry.clone(),
         mcp_cancellation_token.clone(),
+        args.sse_keep_alive,
     );
-    tracing::info!("MCP server initialized (protocol 2025-06-18, Streamable HTTP)");
+    tracing::info!(
+        "MCP server initialized (protocol 2025-06-18, Streamable HTTP, SSE keep-alive: {}s)",
+        args.sse_keep_alive
+    );
     tracing::info!("Agent messaging: MCP notification (no ACP HTTP endpoint required)");
 
     // Start background peer reaper — detects abrupt disconnects (kill, network drop)

@@ -98,7 +98,7 @@ cargo build --release -p ergatai-api
 ┌──────────────┐              ┌──────────────┐              ┌──────────────┐
 │   Agent A    │ ─── MCP ──→ │              │ ←─── MCP ─── │   Agent B    │
 │  (Claude)    │              │   Ergatai    │              │   (Cursor)   │
-│              │ ←─ notify ── │  MCP Server  │ ── notify → │              │
+│              │ ←─ ACP ─────│  MCP Server  │ ─────ACP ───→│              │
 └──────────────┘              ──────┬───────┘              ──────────────┘
                                      │
                               ┌──────┴──────┐

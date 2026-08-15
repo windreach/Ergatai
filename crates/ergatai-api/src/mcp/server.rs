@@ -45,7 +45,13 @@ pub struct ErgataiMcpServer {
     peer_registry: PeerRegistry,
     /// Per-session agent ID (set during initialize, used in send_message)
     session_agent_id: Arc<RwLock<Option<String>>>,
+    /// Tracks consecutive send_message failures per target agent.
+    /// After `MAX_SEND_FAILURES` consecutive failures, the target is auto-unregistered.
+    send_failures: Arc<RwLock<HashMap<String, u32>>>,
 }
+
+/// Maximum consecutive send failures before auto-unregistering a target agent.
+const MAX_SEND_FAILURES: u32 = 3;
 
 impl std::fmt::Debug for ErgataiMcpServer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -64,6 +70,7 @@ impl ErgataiMcpServer {
             registry,
             peer_registry,
             session_agent_id: Arc::new(RwLock::new(None)),
+            send_failures: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 }
@@ -95,12 +102,23 @@ impl Drop for ErgataiMcpServer {
             let peer_registry = self.peer_registry.clone();
             info!("MCP session ending, unregistering agent: {}", agent_id);
             tokio::spawn(async move {
-                registry.unregister_agent(&agent_id).await;
-                peer_registry.write().await.remove(&agent_id);
-                info!("Agent {} unregistered (MCP session closed)", agent_id);
+                do_unregister_agent(&registry, &peer_registry, &agent_id, "MCP session closed").await;
             });
         }
     }
+}
+
+/// Unregister an agent from the registry and remove its peer handle.
+/// Centralized helper used by Drop, peer reaper, and send_message failure handler.
+async fn do_unregister_agent(
+    registry: &AgentRegistry,
+    peer_registry: &PeerRegistry,
+    agent_id: &str,
+    reason: &str,
+) {
+    registry.unregister_agent(agent_id).await;
+    peer_registry.write().await.remove(agent_id);
+    info!("Agent {} unregistered ({})", agent_id, reason);
 }
 
 // ── Tool parameter types ──
@@ -267,6 +285,9 @@ impl ErgataiMcpServer {
 
         match peer.send_notification(ServerNotification::CustomNotification(notification)).await {
             Ok(_) => {
+                // Success — reset the failure counter for this target
+                self.send_failures.write().await.remove(&resolved_agent_id);
+
                 let message_id = uuid::Uuid::new_v4().to_string();
                 let response_json = serde_json::json!({
                     "message_id": message_id,
@@ -284,22 +305,37 @@ impl ErgataiMcpServer {
             Err(e) => {
                 error!("Failed to send MCP notification to {}: {}", resolved_agent_id, e);
 
-                // Transport closed — the target agent disconnected abruptly.
-                // Auto-unregister it so list_agents stays accurate.
-                warn!("Agent {} transport closed, auto-unregistering", resolved_agent_id);
-                let registry = self.registry.clone();
-                let peer_registry = self.peer_registry.clone();
-                let agent_id = resolved_agent_id.clone();
-                tokio::spawn(async move {
-                    registry.unregister_agent(&agent_id).await;
-                    peer_registry.write().await.remove(&agent_id);
-                    info!("Agent {} auto-unregistered (transport closed)", agent_id);
-                });
+                // Increment consecutive failure counter for this target
+                let mut failures = self.send_failures.write().await;
+                let count = failures.entry(resolved_agent_id.clone()).or_insert(0);
+                *count += 1;
+                let current = *count;
 
-                Ok(CallToolResult::error(vec![ContentBlock::text(format!(
-                    "Agent {} is no longer connected (transport closed). It has been auto-unregistered.",
-                    resolved_agent_id
-                ))]))
+                if current >= MAX_SEND_FAILURES {
+                    warn!(
+                        "Agent {} reached {}/{} consecutive send failures, auto-unregistering",
+                        resolved_agent_id, current, MAX_SEND_FAILURES
+                    );
+                    let registry = self.registry.clone();
+                    let peer_registry = self.peer_registry.clone();
+                    let agent_id = resolved_agent_id.clone();
+                    failures.remove(&resolved_agent_id);
+                    tokio::spawn(async move {
+                        do_unregister_agent(
+                            &registry, &peer_registry, &agent_id,
+                            &format!("{} consecutive send failures", MAX_SEND_FAILURES),
+                        ).await;
+                    });
+                    Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                        "Agent {} has been auto-unregistered after {} consecutive send failures.",
+                        resolved_agent_id, MAX_SEND_FAILURES
+                    ))]))
+                } else {
+                    Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                        "Failed to deliver message to {} ({}/{} consecutive failures)",
+                        resolved_agent_id, current, MAX_SEND_FAILURES
+                    ))]))
+                }
             }
         }
     }
@@ -437,7 +473,8 @@ impl ServerHandler for ErgataiMcpServer {
 // ── Public API for creating the Streamable HTTP service ──
 
 use rmcp::transport::streamable_http_server::{
-    StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
+    StreamableHttpServerConfig, StreamableHttpService,
+    session::local::LocalSessionManager,
 };
 
 /// Create the MCP Streamable HTTP service for mounting in axum.
@@ -449,13 +486,15 @@ use rmcp::transport::streamable_http_server::{
 /// * `registry` - Agent registry for tracking connected agents
 /// * `peer_registry` - Shared registry of MCP peer handles for pushing notifications
 /// * `cancellation_token` - Token for graceful shutdown
+/// * `sse_keep_alive_secs` - SSE keep-alive interval in seconds (default 15)
 pub fn create_mcp_service(
     registry: Arc<AgentRegistry>,
     peer_registry: PeerRegistry,
     cancellation_token: CancellationToken,
+    sse_keep_alive_secs: u64,
 ) -> StreamableHttpService<ErgataiMcpServer, LocalSessionManager> {
     let config = StreamableHttpServerConfig::default()
-        .with_sse_keep_alive(Some(std::time::Duration::from_secs(5)))
+        .with_sse_keep_alive(Some(std::time::Duration::from_secs(sse_keep_alive_secs)))
         .with_sse_retry(Some(std::time::Duration::from_secs(3)))
         .with_json_response(true)
         .with_cancellation_token(cancellation_token)
@@ -463,9 +502,15 @@ pub fn create_mcp_service(
             "localhost", "127.0.0.1", "::1", "0.0.0.0",
         ]);
 
+    // Session keep_alive: auto-close sessions after this duration of inactivity.
+    // This catches dead clients (kill, network drop) within 2 minutes.
+    // Default is 300s (5 min). Agents that call tools periodically stay alive.
+    let mut session_manager = LocalSessionManager::default();
+    session_manager.session_config.keep_alive = Some(std::time::Duration::from_secs(120));
+
     StreamableHttpService::new(
         move || Ok(ErgataiMcpServer::new(registry.clone(), peer_registry.clone())),
-        Default::default(),
+        std::sync::Arc::new(session_manager),
         config,
     )
 }
@@ -500,9 +545,9 @@ pub fn start_peer_reaper(
 
                     for agent_id in stale_peers {
                         warn!("Peer reaper: detected dead transport for {}, cleaning up", agent_id);
-                        registry.unregister_agent(&agent_id).await;
-                        peer_registry.write().await.remove(&agent_id);
-                        info!("Peer reaper: agent {} unregistered", agent_id);
+                        do_unregister_agent(
+                            &registry, &peer_registry, &agent_id, "dead transport (reaper)",
+                        ).await;
                     }
                 }
             }

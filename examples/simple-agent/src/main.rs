@@ -173,13 +173,27 @@ async fn main() -> anyhow::Result<()> {
         Err(e) => error!("❌ list_agents failed: {}", e),
     }
 
-    // Keep running to receive notifications
+    // Keep running to receive notifications.
+    // Send periodic heartbeats (list_agents calls) to keep the MCP session alive.
+    // Without heartbeats, Ergatai's session timeout (120s default) would disconnect us.
     info!("👂 Listening for incoming MCP notifications... (Ctrl+C to exit)");
 
-    // Wait forever (or until Ctrl+C)
+    let heartbeat_client = client.clone();
+    let heartbeat_handle = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        loop {
+            interval.tick().await;
+            if heartbeat_client.call_tool(CallToolRequestParams::new("list_agents")).await.is_err() {
+                break; // Server disconnected
+            }
+        }
+    });
+
+    // Wait for Ctrl+C
     tokio::signal::ctrl_c().await?;
     info!("Shutting down...");
 
+    heartbeat_handle.abort();
     client.cancel().await?;
     Ok(())
 }
