@@ -8,16 +8,16 @@
   
   <rect width="512" height="512" fill="#0D0D14"/>
   
-  <!-- Simple horizontal: three connected dots representing agent collaboration -->
+  <!-- Three connected dots -->
   <circle cx="140" cy="256" r="36" fill="url(#grad)" opacity="0.7"/>
   <circle cx="256" cy="256" r="52" fill="url(#grad)"/>
   <circle cx="372" cy="256" r="36" fill="url(#grad)" opacity="0.7"/>
   
-  <!-- Connecting line behind the circles -->
+  <!-- Connections -->
   <line x1="176" y1="256" x2="204" y2="256" stroke="#0D0D14" stroke-width="20"/>
   <line x1="308" y1="256" x2="336" y2="256" stroke="#0D0D14" stroke-width="20"/>
   
-  <!-- Wordmark below -->
+  <!-- Wordmark -->
   <text x="256" y="420" text-anchor="middle" 
         font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif" 
         font-size="52" font-weight="700" letter-spacing="14" fill="#F1600D">ERGATAI</text>

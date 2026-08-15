@@ -6,9 +6,9 @@
     </linearGradient>
   </defs>
   
-  <rect width="512" height="512" fill="#0D0D14" rx="80"/>
+  <rect width="512" height="512" fill="#0D0D14" rx="60"/>
   
-  <!-- Three connected dots - simple icon -->
+  <!-- Three connected dots -->
   <circle cx="140" cy="256" r="36" fill="url(#grad)" opacity="0.7"/>
   <circle cx="256" cy="256" r="52" fill="url(#grad)"/>
   <circle cx="372" cy="256" r="36" fill="url(#grad)" opacity="0.7"/>

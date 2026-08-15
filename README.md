@@ -2,9 +2,9 @@
 
 > Tell your AI agents what to do — together.
 
-Ergatai is a **multi-agent collaboration middleware** that lets AI agents communicate and coordinate on tasks. It acts as a message broker, relaying messages between agents via MCP (Model Context Protocol) and ACP (Agent Client Protocol).
+Ergatai is a **multi-agent collaboration middleware** that lets AI agents communicate and coordinate on tasks. It acts as a message broker, relaying messages between agents via MCP (Model Context Protocol) — agents connect as MCP clients and receive messages via custom notifications.
 
-Pure Rust. Local-first. No cloud dependencies.
+Pure Rust. Local-first. No cloud dependencies. No HTTP server needed on the agent side.
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-2021-orange.svg)](https://www.rust-lang.org)
@@ -112,10 +112,11 @@ Claude: Message delivered. Session reused from previous exchange.
 ## Architecture
 
 ```
-┌──────────────┐    MCP     ┌──────────────┐    ACP     ┌──────────────┐
-│   Agent A    │ ←────────→ │   Ergatai    │ ←────────→ │   Agent B    │
-│  (Claude)    │            │  MCP Server  │            │   (Cursor)   │
-└──────────────┘            └──────┬───────┘            └──────────────┘
+┌──────────────┐    MCP     ┌──────────────┐    MCP      ┌──────────────┐
+│   Agent A    │ ←────────→ │   Ergatai    │ ←─────────→ │   Agent B    │
+│  (Claude)    │  tools +   │  MCP Server  │  tools +    │   (Cursor)   │
+│              │  notify    │              │  notify     │              │
+└──────────────┘            └──────┬───────┘             └──────────────┘
                                    │
                               ┌────▼─────┐
                               │  NATS    │
@@ -128,18 +129,18 @@ Claude: Message delivered. Session reused from previous exchange.
                               └──────────┘
 ```
 
-### Two-Layer Protocol Stack
+### Protocol Stack
 
 | Layer | Protocol | Direction | Purpose |
 |-------|----------|-----------|---------|
-| **Agent → Ergatai** | MCP (Streamable HTTP) | Inbound | Agents connect as MCP clients; send messages and orchestration requests |
-| **Ergatai → Agent** | ACP (JSON-RPC) | Outbound | Ergatai connects as ACP client; forwards messages to target agents |
+| **Agent → Ergatai** | MCP (Streamable HTTP) | Inbound | Agents connect as MCP clients; call tools (send_message, list_agents, etc.) |
+| **Ergatai → Agent** | MCP Custom Notification | Outbound | Ergatai pushes messages via `ergatai/message` notification over the existing MCP connection |
 | **Internal** | NATS + JetStream | Event bus | Task routing, completion events, file change notifications |
 
 ### How It Works
 
 1. **Agent Registration** — When an agent connects via MCP, it is automatically discovered and registered
-2. **Message Relay** — Agent A calls `send_message` via MCP; Ergatai forwards it to Agent B via ACP
+2. **Message Relay** — Agent A calls `send_message` via MCP; Ergatai pushes an `ergatai/message` notification to Agent B over its existing MCP connection
 3. **Orchestration** — Submit a DAG definition; Ergatai parses dependencies and schedules tasks across agents
 4. **Conflict Prevention** — Token-based file locks ensure concurrent edits never corrupt the codebase
 
@@ -208,11 +209,10 @@ Send a message to another registered agent.
 ```json
 {
   "message_id": "msg-a1b2c3",
-  "status": "sent",
+  "status": "delivered",
+  "delivery_method": "mcp_notification",
   "target_agent_id": "cursor",
-  "message_type": "request",
-  "session_id": "session-x9y8z7",
-  "session_reused": true
+  "message_type": "request"
 }
 ```
 
@@ -340,8 +340,7 @@ cargo fmt --all -- --check
 | Component | Technology | Version |
 |-----------|-----------|---------|
 | Language | Rust | 2021 edition |
-| MCP Protocol | Streamable HTTP | 2024-11-05 |
-| Agent Protocol | agent-client-protocol | 2.x |
+| MCP Protocol | Streamable HTTP | 2025-11-25 |
 | Messaging | async-nats + JetStream | 0.38 |
 | Database | rusqlite (embedded SQLite) | 0.31 |
 | HTTP Server | axum | 0.7 |
@@ -399,8 +398,9 @@ Yes. Ergatai's tool handlers live in `crates/ergatai-api/src/mcp/tools.rs`. You 
 
 - [x] MCP server with Streamable HTTP transport
 - [x] Agent auto-registration on connect
-- [x] Message relay (MCP → NATS → ACP)
+- [x] Message relay via MCP custom notifications
 - [x] Agent discovery and heartbeat
+- [x] Drop-based cleanup (stale agent removal)
 - [x] DAG orchestration engine
 - [x] Token-based file locking
 - [x] Prometheus metrics
@@ -410,7 +410,6 @@ Yes. Ergatai's tool handlers live in `crates/ergatai-api/src/mcp/tools.rs`. You 
 
 ### Near-term
 
-- [ ] On-demand ACP session spawning
 - [ ] Enhanced error reporting across agent boundaries
 - [ ] Persistent message queue (retry on reconnect)
 - [ ] Plugin system for custom tool handlers

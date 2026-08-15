@@ -6,32 +6,33 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Ergatai** - A multi-agent collaboration middleware for AI-assisted software engineering. Transforms individual AI coding assistants into a coordinated engineering team with parallel task execution, safe concurrent file access, and DAG-based workflow orchestration.
 
-**Pure Rust implementation** using **MCP (Model Context Protocol)** for agent-to-Ergatai communication (tool calls), **ACP (Agent Client Protocol) HTTP** for Ergatai-to-agent push messages, embedded **NATS** event bus for reliable messaging, and **DAG-based orchestration engine** with template-driven data flow.
+**Pure Rust implementation** using **MCP (Model Context Protocol)** for all agent communication — agents connect as MCP clients, call tools, and receive messages via **MCP custom notifications** (no HTTP server required), embedded **NATS** event bus for reliable internal messaging, and **DAG-based orchestration engine** with template-driven data flow.
 
 ### Middleware Architecture (Important!)
 
 Ergatai runs as a **middleware** - it does NOT spawn or manage agent processes. Instead:
 
 1. **Agents run independently** and manage their own lifecycle
-2. **Agents connect to Ergatai via MCP** to call tools (send_message, list_agents, etc.)
-3. **Agents expose ACP HTTP endpoints** so Ergatai can push tasks to them
-4. **Agents register their ACP endpoints** via the `set_acp_endpoint` MCP tool
+2. **Agents connect to Ergatai via MCP** (Streamable HTTP) as MCP clients
+3. **Agents call tools** (send_message, list_agents, etc.) via MCP tool calls
+4. **Agents receive messages** via MCP custom notifications (`ergatai/message`)
+5. **No HTTP server needed** — agents never bind ports or expose endpoints
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                      Agent (runs independently)                  │
-│  ┌──────────────┐         ┌──────────────────────────────────┐  │
-│  │   LLM/API    │         │     ACP HTTP Server              │  │
-│  │              │◄────────│  POST /acp/session/:id/prompt    │  │
-│  └──────────────┘         └──────────────────────────────────┘  │
+│  ┌──────────────┐                                               │
+│  │   LLM/API    │                                               │
+│  │              │                                               │
+│  └──────────────┘                                               │
 └─────────────────────────────────────────────────────────────────┘
-         │ MCP (tools/call)                    ▲ ACP HTTP
-         ▼                                     │
+         │ MCP (tools/call)                    ▲ MCP notifications
+         ▼                                     │ (ergatai/message)
 ┌─────────────────────────────────────────────────────────────────┐
 │                        Ergatai (Middleware)                      │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐  │
-│  │  MCP Server  │  │ HTTP Client  │  │   NATS Event Bus     │  │
-│  │  (tools)     │  │ (ACP push)   │  │   (JetStream)        │  │
+│  │  MCP Server  │  │ PeerRegistry │  │   NATS Event Bus     │  │
+│  │  (tools)     │  │ (push)       │  │   (JetStream)        │  │
 │  └──────────────┘  └──────────────┘  └──────────────────────┘  │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐  │
 │  │  Agent       │  │  DAG         │  │  File Access         │  │
@@ -121,17 +122,17 @@ examples/
 
 | Layer | Protocol | Direction | Purpose |
 |-------|----------|-----------|---------|
-| **Agent ↔ Ergatai** | ACP (JSON-RPC over stdio) | Bidirectional | Prompts, responses, tool calls, approvals |
+| **Agent ↔ Ergatai** | MCP (Streamable HTTP) | Bidirectional | Agents call tools; Ergatai pushes messages via custom notifications |
 | **Ergatai Internal** | NATS (JetStream) | Event stream | Task routing, completion events, file notifications |
 
-**Key point**: Agents never communicate directly. All inter-agent messaging is relayed through Ergatai via NATS.
+**Key point**: Agents never communicate directly. All inter-agent messaging is relayed through Ergatai. Ergatai uses the MCP peer handle to push `ergatai/message` notifications to the target agent's SSE stream.
 
 ```
 User request: "Refactor this module with 3 agents"
     ↓
 CLI generates DAG definition
     ↓
-DagScheduler parses → NATS distributes tasks → Sub-agents A/B/C (ACP execution)
+DagScheduler parses → NATS distributes tasks → Sub-agents A/B/C (MCP execution)
                    ↑ NATS events relay completion
 ```
 
@@ -379,7 +380,7 @@ Binaries will be in `target/release/`:
 |-------|-----------|
 | Language | Rust (100%) |
 | Agent→Ergatai | MCP (JSON-RPC over HTTP) |
-| Ergatai→Agent | ACP HTTP (agent-client-protocol 2.x) |
+| MCP | Streamable HTTP | 2025-11-25 |
 | Messaging | NATS (async-nats 0.38) + JetStream |
 | Database | SQLite (rusqlite 0.31) |
 | CLI Framework | clap 4.5 |
@@ -517,54 +518,48 @@ Check the status of a DAG execution.
 
 To create an agent that works with Ergatai:
 
-### 1. Start an ACP HTTP server on a random port
+### 1. Connect to Ergatai as an MCP client
 
-Your agent should bind to port 0 to let the OS assign a random available port:
+Use any MCP SDK (e.g. `rmcp` for Rust) to connect to `http://localhost:3000/mcp`:
 
 ```rust
-// Bind to port 0 - OS will assign a random available port
-let listener = TcpListener::bind("127.0.0.1:0").await?;
-let actual_port = listener.local_addr()?.port();
-info!("ACP HTTP server listening on port {}", actual_port);
-```
+use rmcp::{ClientHandler, ServiceExt, transport::StreamableHttpClientTransport, RoleClient};
 
-Your agent should expose these endpoints:
+struct MyAgent { agent_id: String }
 
-```
-POST /acp/session/new        → Create a new session, returns {session_id}
-POST /acp/session/:id/prompt → Handle a prompt, returns {content: [{type, text}]}
-POST /acp/session/:id/close  → Close a session
-GET  /health                  → Health check
-```
-
-### 2. Connect to Ergatai MCP with your port
-
-Send a JSON-RPC initialize request to Ergatai, **including your ACP port in the `_meta` field**:
-
-```bash
-curl -X POST http://localhost:3000/mcp \
-  -H "Content-Type: application/json" \
-  -d '{
-    "jsonrpc": "2.0",
-    "id": 1,
-    "method": "initialize",
-    "params": {
-      "protocolVersion": "2025-11-25",
-      "clientInfo": {"name": "my-agent", "version": "1.0.0"},
-      "capabilities": {},
-      "_meta": {"acp_port": 54321}
+impl ClientHandler for MyAgent {
+    // Override get_info so Ergatai registers you under your actual name
+    fn get_info(&self) -> ClientInfo {
+        ClientInfo::new(
+            ClientCapabilities::default(),
+            Implementation::new(self.agent_id.clone(), "1.0.0"),
+        )
     }
-  }'
+
+    // Receive messages from other agents via MCP custom notifications
+    async fn on_custom_notification(
+        &self, notification: CustomNotification, _ctx: NotificationContext<RoleClient>,
+    ) {
+        if notification.method == "ergatai/message" {
+            let payload = notification.params.unwrap_or_default();
+            let from = payload["from_agent"].as_str().unwrap_or("unknown");
+            let content = payload["content"].as_str().unwrap_or("(empty)");
+            info!("📩 Message from {}: {}", from, content);
+        }
+    }
+}
+
+// Connect
+let transport = StreamableHttpClientTransport::from_uri("http://localhost:3000/mcp");
+let client = MyAgent::new("my-agent").serve(transport).await?;
 ```
 
 **That's it!** Ergatai will automatically:
 - Register your agent identity (from `clientInfo.name`)
-- Register your ACP endpoint (from `_meta.acp_port`)
+- Enable message delivery via MCP notifications (no HTTP server needed)
 
-No need to call `set_acp_endpoint` separately!
+### 2. Use Ergatai tools
 
-### 3. Use Ergatai tools
+Your agent can call `list_agents`, `send_message`, `submit_orchestration`, etc.
 
-Now your agent can call `list_agents`, `send_message`, etc. to collaborate with other agents.
-
-See `examples/simple-agent/` for a complete implementation.
+See `examples/simple-agent/` for a complete working implementation.
