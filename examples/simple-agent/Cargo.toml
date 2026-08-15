@@ -5,14 +5,14 @@ edition = "2021"
 publish = false
 
 [dependencies]
-# HTTP server for ACP endpoint
-axum = { version = "0.7", features = ["ws"] }
+# MCP client SDK (connects to Ergatai, receives notifications)
+rmcp = { version = "3.1.2", features = [
+    "client",
+    "transport-streamable-http-client-reqwest",
+] }
 tokio = { version = "1.36", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
-uuid = { version = "1.0", features = ["v4"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1.0"
-async-trait = "0.1"

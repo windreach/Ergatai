@@ -3306,6 +3306,7 @@ dependencies = [
  "pastey",
  "pin-project-lite",
  "rand 0.10.2",
+ "reqwest 0.13.4",
  "rmcp-macros 3.1.2",
  "schemars 1.2.2",
  "serde",
@@ -3858,15 +3859,12 @@ name = "simple-agent"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-trait",
- "axum",
- "reqwest 0.12.28",
+ "rmcp 3.1.2",
  "serde",
  "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
- "uuid",
 ]
 
 [[package]]
