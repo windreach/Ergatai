@@ -94,40 +94,124 @@ cargo build --release -p ergatai-api
 
 # Architecture
 
+### System Overview
+
 ```
-┌──────────────┐              ┌──────────────┐              ┌──────────────┐
-│   Agent A    │ ─── MCP ──→ │              │ ←─── MCP ─── │   Agent B    │
-│  (Claude)    │              │   Ergatai    │              │   (Cursor)   │
-│              │ ←─ ACP ─────│  MCP Server  │ ─────ACP ───→│              │
-└──────────────┘              ──────┬───────┘              ──────────────┘
-                                     │
-                              ┌──────┴──────┐
-                              │   NATS      │
-                              │  JetStream  │
-                              └──────┬──────┘
-                                     │
-                              ┌──────┴──────┐
-                              │   Agent C   │
-                              │   (Codex)   │
-                              └─────────────┘
+                    ┌─────────────────────────────────────────────────┐
+                    │        Agents (run independently)                │
+                    │                                                  │
+  ┌──────────┐      │   ┌──────────┐  ┌──────────┐  ┌──────────┐    │
+  │  Claude   │      │   │  Cursor   │  │  Codex   │  │  Custom   │    │
+  │  Code     │      │   │  Agent   │  │  Agent   │  │  Agent    │    │
+  └────┬─────┘      │   └────┬─────┘  └────┬─────┘  └────┬─────┘    │
+       │             │        │              │              │          │
+       └───────┬─────┴────────┴──────┬───────┴──────┬───────┘          │
+               │                     │              │                  │
+    ┌──────────┴──────────┐          │              │                  │
+    │                     │          │              │                  │
+    ▼                     ▼          ▼              ▼                  │
+ MCP (inbound)        ACP (outbound)               MCP notifications
+ tools/call           HTTP push                    ergatai/message
+    │                     ▲                            ▲
+    │                     │                            │
+    ▼                     │                            │
+┌──────────────────────────────────────────────────────────────────────┐
+│                       Ergatai Middleware                             │
+│                                                                      │
+│  ┌───────────────────────────────────────────────────────────────┐  │
+│  │                    Protocol Layer                             │  │
+│  │  ┌──────────────┐  ┌──────────────┐  ┌────────────────────┐  │  │
+│  │  │MCP Server    │  │ACP HTTP      │  │Notification Router │  │  │
+│  │  │(JSON-RPC,    │  │Client        │  │(MCP custom         │  │  │
+│  │  │ SSE streams) │  │(push to      │  │ notifications)     │  │  │
+│  │  │              │  │ agents)      │  │                    │  │  │
+│  │  └──────────────┘  └──────────────┘  └────────────────────┘  │  │
+│  └───────────────────────────────────────────────────────────────┘  │
+│                               │                                      │
+│  ┌────────────────────────────┼────────────────────────────────┐    │
+│  │              Core Business Logic                             │    │
+│  │                     │                                        │    │
+│  │   ┌─────────────────┼────────────────────────────┐          │    │
+│  │   │                 │                            │          │    │
+│  │   ▼                 ▼                            ▼          │    │
+│  │ ┌──────────┐  ┌────────────┐              ┌──────────────┐  │    │
+│  │ │Agent     │  │DAG         │              │File Access   │  │    │
+│  │ │Registry  │  │Scheduler   │              │Control       │  │    │
+│  │ │          │  │            │              │              │  │    │
+│  │ │• Discover│  │• Parse DAG │              │• READ/WRITE/ │  │    │
+│  │ │• Track   │  │• Resolve   │              │  ADMIN locks │  │    │
+│  │ │• Heartbeat│ │  deps      │              │• Git snapshot│  │    │
+│  │ │• Reap    │  │• Schedule  │              │• Conflict    │  │    │
+│  │ │  stale   │  │• Template  │              │  arbitration │  │    │
+│  │ │  agents  │  │• Data flow │              │• Heartbeat   │  │    │
+│  │ └──────────┘  └────────────┘              └──────────────┘  │    │
+│  │                                                              │    │
+│  └────────────────────────────┬────────────────────────────────┘    │
+│                               │                                      │
+│  ┌────────────────────────────┼────────────────────────────────┐    │
+│  │              NATS Event Bus (JetStream)                     │    │
+│  │                     │                                        │    │
+│  │   ┌─────────────────┼────────────────────────────┐          │    │
+│  │   │                 │                            │          │    │
+│  │   ▼                 ▼                            ▼          │    │
+│  │ ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐    │    │
+│  │ │TASK_QUEUE    │  │FILE_ACCESS   │  │FILE_EVENTS       │    │    │
+│  │ │(WorkQueue)   │  │(JetStream)   │  │(ready/error)     │    │    │
+│  │ └──────────────┘  └──────────────┘  └──────────────────┘    │    │
+│  └──────────────────────────────────────────────────────────────┘    │
+└──────────────────────────────────────────────────────────────────────┘
+               │                             │
+               ▼                             ▼
+     ┌──────────────────┐          ┌──────────────────┐
+     │  Shared Codebase  │          │   SQLite DBs     │
+     │  (file locking)   │          │  .ergatai/*.db   │
+     └──────────────────┘          └──────────────────┘
 ```
 
-### Protocol Stack
+### Dual Protocol Stack
 
-| Layer | Protocol | Direction | Purpose |
-|-------|----------|-----------|---------|
-| **Agent → Ergatai** | MCP (Streamable HTTP) | Inbound | Agents connect as MCP clients; call tools (send_message, list_agents, etc.) |
-| **Ergatai → Agent** | MCP Custom Notification | Outbound | Ergatai pushes `ergatai/message` notifications over the existing MCP connection |
-| **Internal** | NATS + JetStream | Event bus | Task routing, completion events, file change notifications |
+Ergatai uses two independent protocols for bidirectional communication:
 
-**Key point**: Agents never communicate directly. All inter-agent messaging is relayed through Ergatai via MCP notifications — no HTTP server needed on the agent side.
+| Direction | Protocol | Purpose |
+|-----------|----------|---------|
+| **Agent → Ergatai** | MCP (Streamable HTTP) | Agents call tools: `list_agents`, `send_message`, `submit_orchestration`, `check_dag_status` |
+| **Ergatai → Agent** | ACP (HTTP client) | Ergatai pushes tasks and messages to agent's ACP HTTP endpoint |
 
-### How It Works
+**Agent registration flow:**
+1. Agent connects to Ergatai via MCP (as MCP client)
+2. Agent calls `set_acp_endpoint` to register its ACP HTTP endpoint
+3. Ergatai can now push messages/tasks to the agent via ACP HTTP
 
-1. **Agent Registration** — When an agent connects via MCP, it is automatically discovered and registered
-2. **Message Relay** — Agent A calls `send_message` via MCP; Ergatai pushes an `ergatai/message` notification to Agent B over its existing MCP connection
-3. **Orchestration** — Submit a DAG definition; Ergatai parses dependencies and schedules tasks across agents
-4. **Conflict Prevention** — Token-based file locks ensure concurrent edits never corrupt the codebase
+**Key point**: Agents must expose an ACP HTTP endpoint to receive messages. Ergatai uses HTTP ACP client to push work — agents never need to open incoming ports manually, but they do need to run an ACP-compatible HTTP server.
+
+### DAG Orchestration Flow
+
+The core value of Ergatai — parallel multi-agent workflows with dependencies:
+
+```
+User submits DAG                    Ergatai schedules & executes
+─────────────────                   ─────────────────────────────
+
+ ┌─────────────────┐
+ │  Markdown DAG   │                ┌────────┐    ┌────────┐
+ │  Definition     │───────────────▶│ Task A │───▶│ Task B │
+ │                 │   parse &      │(Claude)│    │(Cursor)│
+ │  ## Task A      │   validate     └────────┘    └───┬───┘
+ │  ## Task B      │                                  │
+ │  ## Task C      │                ┌────────┐        │
+ │  depends_on: A  │───────────────▶│ Task C │◀───────┘
+ └─────────────────┘   schedule     │(Codex) │
+                                    └────────┘
+
+                                    Timeline ──────────────────▶
+                                    
+                                    Agent A: ████ complete
+                                    Agent B:     ██ depends on A
+                                    Agent C:     █████ depends on A
+                                    
+                                    Template vars: {{TaskA.output}}
+                                    flows into downstream tasks
+```
 
 <br/>
 
@@ -355,39 +439,6 @@ The agent reaper checks heartbeats every 30s. If an agent goes silent for 90s, i
 
 `ergatai-api` is the standalone MCP server (the entry point you run). `ergatai-core` is the reusable library — if you want to embed Ergatai's collaboration logic inside another application, depend on `ergatai-core`.
 </details>
-
-<br/>
-
-# Roadmap
-
-### v0.x — Current Focus
-
-- [x] MCP server with Streamable HTTP transport
-- [x] Agent auto-registration on connect
-- [x] Message relay via MCP custom notifications
-- [x] Agent discovery and heartbeat
-- [x] DAG orchestration engine
-- [x] Token-based file locking
-- [x] Prometheus metrics
-- [x] TLS support
-- [ ] End-to-end integration tests
-- [ ] CLI chat interface with TUI progress display
-- [ ] Stable core features for production use
-
-### Near-term
-
-- [ ] Enhanced error reporting across agent boundaries
-- [ ] Persistent message queue (retry on reconnect)
-- [ ] Plugin system for custom tool handlers
-- [ ] Multi-workspace support
-
-### v1.0.0 — Planned
-
-- [ ] Desktop GUI application (Tauri/Electron)
-- [ ] Visual DAG editor
-- [ ] Real-time agent collaboration monitoring
-- [ ] User management and permission system
-- [ ] Enterprise features (SAML, audit export)
 
 <br/>
 
