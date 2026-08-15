@@ -21,10 +21,10 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 use ergatai_core::agent_registry::AgentRegistry;
-use ergatai_core::tmux::TmuxManager;
+use ergatai_runtime::get_agent_runtime;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Shared registry of MCP peer handles for pushing notifications to agents.
@@ -44,8 +44,6 @@ pub struct ErgataiMcpServer {
     registry: Arc<AgentRegistry>,
     /// Shared peer registry for pushing notifications to agents
     peer_registry: PeerRegistry,
-    /// Tmux manager for injecting messages into agent panes
-    tmux_manager: Arc<TmuxManager>,
     /// Per-session agent ID (set during initialize, used in send_message)
     session_agent_id: Arc<RwLock<Option<String>>>,
     /// Tracks consecutive send_message failures per target agent.
@@ -67,13 +65,11 @@ impl ErgataiMcpServer {
     pub fn new(
         registry: Arc<AgentRegistry>,
         peer_registry: PeerRegistry,
-        tmux_manager: Arc<TmuxManager>,
     ) -> Self {
         Self {
             tool_router: Self::tool_router(),
             registry,
             peer_registry,
-            tmux_manager,
             session_agent_id: Arc::new(RwLock::new(None)),
             send_failures: Arc::new(RwLock::new(HashMap::new())),
         }
@@ -207,10 +203,13 @@ impl ErgataiMcpServer {
 
     /// Send a message to another agent.
     ///
-    /// Delivery order:
-    /// 1. Tmux injection — if target agent is running in a tmux pane, inject message directly.
-    /// 2. MCP custom notification — fallback when tmux is not available.
-    #[tool(description = "Send a message to another agent (tmux injection preferred, MCP notification fallback)")]
+    /// Delivery order (reliable):
+    /// 1. **NATS JetStream** (preferred) — message is persisted to `AGENT_MESSAGES` stream,
+    ///    then delivered by the background `MessageDeliveryConsumer` via tmux injection
+    ///    or MCP notification. Provides durability, retry on failure, and delivery confirmation.
+    /// 2. **Direct tmux injection** (fallback) — when NATS is unavailable, falls back to
+    ///    direct tmux injection, then MCP notification. No persistence guarantee.
+    #[tool(description = "Send a message to another agent (NATS JetStream for reliability, tmux/MCP fallback)")]
     async fn send_message(
         &self,
         params: Parameters<SendMessageParams>,
@@ -225,9 +224,10 @@ impl ErgataiMcpServer {
         );
 
         // Find the matching agent - support both exact ID and name prefix
-        // Check both MCP registry and tmux manager
+        // Check both MCP registry and AgentRuntime
         let agents = self.registry.list_agents().await;
-        let tmux_agents = self.tmux_manager.list_agents().await;
+        let runtime = get_agent_runtime();
+        let runtime_agents = runtime.list_agents().await;
 
         let matching_agent = agents
             .iter()
@@ -239,12 +239,13 @@ impl ErgataiMcpServer {
             })
             .map(|a| a.agent_id.clone())
             .or_else(|| {
-                // Check tmux agents
-                tmux_agents
+                // Check runtime agents (by task_id or mcp_agent_id)
+                runtime_agents
                     .iter()
                     .find(|a| {
                         a.agent_id == *target_agent_id
-                        || a.agent_id.starts_with(&format!("{}@", target_agent_id))
+                        || a.task_id.as_deref() == Some(target_agent_id)
+                        || a.mcp_agent_id.as_deref() == Some(target_agent_id)
                     })
                     .map(|a| a.agent_id.clone())
             });
@@ -269,13 +270,52 @@ impl ErgataiMcpServer {
             .unwrap_or_default()
             .as_secs();
 
-        // ── Try tmux injection first (preferred method) ──
+        // ── Primary path: publish to NATS JetStream (reliable) ──
+        if let Some(conn) = ergatai_nats::get_nats_connection().await {
+            let bus = ergatai_nats::EventBus::new(conn);
+            let payload = ergatai_nats::AgentMessagePayload {
+                from_agent: from_agent.clone(),
+                to_agent: resolved_agent_id.clone(),
+                content: message.to_string(),
+                thread_id: None,
+                timestamp,
+                metadata: std::collections::HashMap::new(),
+            };
+
+            match bus.publish_agent_message_reliable(&payload).await {
+                Ok(ack) => {
+                    self.send_failures.write().await.remove(&resolved_agent_id);
+
+                    let response_json = serde_json::json!({
+                        "status": "queued",
+                        "target_agent": resolved_agent_id,
+                        "delivery_method": "nats_jetstream",
+                        "stream": ack.stream,
+                        "sequence": ack.sequence,
+                        "note": "Message persisted to NATS JetStream. Background consumer will deliver via tmux injection (preferred) or MCP notification (fallback)."
+                    });
+
+                    return Ok(CallToolResult::success(vec![ContentBlock::text(
+                        serde_json::to_string_pretty(&response_json).unwrap_or_default(),
+                    )]));
+                }
+                Err(e) => {
+                    warn!(
+                        "NATS JetStream publish failed (falling back to direct delivery): {}",
+                        e
+                    );
+                    // Fall through to direct delivery
+                }
+            }
+        }
+
+        // ── Fallback: direct tmux injection (no persistence) ──
         if let Ok(result) = self.try_tmux_injection(&resolved_agent_id, &from_agent, message).await {
             self.send_failures.write().await.remove(&resolved_agent_id);
             return Ok(result);
         }
 
-        // ── Fallback: MCP custom notification ──
+        // ── Last resort: MCP custom notification ──
         self.send_mcp_notification(
             &resolved_agent_id,
             &from_agent,
@@ -406,7 +446,7 @@ impl ErgataiMcpServer {
 
     // ── Private helpers for send_message ──
 
-    /// Inject message via tmux (preferred method when agent is in tmux pane).
+    /// Inject message via AgentRuntime (preferred method when agent is tracked).
     async fn try_tmux_injection(
         &self,
         resolved_agent_id: &str,
@@ -420,28 +460,29 @@ impl ErgataiMcpServer {
         );
 
         info!(
-            "Attempting tmux injection to agent {}: {}",
+            "Attempting AgentRuntime injection to agent {}: {}",
             resolved_agent_id, formatted_message
         );
 
-        // Try to inject via tmux using MCP agent ID mapping
-        match self.tmux_manager.inject_message_by_mcp_id(resolved_agent_id, &formatted_message).await {
+        // Try to inject via AgentRuntime (uses backend injection or MCP fallback)
+        let runtime = get_agent_runtime();
+        match runtime.inject_message(resolved_agent_id, &formatted_message).await {
             Ok(()) => {
-                info!("Message injected to {} via tmux", resolved_agent_id);
+                info!("Message injected to {} via AgentRuntime", resolved_agent_id);
                 Ok(CallToolResult::success(vec![ContentBlock::text(
                     serde_json::to_string_pretty(&serde_json::json!({
                         "status": "sent",
                         "target_agent": resolved_agent_id,
-                        "delivery_method": "tmux_injection",
-                        "note": "Message injected into agent's tmux pane. Agent will process it as user input."
+                        "delivery_method": "runtime_injection",
+                        "note": "Message injected via AgentRuntime (backend injection or MCP fallback)."
                     }))
                     .unwrap_or_default(),
                 )]))
             }
             Err(e) => {
-                warn!("Tmux injection to {} failed: {}", resolved_agent_id, e);
+                warn!("AgentRuntime injection to {} failed: {}", resolved_agent_id, e);
                 Err(ErrorData::internal_error(
-                    format!("Tmux injection failed: {}", e),
+                    format!("AgentRuntime injection failed: {}", e),
                     None,
                 ))
             }
@@ -588,28 +629,9 @@ impl ServerHandler for ErgataiMcpServer {
             return Err(ErrorData::invalid_params(format!("Failed to register agent: {}", e), None::<serde_json::Value>));
         }
 
-        // Try to auto-map to tmux pane
-        // First, scan tmux to ensure we have the latest pane list
-        if let Err(e) = self.tmux_manager.scan_and_register_panes().await {
-            debug!("Failed to scan tmux panes (session may not exist yet): {}", e);
-        }
-
-        // Atomically find and claim an unmapped tmux pane.
-        // This prevents two concurrent MCP connections from mapping to the same pane.
-        match self.tmux_manager.try_claim_unmapped_pane(&unique_agent_id).await {
-            Some(pane) => {
-                info!(
-                    "Auto-mapped MCP agent {} to tmux pane {}",
-                    unique_agent_id, pane
-                );
-            }
-            None => {
-                debug!(
-                    "No unmapped tmux pane found for MCP agent {} (base name: {})",
-                    unique_agent_id, agent_id
-                );
-            }
-        }
+        // Note: AgentRuntime backend (LocalPtyBackend) handles pane discovery
+        // via scan_and_register_panes() during initialization. MCP agents that
+        // need tmux mapping should be launched via AgentRuntime.
 
         // Save the peer handle for pushing notifications to this agent
         self.peer_registry.write().await.insert(
@@ -665,13 +687,11 @@ use rmcp::transport::streamable_http_server::{
 /// # Arguments
 /// * `registry` - Agent registry for tracking connected agents
 /// * `peer_registry` - Shared registry of MCP peer handles for pushing notifications
-/// * `tmux_manager` - Tmux manager for injecting messages into agent panes
 /// * `cancellation_token` - Token for graceful shutdown
 /// * `sse_keep_alive_secs` - SSE keep-alive interval in seconds (default 15)
 pub fn create_mcp_service(
     registry: Arc<AgentRegistry>,
     peer_registry: PeerRegistry,
-    tmux_manager: Arc<TmuxManager>,
     cancellation_token: CancellationToken,
     sse_keep_alive_secs: u64,
 ) -> StreamableHttpService<ErgataiMcpServer, LocalSessionManager> {
@@ -691,7 +711,7 @@ pub fn create_mcp_service(
     session_manager.session_config.keep_alive = Some(std::time::Duration::from_secs(120));
 
     StreamableHttpService::new(
-        move || Ok(ErgataiMcpServer::new(registry.clone(), peer_registry.clone(), tmux_manager.clone())),
+        move || Ok(ErgataiMcpServer::new(registry.clone(), peer_registry.clone())),
         std::sync::Arc::new(session_manager),
         config,
     )

@@ -1,6 +1,9 @@
-//! 清除所有注册的 agent
+//! Kill the Ergatai tmux session and clean up all agent panes.
 //!
-//! 运行: cargo run --bin clear-agents
+//! Usage: cargo run --bin clear-agents
+//! Session name: set via ERGATAI_TMUX_SESSION env var (default: "ergatai-opencode")
+
+use ergatai_core::tmux::TmuxManager;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -8,29 +11,29 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter("ergatai=info")
         .init();
 
-    println!("🧹 清除所有注册的 Agent");
-    println!("========================\n");
+    let session = std::env::var("ERGATAI_TMUX_SESSION")
+        .unwrap_or_else(|_| "ergatai-opencode".to_string());
 
-    // 这个方法需要访问 AgentRegistry，但我们没有直接访问
-    // 简化版本：提示用户重启 Ergatai
+    println!("Cleaning up tmux session: {}", session);
 
-    println!("💡 清除 agent 的最简单方法是重启 Ergatai：\n");
-    println!("   1. 停止 Ergatai:");
-    println!("      pkill -9 -f ergatai-api");
-    println!("");
-    println!("   2. 清理 tmux session:");
-    println!("      tmux kill-session -t ergatai-opencode");
-    println!("");
-    println!("   3. 重新启动:");
-    println!("      ./clean-restart.sh");
-    println!("");
-    println!("   4. 运行测试:");
-    println!("      ./test-opencode-auto-register.sh");
-    println!("");
+    // Check tmux is available
+    if let Err(e) = TmuxManager::check_tmux().await {
+        println!("tmux not available: {}", e);
+        println!("Hint: install tmux or check PATH");
+        return Ok(());
+    }
 
-    println!("🎯 或者使用一键清理脚本：");
-    println!("   ./clean-restart.sh");
-    println!("");
+    let manager = TmuxManager::new(&session);
 
+    // Kill the session (best-effort; kill_session internally swallows errors
+    // since a missing session is not actionable). We cannot distinguish
+    // "killed" from "already gone" — both are fine for cleanup purposes.
+    // NOTE: This does NOT clear the running middleware's PeerRegistry.
+    // If agents were connected to ergatai-api, restart the middleware or
+    // use an admin endpoint to clear stale peer registrations.
+    let _ = manager.kill_session().await;
+    println!("Session '{}' cleanup attempted", session);
+
+    println!("Done.");
     Ok(())
 }

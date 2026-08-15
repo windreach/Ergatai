@@ -32,31 +32,60 @@ impl EventBus {
 
     // ── Publish helpers ──
 
-    /// Publish a task submission event
-    pub async fn publish_task_submit(&self, payload: &TaskSubmitPayload) -> ErgataiResult<()> {
+    /// Publish a task submission event via JetStream (reliable, persisted)
+    ///
+    /// Routes to `ergatai.task.submit.{target_agent}` on the `DAG_EVENTS` stream.
+    /// TaskScheduler pulls from this stream with a filtered consumer.
+    /// Returns `PublishAck` with stream/sequence for traceability.
+    pub async fn publish_task_submit(
+        &self,
+        payload: &TaskSubmitPayload,
+    ) -> ErgataiResult<async_nats::jetstream::publish::PublishAck> {
         let subject = format!(
             "ergatai.task.submit.{}",
             sanitize_agent_name(&payload.target_agent)
         );
-        self.publish(&subject, payload).await
+        let json = serde_json::to_vec(payload)?;
+        self.connection.publish_jetstream(&subject, json).await
     }
 
-    /// Publish a node completion event
-    pub async fn publish_node_complete(&self, payload: &NodeCompletePayload) -> ErgataiResult<()> {
+    /// Publish a node completion event via JetStream (reliable, persisted)
+    ///
+    /// Routes to `ergatai.dag.node_complete.{node_id}` on the `DAG_EVENTS` stream.
+    /// DagScheduler pulls from this stream with the `dag_events` consumer.
+    pub async fn publish_node_complete(
+        &self,
+        payload: &NodeCompletePayload,
+    ) -> ErgataiResult<async_nats::jetstream::publish::PublishAck> {
         let subject = format!("ergatai.dag.node_complete.{}", payload.node_id);
-        self.publish(&subject, payload).await
+        let json = serde_json::to_vec(payload)?;
+        self.connection.publish_jetstream(&subject, json).await
     }
 
-    /// Publish a node failure event
-    pub async fn publish_node_failed(&self, payload: &NodeFailedPayload) -> ErgataiResult<()> {
+    /// Publish a node failure event via JetStream (reliable, persisted)
+    ///
+    /// Routes to `ergatai.dag.node_failed.{node_id}` on the `DAG_EVENTS` stream.
+    /// DagScheduler pulls from this stream with the `dag_events` consumer.
+    pub async fn publish_node_failed(
+        &self,
+        payload: &NodeFailedPayload,
+    ) -> ErgataiResult<async_nats::jetstream::publish::PublishAck> {
         let subject = format!("ergatai.dag.node_failed.{}", payload.node_id);
-        self.publish(&subject, payload).await
+        let json = serde_json::to_vec(payload)?;
+        self.connection.publish_jetstream(&subject, json).await
     }
 
-    /// Publish a DAG completion event
-    pub async fn publish_dag_complete(&self, payload: &DagCompletePayload) -> ErgataiResult<()> {
+    /// Publish a DAG completion event via JetStream (reliable, persisted)
+    ///
+    /// Routes to `ergatai.dag.complete.{dag_id}` on the `DAG_EVENTS` stream.
+    /// Observers pull from this stream with the `dag_events` consumer.
+    pub async fn publish_dag_complete(
+        &self,
+        payload: &DagCompletePayload,
+    ) -> ErgataiResult<async_nats::jetstream::publish::PublishAck> {
         let subject = format!("ergatai.dag.complete.{}", payload.dag_id);
-        self.publish(&subject, payload).await
+        let json = serde_json::to_vec(payload)?;
+        self.connection.publish_jetstream(&subject, json).await
     }
 
     /// Publish an agent-to-agent message
@@ -69,6 +98,30 @@ impl EventBus {
             sanitize_agent_name(&payload.to_agent)
         );
         self.publish(&subject, payload).await
+    }
+
+    /// Publish an agent-to-agent message via JetStream (reliable, persisted)
+    ///
+    /// Same subject routing as [`publish_agent_message`](Self::publish_agent_message),
+    /// but uses JetStream so the message is durably stored before returning.
+    /// The consumer pulls from the `AGENT_MESSAGES` stream and delivers via
+    /// tmux injection / MCP notification.
+    ///
+    /// # Returns
+    ///
+    /// `PublishAck` with the stream sequence number on success.
+    /// Callers should treat `Err` as "NATS unavailable" and may fall back to
+    /// direct delivery or surface the error.
+    pub async fn publish_agent_message_reliable(
+        &self,
+        payload: &AgentMessagePayload,
+    ) -> ErgataiResult<async_nats::jetstream::publish::PublishAck> {
+        let subject = format!(
+            "ergatai.agent.message.{}",
+            sanitize_agent_name(&payload.to_agent)
+        );
+        let json = serde_json::to_vec(payload)?;
+        self.connection.publish_jetstream(&subject, json).await
     }
 
     // ── Subscribe helpers ──
@@ -128,7 +181,7 @@ impl EventBus {
 
     /// Subscribe to ALL DAG events (wildcard)
     pub async fn subscribe_all_dag_events(&self) -> ErgataiResult<async_nats::Subscriber> {
-        self.connection.subscribe("ergatai.dag.*").await
+        self.connection.subscribe("ergatai.dag.>").await
     }
 
     /// Subscribe to messages for a specific agent
@@ -413,11 +466,11 @@ impl EventBus {
 /// Receive and deserialize a typed event from a subscriber.
 ///
 /// Returns `None` on timeout, `Err` on deserialization failure.
-pub async fn receive_event<T: for<'de> Deserialize<'de>>(
+pub async fn receive_event<T>(
     subscriber: &mut async_nats::Subscriber,
 ) -> Option<ErgataiResult<T>>
 where
-    T: std::marker::Unpin,
+    T: for<'de> Deserialize<'de> + std::marker::Unpin,
 {
     use futures_util::StreamExt;
 

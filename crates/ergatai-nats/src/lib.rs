@@ -7,7 +7,9 @@
 //! - DAG event types and event bus for event-driven communication
 //! - File access control event payloads and JetStream streams
 
+pub mod agent_message_stream;
 pub mod connection;
+pub mod dag_event_stream;
 pub mod event_bus;
 pub mod events;
 pub mod file_access_streams;
@@ -37,6 +39,13 @@ pub use events::{
     NodeFailedPayload,
     SystemTokenPayload,
     TaskSubmitPayload,
+};
+pub use agent_message_stream::{
+    agent_message_stream_config, all_agent_message_stream_configs, AGENT_MESSAGES_STREAM,
+};
+pub use dag_event_stream::{
+    all_dag_event_stream_configs, dag_events_stream_config, DAG_EVENTS_CONSUMER,
+    DAG_EVENTS_STREAM, TASK_SUBMISSIONS_CONSUMER,
 };
 pub use file_access_streams::{
     all_file_access_stream_configs, file_access_escalate_stream_config,

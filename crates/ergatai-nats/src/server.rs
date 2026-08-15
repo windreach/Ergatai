@@ -262,6 +262,7 @@ static SHARED_TEST_SERVER: Mutex<Option<&'static NatsServer>> = Mutex::new(None)
 /// Note: Holds std::sync::Mutex across async operation, which is acceptable here because:
 /// 1. This is test-only code with one-time initialization
 /// 2. Prevents race condition where multiple threads create zombie NATS processes
+#[allow(clippy::await_holding_lock)]
 pub async fn shared_test_server() -> ErgataiResult<&'static NatsServer> {
     // Hold lock throughout initialization to prevent race condition
     let mut guard = SHARED_TEST_SERVER.lock().unwrap();

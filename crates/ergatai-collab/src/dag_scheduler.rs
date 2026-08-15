@@ -166,11 +166,13 @@ impl DagScheduler {
         format!("dag-{:x}", hasher.finish())
     }
 
-    /// Start listening for NATS DAG events (node_complete, node_failed)
+    /// Start listening for DAG events via JetStream pull consumer
     ///
-    /// Spawns a background task that subscribes to:
-    /// - `ergatai.dag.node_complete.*` — triggers `on_node_completed()`
-    /// - `ergatai.dag.node_failed.*`   — triggers `on_node_failed()`
+    /// Pulls messages from the `DAG_EVENTS` stream with filter `ergatai.dag.>`.
+    /// Dispatches by subject:
+    /// - `ergatai.dag.node_complete.*` → `on_node_completed()`
+    /// - `ergatai.dag.node_failed.*`   → `on_node_failed()`
+    /// - `ergatai.dag.complete.*`      → logged (no handler yet)
     ///
     /// Returns a `JoinHandle` that can be aborted to stop listening.
     pub fn start_event_listener(self) -> tokio::task::JoinHandle<()> {
@@ -183,112 +185,41 @@ impl DagScheduler {
                 }
             };
 
-            let bus = ergatai_nats::EventBus::new(conn);
-
-            // Subscribe to all node completion events
-            let mut complete_sub = match bus.subscribe_all_node_complete().await {
-                Ok(s) => s,
+            let mut messages = match init_dag_event_consumer(&conn).await {
+                Ok(m) => m,
                 Err(e) => {
-                    tracing::error!(error = %e, "Failed to subscribe to node_complete events");
+                    tracing::error!(error = %e, "Failed to initialize DAG event consumer");
                     return;
                 }
             };
 
-            // Subscribe to all node failure events
-            let mut failed_sub = match bus.subscribe_all_node_failed().await {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::error!(error = %e, "Failed to subscribe to node_failed events");
-                    return;
-                }
-            };
-
-            tracing::info!("DAG event listener started");
+            tracing::info!(
+                "JetStream DAG event listener started (stream: {}, filter: ergatai.dag.>)",
+                ergatai_nats::DAG_EVENTS_STREAM
+            );
 
             use futures_util::StreamExt;
             loop {
-                tokio::select! {
-                    // Handle node completion
-                    msg = complete_sub.next() => {
-                        match msg {
-                            Some(nats_msg) => {
-                                match serde_json::from_slice::<ergatai_nats::NodeCompletePayload>(&nats_msg.payload) {
-                                    Ok(payload) => {
-                                        tracing::info!(
-                                            node_id = %payload.node_id,
-                                            "Received NATS node_complete event"
-                                        );
-                                        // Record outputs into context
-                                        if !payload.outputs.is_empty() {
-                                            self.record_outputs(&payload.node_id, payload.outputs).await;
-                                        }
-                                        // Trigger downstream nodes
-                                        match self.on_node_completed(&payload.node_id, payload.result_file).await {
-                                            Ok(newly_submitted) => {
-                                                tracing::info!(
-                                                    node_id = %payload.node_id,
-                                                    newly_submitted = newly_submitted.len(),
-                                                    "Processed node_complete, submitted downstream"
-                                                );
-                                            }
-                                            Err(e) => {
-                                                tracing::error!(
-                                                    node_id = %payload.node_id,
-                                                    error = %e,
-                                                    "Failed to process node_complete"
-                                                );
-                                            }
-                                        }
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!(error = %e, "Failed to deserialize node_complete event");
-                                    }
-                                }
-                            }
-                            None => {
-                                tracing::warn!("node_complete subscription closed");
-                                break;
-                            }
-                        }
+                let next = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    messages.next(),
+                )
+                .await;
+
+                match next {
+                    Err(_) => continue, // idle timeout — loop for abort check
+
+                    Ok(None) => {
+                        tracing::warn!("DAG event stream closed, listener exiting");
+                        break;
                     }
 
-                    // Handle node failure
-                    msg = failed_sub.next() => {
-                        match msg {
-                            Some(nats_msg) => {
-                                match serde_json::from_slice::<ergatai_nats::NodeFailedPayload>(&nats_msg.payload) {
-                                    Ok(payload) => {
-                                        tracing::info!(
-                                            node_id = %payload.node_id,
-                                            error = %payload.error,
-                                            "Received NATS node_failed event"
-                                        );
-                                        match self.on_node_failed(&payload.node_id, &payload.error).await {
-                                            Ok(()) => {
-                                                tracing::info!(
-                                                    node_id = %payload.node_id,
-                                                    "Processed node_failed"
-                                                );
-                                            }
-                                            Err(e) => {
-                                                tracing::error!(
-                                                    node_id = %payload.node_id,
-                                                    error = %e,
-                                                    "Failed to process node_failed"
-                                                );
-                                            }
-                                        }
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!(error = %e, "Failed to deserialize node_failed event");
-                                    }
-                                }
-                            }
-                            None => {
-                                tracing::warn!("node_failed subscription closed");
-                                break;
-                            }
-                        }
+                    Ok(Some(Ok(js_msg))) => {
+                        handle_dag_event(&js_msg, &self).await;
+                    }
+
+                    Ok(Some(Err(e))) => {
+                        tracing::warn!(error = %e, "Error receiving DAG event from stream");
                     }
                 }
             }
@@ -707,6 +638,152 @@ impl DagScheduler {
         serde_json::to_string(&*graph)
             .map_err(|e| ErgataiError::json_with_source("Failed to serialize graph", e))
     }
+}
+
+/// Initialize the JetStream pull consumer for DAG events on the DAG_EVENTS stream.
+///
+/// Returns a boxed stream of JetStream messages filtered to `ergatai.dag.>`.
+/// The consumer is durable (`dag_events`) and resumes from the last ack on restart.
+async fn init_dag_event_consumer(
+    connection: &ergatai_nats::NatsConnection,
+) -> ErgataiResult<futures_util::stream::BoxStream<'static, Result<async_nats::jetstream::Message, Box<dyn std::error::Error + Send + Sync>>>> {
+    use async_nats::jetstream::consumer::{pull, AckPolicy, DeliverPolicy};
+    use futures_util::StreamExt;
+
+    let stream = connection
+        .jetstream()
+        .get_stream(ergatai_nats::DAG_EVENTS_STREAM)
+        .await
+        .map_err(|e| {
+            ErgataiError::NatsError(format!(
+                "Stream {} not found: {}",
+                ergatai_nats::DAG_EVENTS_STREAM,
+                e
+            ))
+        })?;
+
+    let consumer_config = pull::Config {
+        durable_name: Some(ergatai_nats::DAG_EVENTS_CONSUMER.to_string()),
+        filter_subject: "ergatai.dag.>".to_string(),
+        deliver_policy: DeliverPolicy::All,
+        ack_policy: AckPolicy::Explicit,
+        ack_wait: std::time::Duration::from_secs(60),
+        max_deliver: 5,
+        ..Default::default()
+    };
+
+    let consumer = stream
+        .get_or_create_consumer(ergatai_nats::DAG_EVENTS_CONSUMER, consumer_config)
+        .await
+        .map_err(|e| {
+            ErgataiError::NatsError(format!("Failed to create DAG event consumer: {}", e))
+        })?;
+
+    let messages = consumer.messages().await.map_err(|e| {
+        ErgataiError::NatsError(format!("Failed to get message stream: {}", e))
+    })?;
+
+    Ok(Box::pin(messages.map(|r| {
+        r.map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+    })))
+}
+
+/// Handle a single DAG event by subject-prefix dispatch.
+///
+/// - `ergatai.dag.node_complete.*` → deserialize NodeCompletePayload, run `on_node_completed`
+/// - `ergatai.dag.node_failed.*`   → deserialize NodeFailedPayload,  run `on_node_failed`
+/// - `ergatai.dag.complete.*`      → deserialize DagCompletePayload, log (no action yet)
+///
+/// Acks on success; naks on handler error; acks malformed messages to discard.
+async fn handle_dag_event(
+    js_msg: &async_nats::jetstream::Message,
+    scheduler: &DagScheduler,
+) {
+    let subject = js_msg.subject.as_str();
+
+    // ── node_complete.* ──
+    if subject.starts_with("ergatai.dag.node_complete.") {
+        let payload: ergatai_nats::NodeCompletePayload = match serde_json::from_slice(&js_msg.payload) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(error = %e, subject = subject, "Malformed node_complete — acking to discard");
+                let _ = js_msg.ack().await;
+                return;
+            }
+        };
+
+        tracing::info!(node_id = %payload.node_id, "Received JetStream node_complete event");
+
+        if !payload.outputs.is_empty() {
+            scheduler.record_outputs(&payload.node_id, payload.outputs).await;
+        }
+
+        match scheduler.on_node_completed(&payload.node_id, payload.result_file).await {
+            Ok(newly_submitted) => {
+                tracing::info!(
+                    node_id = %payload.node_id,
+                    newly_submitted = newly_submitted.len(),
+                    "Processed node_complete, submitted downstream"
+                );
+                let _ = js_msg.ack().await;
+            }
+            Err(e) => {
+                tracing::error!(node_id = %payload.node_id, error = %e, "Failed to process node_complete — naking");
+                let _ = js_msg.ack_with(async_nats::jetstream::message::AckKind::Nak(None)).await;
+            }
+        }
+        return;
+    }
+
+    // ── node_failed.* ──
+    if subject.starts_with("ergatai.dag.node_failed.") {
+        let payload: ergatai_nats::NodeFailedPayload = match serde_json::from_slice(&js_msg.payload) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(error = %e, subject = subject, "Malformed node_failed — acking to discard");
+                let _ = js_msg.ack().await;
+                return;
+            }
+        };
+
+        tracing::info!(node_id = %payload.node_id, error = %payload.error, "Received JetStream node_failed event");
+
+        match scheduler.on_node_failed(&payload.node_id, &payload.error).await {
+            Ok(()) => {
+                tracing::info!(node_id = %payload.node_id, "Processed node_failed");
+                let _ = js_msg.ack().await;
+            }
+            Err(e) => {
+                tracing::error!(node_id = %payload.node_id, error = %e, "Failed to process node_failed — naking");
+                let _ = js_msg.ack_with(async_nats::jetstream::message::AckKind::Nak(None)).await;
+            }
+        }
+        return;
+    }
+
+    // ── complete.* (informational) ──
+    if subject.starts_with("ergatai.dag.complete.") {
+        match serde_json::from_slice::<ergatai_nats::DagCompletePayload>(&js_msg.payload) {
+            Ok(payload) => {
+                tracing::info!(
+                    dag_id = %payload.dag_id,
+                    completed = payload.completed_nodes,
+                    failed = payload.failed_nodes,
+                    total = payload.total_nodes,
+                    "Received JetStream dag_complete event"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, subject = subject, "Malformed dag_complete — acking to discard");
+            }
+        }
+        let _ = js_msg.ack().await;
+        return;
+    }
+
+    // ── Unknown subject under ergatai.dag.> — ack to discard ──
+    tracing::warn!(subject = subject, "Unhandled DAG event subject — acking to discard");
+    let _ = js_msg.ack().await;
 }
 
 // ── Global DAG Scheduler Singleton ──

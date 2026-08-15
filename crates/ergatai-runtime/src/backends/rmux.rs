@@ -1,0 +1,945 @@
+//! RmuxBackend — rmux SDK-based agent execution environment.
+//!
+//! Uses the rmux daemon (a Rust terminal multiplexer) via its typed async SDK
+//! (`rmux-sdk`). Each workspace maps to an rmux session; each agent maps to a
+//! pane within that session. Messages are injected via `Pane::send_text()`,
+//! output is captured via `Pane::screenshot()`, and lifecycle is managed via
+//! `Pane::close()` / `Pane::shell()`.
+//!
+//! # Advantages over LocalPtyBackend
+//!
+//! - **Native Rust SDK** — no shelling out to `tmux` CLI commands
+//! - **Structured API** — typed handles, builders, and results
+//! - **Daemon-based** — persistent rmux daemon manages sessions, survive Ergatai restarts
+//! - **Rich features** — snapshots, foreground state, pane event streams, layouts
+//!
+//! # Design
+//!
+//! - **Workspace = Session**: Each workspace creates an rmux session named `{prefix}-{workspace_id}`.
+//! - **Agent = Pane**: Each agent gets a pane within the session. The first agent reuses
+//!   pane(0,0); subsequent agents split from the previous agent's pane.
+//! - **Lazy daemon connection**: The rmux daemon is connected on first use via
+//!   `Rmux::builder().connect_or_start()`.
+//! - **Pane handles stored locally**: `Pane` is `Clone + Send + Sync`, so we store
+//!   handles in a `HashMap<String, Pane>` keyed by agent_id.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
+
+use async_trait::async_trait;
+use tokio::sync::{Mutex, RwLock};
+use tracing::{debug, info, warn};
+
+use ergatai_error::{ErgataiError, ErgataiResult};
+
+use rmux_sdk::{
+    EnsureSession, EnsureSessionPolicy, Pane, PaneExitState, PaneStateClosedReason,
+    PaneStateEvent, PaneStateEventStream, PaneStateEventsOptions, Rmux, Session, SessionName,
+    SplitDirection, TerminalSizeSpec,
+};
+
+use crate::backend::AgentRuntimeBackend;
+use crate::types::{
+    AgentHandle, BackendCapabilities, WaitResult, WorkspaceHandle, WorkspaceSpec,
+};
+
+// ── Configuration constants ──
+
+/// Maximum message size for injection (64 KiB).
+const MAX_MESSAGE_SIZE: usize = 64 * 1024;
+
+/// Default timeout for rmux SDK operations.
+const RMUX_DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Default terminal dimensions.
+const DEFAULT_WIDTH: u16 = 200;
+const DEFAULT_HEIGHT: u16 = 50;
+
+/// Delay before injecting instructions after agent start.
+const INSTRUCTION_DELAY: Duration = Duration::from_secs(2);
+
+/// Default timeout for text waiting operations.
+const TEXT_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Common task completion markers (agent-specific prompts that indicate readiness).
+const DEFAULT_COMPLETION_MARKERS: &[&str] = &[
+    "How can I help you",
+    "What would you like",
+    "Ready",
+    "$",
+    ">",
+];
+
+// ── RmuxBackend ──
+
+/// rmux SDK-based agent execution backend.
+///
+/// Each workspace is an rmux session. Each agent is a pane within that session.
+/// Session names follow the pattern `{prefix}-{workspace_id}`.
+pub struct RmuxBackend {
+    /// Session name prefix (e.g., "ergatai")
+    session_prefix: String,
+    /// Default terminal dimensions
+    width: u16,
+    height: u16,
+    /// rmux daemon connection (lazy init, wrapped in Arc for shared access)
+    rmux: Arc<Mutex<Option<Arc<Rmux>>>>,
+    /// Active panes keyed by agent_id
+    panes: Arc<RwLock<HashMap<String, Pane>>>,
+    /// Per-workspace "anchor pane" — the pane we split from for the next agent.
+    /// This creates a linear layout: [agent1][agent2][agent3]...
+    anchor_panes: Arc<RwLock<HashMap<String, Pane>>>,
+}
+
+impl RmuxBackend {
+    /// Create a new backend with the given session prefix.
+    pub fn new(session_prefix: &str) -> Self {
+        Self {
+            session_prefix: session_prefix.to_string(),
+            width: DEFAULT_WIDTH,
+            height: DEFAULT_HEIGHT,
+            rmux: Arc::new(Mutex::new(None)),
+            panes: Arc::new(RwLock::new(HashMap::new())),
+            anchor_panes: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// Create with custom terminal dimensions.
+    pub fn with_dimensions(mut self, width: u16, height: u16) -> Self {
+        self.width = width;
+        self.height = height;
+        self
+    }
+
+    /// Build the full session name from prefix + workspace ID.
+    fn session_name(&self, workspace_id: &str) -> String {
+        let safe_id = workspace_id.replace(['|', ':', '.'], "-");
+        format!("{}-{}", self.session_prefix, safe_id)
+    }
+
+    /// Get or lazily initialize the rmux daemon connection.
+    ///
+    /// Returns an `Arc<Rmux>` — cheap to clone, shares the daemon connection.
+    async fn get_rmux(&self) -> ErgataiResult<Arc<Rmux>> {
+        let mut guard = self.rmux.lock().await;
+        if let Some(rmux) = guard.as_ref() {
+            return Ok(rmux.clone());
+        }
+
+        info!("Connecting to rmux daemon (or starting one)");
+        let rmux = Rmux::builder()
+            .default_timeout(RMUX_DEFAULT_TIMEOUT)
+            .connect_or_start()
+            .await
+            .map_err(|e| ErgataiError::internal(format!("rmux daemon connect failed: {}", e)))?;
+
+        info!("rmux daemon connected");
+        let arc = Arc::new(rmux);
+        *guard = Some(arc.clone());
+        Ok(arc)
+    }
+
+    /// Ensure a session exists for the given workspace, returning a Session handle.
+    async fn ensure_session_handle(
+        &self,
+        rmux: &Rmux,
+        workspace_id: &str,
+    ) -> ErgataiResult<Session> {
+        let name_str = self.session_name(workspace_id);
+        let name = SessionName::new(&name_str).map_err(|e| {
+            ErgataiError::internal(format!("Invalid session name '{}': {}", name_str, e))
+        })?;
+
+        let session = rmux
+            .ensure_session(
+                EnsureSession::named(name)
+                    .policy(EnsureSessionPolicy::CreateOrReuse)
+                    .detached(true)
+                    .size(TerminalSizeSpec::new(self.width, self.height)),
+            )
+            .await
+            .map_err(|e| ErgataiError::internal(format!("rmux ensure_session failed: {}", e)))?;
+
+        Ok(session)
+    }
+
+    /// Sanitize a message for safe terminal injection.
+    fn sanitize_message(message: &str) -> String {
+        let single_line: String = message
+            .chars()
+            .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+            .collect();
+
+        if single_line.len() > MAX_MESSAGE_SIZE {
+            let mut end = MAX_MESSAGE_SIZE;
+            while end > 0 && !single_line.is_char_boundary(end) {
+                end -= 1;
+            }
+            format!("{}... [truncated]", &single_line[..end])
+        } else {
+            single_line
+        }
+    }
+
+    // ── Advanced rmux-specific capabilities (not on trait) ──
+
+    /// Wait until specific text appears in the agent's visible terminal output.
+    ///
+    /// Uses rmux's daemon-side snapshot polling — much more efficient than
+    /// screenshot + grep loops. Useful for detecting:
+    /// - Shell prompts ("$ ", "> ")
+    /// - Agent readiness markers ("Ready", "How can I help")
+    /// - Error patterns ("Error:", "FATAL", "panic")
+    ///
+    /// Returns `Ok(true)` if text was found, `Ok(false)` on timeout.
+    pub async fn wait_for_text(
+        &self,
+        agent_id: &str,
+        text: &str,
+        timeout: Option<Duration>,
+    ) -> ErgataiResult<bool> {
+        let pane = {
+            let panes = self.panes.read().await;
+            panes.get(agent_id).cloned().ok_or_else(|| {
+                ErgataiError::internal(format!("Pane not found for agent {}", agent_id))
+            })?
+        };
+
+        let effective_timeout = timeout.unwrap_or(TEXT_WAIT_TIMEOUT);
+
+        match tokio::time::timeout(effective_timeout, pane.wait_for_text(text)).await {
+            Ok(Ok(())) => {
+                debug!(agent_id, text, "Text appeared in terminal");
+                Ok(true)
+            }
+            Ok(Err(e)) => {
+                warn!(agent_id, text, error = %e, "wait_for_text error");
+                Err(ErgataiError::internal(format!(
+                    "rmux wait_for_text failed: {}",
+                    e
+                )))
+            }
+            Err(_) => {
+                debug!(
+                    agent_id,
+                    text,
+                    timeout_secs = effective_timeout.as_secs(),
+                    "Text wait timed out"
+                );
+                Ok(false)
+            }
+        }
+    }
+
+    /// Smart task completion detection: waits until one of the given patterns
+    /// appears in the visible terminal, indicating the agent has finished its
+    /// task and is idle / ready for new input.
+    ///
+    /// If `patterns` is empty, uses `DEFAULT_COMPLETION_MARKERS` (common shell
+    /// prompts and agent readiness phrases).
+    ///
+    /// Returns `Ok(Some(marker))` with the first matched pattern, or
+    /// `Ok(None)` on timeout.
+    pub async fn expect_completion(
+        &self,
+        agent_id: &str,
+        patterns: &[&str],
+        timeout: Option<Duration>,
+    ) -> ErgataiResult<Option<String>> {
+        let markers: Vec<&str> = if patterns.is_empty() {
+            DEFAULT_COMPLETION_MARKERS.to_vec()
+        } else {
+            patterns.to_vec()
+        };
+
+        let effective_timeout = timeout.unwrap_or(TEXT_WAIT_TIMEOUT);
+        let per_marker_timeout = effective_timeout / markers.len().max(1) as u32;
+
+        // Try each marker concurrently via tokio::select!-like loop.
+        // We race them: first one to appear wins.
+        let pane = {
+            let panes = self.panes.read().await;
+            panes.get(agent_id).cloned().ok_or_else(|| {
+                ErgataiError::internal(format!("Pane not found for agent {}", agent_id))
+            })?
+        };
+
+        // First check existing visible text (fast path via expect_visible_text).
+        for &marker in &markers {
+            match pane
+                .expect_visible_text()
+                .to_contain(marker)
+                .timeout(per_marker_timeout)
+                .await
+            {
+                Ok(_snapshot) => {
+                    debug!(agent_id, marker, "Completion marker found in visible text");
+                    return Ok(Some(marker.to_string()));
+                }
+                Err(_) => {
+                    // Not visible yet, continue to next marker
+                }
+            }
+        }
+
+        // None matched immediately — wait for any to appear using wait_for_text
+        // (daemon-side polling, efficient).
+        let overall_deadline = tokio::time::Instant::now() + effective_timeout;
+        loop {
+            let remaining = overall_deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                debug!(agent_id, "Completion detection timed out");
+                return Ok(None);
+            }
+
+            for &marker in &markers {
+                let per_check = remaining / markers.len().max(1) as u32;
+                match tokio::time::timeout(
+                    per_check.max(Duration::from_millis(500)),
+                    pane.wait_for_text(marker),
+                )
+                .await
+                {
+                    Ok(Ok(())) => {
+                        debug!(agent_id, marker, "Completion marker appeared");
+                        return Ok(Some(marker.to_string()));
+                    }
+                    _ => continue,
+                }
+            }
+        }
+    }
+
+    /// Open an event-driven state stream for the agent's pane.
+    ///
+    /// Returns a `PaneStateEventStream` that emits:
+    /// - `Snapshot` — initial state on open
+    /// - `TitleChanged` — pane title changed (often indicates task phase changes)
+    /// - `ForegroundChanged` — foreground process changed (e.g., agent spawns sub-process)
+    /// - `Closed` — pane reached terminal state (Exited / DiedKept / Killed)
+    ///
+    /// This is the event-driven alternative to polling `is_alive()`. Use it
+    /// when you need reactive monitoring of agent state.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut stream = backend.watch_state("agent-123", true).await?;
+    /// while let Some(event) = stream.next().await? {
+    ///     match event {
+    ///         PaneStateEvent::Closed { reason, .. } => {
+    ///             println!("Agent exited: {:?}", reason);
+    ///             break;
+    ///         }
+    ///         PaneStateEvent::TitleChanged { new_title, .. } => {
+    ///             println!("Agent title changed: {}", new_title);
+    ///         }
+    ///         _ => {}
+    ///     }
+    /// }
+    /// ```
+    pub async fn watch_state(
+        &self,
+        agent_id: &str,
+        include_foreground: bool,
+    ) -> ErgataiResult<PaneStateEventStream> {
+        let pane = {
+            let panes = self.panes.read().await;
+            panes.get(agent_id).cloned().ok_or_else(|| {
+                ErgataiError::internal(format!("Pane not found for agent {}", agent_id))
+            })?
+        };
+
+        let options = PaneStateEventsOptions {
+            include_title: true,
+            include_options: false,
+            include_foreground,
+        };
+
+        pane.state_events(options)
+            .await
+            .map_err(|e| ErgataiError::internal(format!("rmux state_events failed: {}", e)))
+    }
+
+    /// Watch the agent's pane state and return the exit reason when it closes.
+    ///
+    /// Convenience method that combines `watch_state` with a loop that
+    /// filters for `Closed` events. Uses the event-driven stream (no polling).
+    ///
+    /// Returns `None` if the stream ended without a `Closed` event.
+    pub async fn watch_until_exit(
+        &self,
+        agent_id: &str,
+        timeout: Option<Duration>,
+    ) -> ErgataiResult<Option<PaneStateClosedReason>> {
+        let mut stream = self.watch_state(agent_id, false).await?;
+
+        let watch_future = async {
+            loop {
+                match stream.next().await {
+                    Ok(Some(PaneStateEvent::Closed { reason, .. })) => {
+                        return Ok(Some(reason));
+                    }
+                    Ok(Some(_)) => continue,
+                    Ok(None) => return Ok(None),
+                    Err(e) => {
+                        return Err(ErgataiError::internal(format!(
+                            "state stream error: {}",
+                            e
+                        )));
+                    }
+                }
+            }
+        };
+
+        if let Some(dur) = timeout {
+            match tokio::time::timeout(dur, watch_future).await {
+                Ok(result) => result,
+                Err(_) => Ok(None),
+            }
+        } else {
+            watch_future.await
+        }
+    }
+
+    /// Get the exit state of an agent that has already exited.
+    ///
+    /// Unlike `wait_for_exit()` (which blocks until exit), this queries the
+    /// daemon for retained exit information via `Pane::info()`. Returns
+    /// `None` if the agent hasn't exited yet or the pane is gone.
+    pub async fn get_exit_state(&self, agent_id: &str) -> ErgataiResult<Option<PaneExitState>> {
+        let pane = {
+            let panes = self.panes.read().await;
+            panes.get(agent_id).cloned().ok_or_else(|| {
+                ErgataiError::internal(format!("Pane not found for agent {}", agent_id))
+            })?
+        };
+
+        // pane.info() returns InfoSnapshot { sessions, windows, panes: Vec<PaneInfo> }.
+        // Each PaneInfo carries exit_state. We must match by pane identity
+        // (pane_index within window) to avoid returning another pane's exit state.
+        let our_pane_index = pane.target().pane_index;
+
+        match pane.info().await {
+            Ok(snapshot) => {
+                for pane_info in &snapshot.panes {
+                    if pane_info.index == our_pane_index {
+                        if let Some(exit) = &pane_info.exit_state {
+                            return Ok(Some(exit.clone()));
+                        }
+                        // Found our pane but no exit_state yet
+                        return Ok(None);
+                    }
+                }
+                // Our pane not found in snapshot — it may have been purged
+                Ok(None)
+            }
+            Err(_) => Ok(None),
+        }
+    }
+}
+
+#[async_trait]
+impl AgentRuntimeBackend for RmuxBackend {
+    fn name(&self) -> &'static str {
+        "rmux"
+    }
+
+    fn capabilities(&self) -> BackendCapabilities {
+        BackendCapabilities {
+            supports_message_injection: true,
+            supports_output_capture: true,
+            supports_resource_limits: false,
+            supports_workspace_reuse: true,
+            supports_network_isolation: false,
+            max_concurrent_agents: None,
+        }
+    }
+
+    async fn initialize(&self) -> ErgataiResult<()> {
+        let rmux = self.get_rmux().await?;
+        // Verify daemon is responsive by creating and destroying a probe session
+        let probe_name =
+            SessionName::new("__ergatai_probe__").map_err(|e| {
+                ErgataiError::internal(format!("Invalid probe name: {}", e))
+            })?;
+        let session = rmux
+            .ensure_session(
+                EnsureSession::named(probe_name)
+                    .policy(EnsureSessionPolicy::CreateOrReuse)
+                    .detached(true)
+                    .size(TerminalSizeSpec::new(80, 24)),
+            )
+            .await
+            .map_err(|e| ErgataiError::internal(format!("rmux probe failed: {}", e)))?;
+
+        // Clean up the probe session immediately
+        let _ = session.kill().await;
+        info!("rmux backend initialized (daemon connected)");
+        Ok(())
+    }
+
+    async fn create_workspace(&self, spec: WorkspaceSpec) -> ErgataiResult<WorkspaceHandle> {
+        let rmux = self.get_rmux().await?;
+        let session_name = self.session_name(&spec.id);
+
+        info!(
+            session = session_name,
+            width = self.width,
+            height = self.height,
+            "Creating rmux session workspace"
+        );
+
+        let session = self.ensure_session_handle(&rmux, &spec.id).await?;
+
+        let created = session.was_created();
+        debug!(session = session_name, created = created, "rmux session ensured");
+
+        let mut metadata = HashMap::new();
+        metadata.insert("session".to_string(), session_name.clone());
+
+        Ok(WorkspaceHandle {
+            id: spec.id,
+            backend: "rmux".to_string(),
+            metadata,
+        })
+    }
+
+    async fn start_agent(
+        &self,
+        handle: &WorkspaceHandle,
+        command: &str,
+        instruction: Option<&str>,
+    ) -> ErgataiResult<AgentHandle> {
+        if command.is_empty() {
+            return Err(ErgataiError::internal(
+                "Agent command must not be empty".to_string(),
+            ));
+        }
+        if command.contains('\n') || command.contains('\r') {
+            return Err(ErgataiError::internal(
+                "Agent command must not contain newlines".to_string(),
+            ));
+        }
+
+        let rmux = self.get_rmux().await?;
+        let session = self.ensure_session_handle(&rmux, &handle.id).await?;
+        let session_name = self.session_name(&handle.id);
+
+        // Determine whether this is the first agent in this workspace
+        let mut anchors = self.anchor_panes.write().await;
+        let is_first = !anchors.contains_key(&handle.id);
+
+        let agent_pane = if is_first {
+            // First agent: reuse pane(0, 0) and respawn with the agent command
+            let pane = session.pane(0, 0);
+            pane.shell(command)
+                .kill_existing(true)
+                .title(format!("agent-{}", handle.id))
+                .await
+                .map_err(|e| {
+                    ErgataiError::internal(format!("rmux shell respawn failed: {}", e))
+                })?;
+            pane
+        } else {
+            // Subsequent agents: split from the anchor pane to create a new one
+            let anchor = anchors.get(&handle.id).ok_or_else(|| {
+                ErgataiError::internal("Anchor pane missing for non-first agent".to_string())
+            })?;
+            let new_pane = anchor.split(SplitDirection::Right).await.map_err(|e| {
+                ErgataiError::internal(format!("rmux split failed: {}", e))
+            })?;
+            new_pane
+                .shell(command)
+                .kill_existing(true)
+                .title(format!("agent-{}", handle.id))
+                .await
+                .map_err(|e| {
+                    ErgataiError::internal(format!("rmux shell spawn failed: {}", e))
+                })?;
+            new_pane
+        };
+
+        // Update the anchor to the new pane (linear layout)
+        anchors.insert(handle.id.clone(), agent_pane.clone());
+        drop(anchors);
+
+        info!(
+            session = session_name,
+            workspace = handle.id,
+            is_first = is_first,
+            "Agent started in rmux pane"
+        );
+
+        // Inject instruction if provided
+        if let Some(instr) = instruction {
+            tokio::time::sleep(INSTRUCTION_DELAY).await;
+            let sanitized = Self::sanitize_message(instr);
+            agent_pane
+                .send_text(format!("{}\n", sanitized))
+                .await
+                .map_err(|e| {
+                    ErgataiError::internal(format!("rmux instruction injection failed: {}", e))
+                })?;
+            info!(
+                workspace = handle.id,
+                bytes = instr.len(),
+                "Instruction injected"
+            );
+        }
+
+        let agent_id = format!("agent-{}", uuid::Uuid::new_v4());
+
+        // Store the pane handle
+        self.panes
+            .write()
+            .await
+            .insert(agent_id.clone(), agent_pane);
+
+        Ok(AgentHandle {
+            workspace: handle.clone(),
+            agent_id,
+            process_id: None,
+            metadata: HashMap::new(),
+        })
+    }
+
+    async fn inject_message(&self, handle: &AgentHandle, message: &str) -> ErgataiResult<()> {
+        let key = handle.agent_id.clone();
+        let panes = self.panes.read().await;
+        let pane = panes.get(&key).ok_or_else(|| {
+            ErgataiError::internal(format!("Pane not found for agent {}", key))
+        })?;
+
+        let sanitized = Self::sanitize_message(message);
+        pane.send_text(format!("{}\n", sanitized))
+            .await
+            .map_err(|e| ErgataiError::internal(format!("rmux send_text failed: {}", e)))?;
+
+        debug!(agent_id = key, bytes = message.len(), "Message injected via rmux");
+        Ok(())
+    }
+
+    async fn capture_output(&self, handle: &AgentHandle) -> ErgataiResult<Option<String>> {
+        let key = handle.agent_id.clone();
+        let panes = self.panes.read().await;
+        let pane = panes.get(&key).ok_or_else(|| {
+            ErgataiError::internal(format!("Pane not found for agent {}", key))
+        })?;
+
+        let captured = pane.screenshot().await.map_err(|e| {
+            ErgataiError::internal(format!("rmux screenshot failed: {}", e))
+        })?;
+
+        Ok(Some(captured.text))
+    }
+
+    async fn is_alive(&self, handle: &AgentHandle) -> ErgataiResult<bool> {
+        let key = handle.agent_id.clone();
+        let panes = self.panes.read().await;
+        let Some(pane) = panes.get(&key) else {
+            return Ok(false);
+        };
+
+        // Check if the pane's foreground process is still running.
+        // `foreground_state()` returns:
+        //   Ok(Some(_)) — a process is in the foreground → alive
+        //   Ok(None)   — pane exists but no foreground process (e.g., at shell prompt)
+        //   Err(_)     — pane has been closed → not alive
+        match pane.foreground_state().await {
+            Ok(Some(_)) => Ok(true),
+            Ok(None) => {
+                // Pane exists but no foreground — check pane slot liveness via title
+                match pane.title().await {
+                    Ok(_) => Ok(true),
+                    Err(_) => Ok(false),
+                }
+            }
+            Err(_) => Ok(false),
+        }
+    }
+
+    async fn stop_agent(&self, handle: &AgentHandle) -> ErgataiResult<()> {
+        let key = handle.agent_id.clone();
+        info!(agent_id = key, "Stopping agent (closing rmux pane)");
+
+        // Remove pane from registry
+        let pane = self.panes.write().await.remove(&key);
+
+        if let Some(pane) = pane {
+            match pane.close().await {
+                Ok(outcome) => {
+                    debug!(agent_id = key, ?outcome, "Pane closed");
+                }
+                Err(e) => {
+                    warn!(
+                        agent_id = key,
+                        error = %e,
+                        "Failed to close pane (may already be closed)"
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn kill_agent(&self, handle: &AgentHandle) -> ErgataiResult<()> {
+        // For rmux, stop and kill are the same — close the pane (daemon sends SIGKILL)
+        self.stop_agent(handle).await
+    }
+
+    async fn wait_for_exit(
+        &self,
+        handle: &AgentHandle,
+        timeout: Option<Duration>,
+    ) -> ErgataiResult<WaitResult> {
+        let key = handle.agent_id.clone();
+        let pane = {
+            let panes = self.panes.read().await;
+            panes
+                .get(&key)
+                .cloned()
+                .ok_or_else(|| ErgataiError::internal(format!("Pane not found for agent {}", key)))?
+        };
+
+        // Use daemon-level wait_for_exit (much better than polling):
+        // The rmux daemon tracks pane process state and notifies us immediately
+        // when the process exits, with actual exit code / signal.
+        let wait_future = pane.wait_for_exit();
+
+        let exit_state = if let Some(dur) = timeout {
+            match tokio::time::timeout(dur, wait_future).await {
+                Ok(Ok(state)) => state,
+                Ok(Err(e)) => return Ok(WaitResult::Error(e.to_string())),
+                Err(_) => return Ok(WaitResult::Timeout),
+            }
+        } else {
+            match wait_future.await {
+                Ok(state) => state,
+                Err(e) => return Ok(WaitResult::Error(e.to_string())),
+            }
+        };
+
+        // PaneExitState: { code: Option<i32>, signal: Option<i32>, message: Option<String> }
+        // None means the pane was already stale or vanished before exit details were retained.
+        match exit_state {
+            Some(state) => {
+                if let Some(signal) = state.signal {
+                    debug!(agent_id = key, signal, "Agent exited via signal");
+                    Ok(WaitResult::Signaled { signal })
+                } else {
+                    let code = state.code.unwrap_or(0);
+                    debug!(agent_id = key, code, "Agent exited normally");
+                    Ok(WaitResult::Exited { code })
+                }
+            }
+            None => {
+                debug!(agent_id = key, "Pane vanished (no exit state retained)");
+                Ok(WaitResult::Exited { code: 0 })
+            }
+        }
+    }
+
+    async fn list_workspaces(&self) -> ErgataiResult<Vec<WorkspaceHandle>> {
+        let rmux = match self.get_rmux().await {
+            Ok(r) => r,
+            Err(_) => return Ok(Vec::new()),
+        };
+
+        // Create a temporary session handle to list all sessions
+        let probe_name =
+            SessionName::new("__ergatai_list__").map_err(|e| {
+                ErgataiError::internal(format!("Invalid probe name: {}", e))
+            })?;
+        let probe_session = match rmux
+            .ensure_session(
+                EnsureSession::named(probe_name)
+                    .policy(EnsureSessionPolicy::CreateOrReuse)
+                    .detached(true)
+                    .size(TerminalSizeSpec::new(80, 24)),
+            )
+            .await
+        {
+            Ok(s) => s,
+            Err(_) => return Ok(Vec::new()),
+        };
+
+        let session_names = match probe_session.list_session_names().await {
+            Ok(names) => names,
+            Err(_) => {
+                let _ = probe_session.kill().await;
+                return Ok(Vec::new());
+            }
+        };
+
+        // Clean up probe session
+        let _ = probe_session.kill().await;
+
+        let prefix = format!("{}-", self.session_prefix);
+        let workspaces = session_names
+            .into_iter()
+            .filter(|name| name.as_str().starts_with(&prefix))
+            .map(|name| {
+                let name_str = name.as_str().to_string();
+                let id = name_str
+                    .strip_prefix(&prefix)
+                    .unwrap_or(&name_str)
+                    .to_string();
+                let mut metadata = HashMap::new();
+                metadata.insert("session".to_string(), name_str);
+                WorkspaceHandle {
+                    id,
+                    backend: "rmux".to_string(),
+                    metadata,
+                }
+            })
+            .collect();
+
+        Ok(workspaces)
+    }
+
+    async fn cleanup_workspace(&self, handle: &WorkspaceHandle) -> ErgataiResult<()> {
+        let rmux = self.get_rmux().await?;
+        let session_name_str = handle
+            .metadata
+            .get("session")
+            .cloned()
+            .unwrap_or_else(|| self.session_name(&handle.id));
+
+        info!(session = session_name_str, "Cleaning up rmux session");
+
+        let session_name = SessionName::new(&session_name_str).map_err(|e| {
+            ErgataiError::internal(format!("Invalid session name: {}", e))
+        })?;
+
+        let session = match rmux
+            .ensure_session(
+                EnsureSession::named(session_name)
+                    .policy(EnsureSessionPolicy::CreateOrReuse)
+                    .detached(true)
+                    .size(TerminalSizeSpec::new(80, 24)),
+            )
+            .await
+        {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(
+                    session = session_name_str,
+                    error = %e,
+                    "Failed to get session handle for cleanup"
+                );
+                return Ok(());
+            }
+        };
+
+        match session.kill().await {
+            Ok(existed) => {
+                debug!(session = session_name_str, existed = existed, "Session killed");
+            }
+            Err(e) => {
+                warn!(
+                    session = session_name_str,
+                    error = %e,
+                    "kill-session failed (may already be gone)"
+                );
+            }
+        }
+
+        // Clean up anchor pane reference
+        self.anchor_panes.write().await.remove(&handle.id);
+
+        Ok(())
+    }
+
+    async fn shutdown(&self) -> ErgataiResult<()> {
+        let workspaces = self.list_workspaces().await?;
+        info!(count = workspaces.len(), "Shutting down rmux backend");
+
+        for ws in &workspaces {
+            self.cleanup_workspace(ws).await?;
+        }
+
+        // Clear all pane references
+        self.panes.write().await.clear();
+        self.anchor_panes.write().await.clear();
+
+        info!("rmux backend shutdown complete");
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sanitize_simple() {
+        assert_eq!(RmuxBackend::sanitize_message("hello world"), "hello world");
+    }
+
+    #[test]
+    fn test_sanitize_strips_newlines() {
+        let result = RmuxBackend::sanitize_message("line1\nline2\rline3");
+        assert_eq!(result, "line1 line2 line3");
+    }
+
+    #[test]
+    fn test_sanitize_truncates() {
+        let big = "x".repeat(MAX_MESSAGE_SIZE + 100);
+        let result = RmuxBackend::sanitize_message(&big);
+        assert!(result.len() <= MAX_MESSAGE_SIZE + 20);
+        assert!(result.ends_with("[truncated]"));
+    }
+
+    #[test]
+    fn test_session_name() {
+        let backend = RmuxBackend::new("ergatai");
+        assert_eq!(backend.session_name("task-123"), "ergatai-task-123");
+    }
+
+    #[test]
+    fn test_session_name_sanitizes() {
+        let backend = RmuxBackend::new("ergatai");
+        assert_eq!(backend.session_name("a|b:c.d"), "ergatai-a-b-c-d");
+    }
+
+    #[test]
+    fn test_capabilities() {
+        let backend = RmuxBackend::new("test");
+        let caps = backend.capabilities();
+        assert!(caps.supports_message_injection);
+        assert!(caps.supports_output_capture);
+        assert!(!caps.supports_resource_limits);
+        assert!(caps.supports_workspace_reuse);
+    }
+
+    #[test]
+    fn test_backend_name() {
+        let backend = RmuxBackend::new("test");
+        assert_eq!(backend.name(), "rmux");
+    }
+
+    #[test]
+    fn test_with_dimensions() {
+        let backend = RmuxBackend::new("test").with_dimensions(120, 40);
+        assert_eq!(backend.width, 120);
+        assert_eq!(backend.height, 40);
+    }
+
+    #[test]
+    fn test_default_completion_markers_non_empty() {
+        assert!(!DEFAULT_COMPLETION_MARKERS.is_empty());
+        // All markers should be short, common strings
+        for &marker in DEFAULT_COMPLETION_MARKERS {
+            assert!(!marker.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_text_wait_timeout_is_reasonable() {
+        // 60s default — long enough for slow agents, short enough to fail fast
+        assert_eq!(TEXT_WAIT_TIMEOUT, Duration::from_secs(60));
+    }
+}

@@ -1,0 +1,22 @@
+[package]
+name = "ergatai-runtime"
+version = "0.1.0"
+edition = "2021"
+authors = ["Ergatai Team"]
+license = "Apache-2.0"
+repository = "https://github.com/ergatai/ergatai"
+description = "Pluggable agent runtime backends for Ergatai"
+
+[dependencies]
+ergatai-error = { path = "../ergatai-error" }
+tokio.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+rmux-sdk = { version = "0.10.0", default-features = false }
+
+[dev-dependencies]
+tempfile = "3.10"

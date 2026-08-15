@@ -61,7 +61,10 @@ impl NatsConnection {
         &self.jetstream
     }
 
-    /// Publish a message to a subject
+    /// Publish a message to a subject (core NATS — no persistence, no ack)
+    ///
+    /// Fire-and-forget semantics. For reliable delivery with persistence and
+    /// delivery confirmation, use [`publish_jetstream`](Self::publish_jetstream) instead.
     pub async fn publish(&self, subject: &str, payload: Vec<u8>) -> ErgataiResult<()> {
         self.client
             .publish(subject.to_string(), payload.into())
@@ -72,6 +75,61 @@ impl NatsConnection {
 
         debug!(subject = subject, "Published message");
         Ok(())
+    }
+
+    /// Publish a message to a JetStream-backed subject (persisted, ack-backed)
+    ///
+    /// The message is only considered "sent" when the JetStream stream has
+    /// durably stored it and returned a `PublishAck`. If the target stream is
+    /// unavailable, this returns an error — callers can then fall back to core
+    /// NATS publish or surface the error to the user.
+    ///
+    /// # Reliability semantics
+    ///
+    /// - Returns `Ok(PublishAck)` once the stream has persisted the message
+    /// - The ack contains `stream`, `sequence`, and `domain` for traceability
+    /// - On stream unavailability, returns `Err` (caller decides fallback)
+    pub async fn publish_jetstream(
+        &self,
+        subject: &str,
+        payload: Vec<u8>,
+    ) -> ErgataiResult<async_nats::jetstream::publish::PublishAck> {
+        // Two-step await: jetstream.publish() returns a PublishAckFuture,
+        // which must be awaited again to get the actual PublishAck from the stream.
+        let ack_future = self
+            .jetstream
+            .publish(subject.to_string(), payload.into())
+            .await
+            .map_err(|e| {
+                ErgataiError::NatsError(format!(
+                    "JetStream publish to {} failed: {}",
+                    subject, e
+                ))
+            })?;
+        // Timeout the ack await — a stalled NATS server (network partition, slow disk,
+        // leader election) should not block the caller indefinitely.
+        let ack = tokio::time::timeout(Duration::from_secs(10), ack_future)
+            .await
+            .map_err(|_| {
+                ErgataiError::NatsError(format!(
+                    "JetStream ack for {} timed out after 10s",
+                    subject
+                ))
+            })?
+            .map_err(|e| {
+                ErgataiError::NatsError(format!(
+                    "JetStream ack for {} failed: {}",
+                    subject, e
+                ))
+            })?;
+
+        debug!(
+            subject = subject,
+            stream = ack.stream.as_str(),
+            sequence = ack.sequence,
+            "JetStream message persisted"
+        );
+        Ok(ack)
     }
 
     /// Subscribe to a subject
@@ -203,7 +261,7 @@ pub mod subjects {
 
     /// Wildcard subject for all DAG events
     pub fn all_dag_events() -> &'static str {
-        "ergatai.dag.*"
+        "ergatai.dag.>"
     }
 }
 
@@ -244,7 +302,7 @@ mod tests {
 
         // Wildcards
         assert_eq!(subjects::all_tasks(), "ergatai.task.*");
-        assert_eq!(subjects::all_dag_events(), "ergatai.dag.*");
+        assert_eq!(subjects::all_dag_events(), "ergatai.dag.>");
     }
 
     /// Test connection establishment and pub/sub

@@ -1,44 +1,46 @@
-//! 扫描 tmux 并注册 agent
+//! Scan tmux session for running panes and register them as agents.
 //!
-//! 运行: cargo run --bin scan-tmux-agents
+//! Usage: cargo run --bin scan-tmux-agents
+//! Session name: set via ERGATAI_TMUX_SESSION env var (default: "ergatai-opencode")
 
 use ergatai_core::tmux::TmuxManager;
 use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // 初始化日志
     tracing_subscriber::fmt()
         .with_env_filter("ergatai=info")
         .init();
 
-    println!("🔍 扫描 tmux session 中的 agent");
-    println!("================================\n");
+    println!("Scanning tmux session for agents");
+    println!("=================================\n");
 
-    // 创建 tmux manager
-    let manager = Arc::new(TmuxManager::new("ergatai"));
+    // Create tmux manager — session name from env or default
+    let session = std::env::var("ERGATAI_TMUX_SESSION")
+        .unwrap_or_else(|_| "ergatai-opencode".to_string());
+    let manager = Arc::new(TmuxManager::new(&session));
 
-    // 检查 tmux
-    println!("1. 检查 tmux...");
+    // Check tmux availability
+    println!("1. Checking tmux...");
     TmuxManager::check_tmux().await?;
-    println!("✅ tmux 可用\n");
+    println!("   tmux is available\n");
 
-    // 扫描 pane
-    println!("2. 扫描 tmux session 'ergatai'...");
+    // Scan panes
+    println!("2. Scanning tmux session '{}'...", session);
     let registered = manager.scan_and_register_panes().await?;
 
     if registered.is_empty() {
-        println!("⚠️  没有找到任何 pane");
-        println!("\n💡 提示：");
-        println!("   1. 确保 tmux session 'ergatai' 存在");
-        println!("   2. 或者先运行: ./test-opencode-collaboration.sh");
+        println!("   No panes found");
+        println!("\nHint:");
+        println!("   1. Ensure tmux session '{}' exists", session);
+        println!("   2. Or run: ./test-opencode-collaboration.sh");
         return Ok(());
     }
 
-    println!("✅ 发现并注册了 {} 个 agent\n", registered.len());
+    println!("   Found and registered {} agents\n", registered.len());
 
-    // 列出所有 agent
-    println!("3. 已注册的 agent:");
+    // List all agents
+    println!("3. Registered agents:");
     let agents = manager.list_agents().await;
     for agent in agents {
         println!("   - {} (pane: {}, command: {})",
@@ -46,10 +48,10 @@ async fn main() -> anyhow::Result<()> {
     }
     println!();
 
-    println!("🎉 扫描完成！");
-    println!("\n💡 现在这些 agent 可以通过 Ergatai 进行通信");
-    println!("   Agent 可以调用 MCP 工具 send_message 发送消息");
-    println!("   Ergatai 会通过 tmux 注入消息到目标 agent");
+    println!("Scan complete.");
+    println!("\nThese agents can now communicate via Ergatai:");
+    println!("   - Agents call MCP tool send_message to send messages");
+    println!("   - Ergatai injects messages into target agent's tmux pane");
 
     Ok(())
 }

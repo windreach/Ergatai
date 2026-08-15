@@ -391,10 +391,10 @@ impl TaskScheduler {
         });
     }
 
-    /// Start NATS consumer loop — receives task submissions via NATS events
+    /// Start NATS consumer loop — receives task submissions via JetStream pull consumer
     ///
-    /// When NATS is available, this replaces the 5-second polling loop.
-    /// Tasks arrive as `TaskSubmitPayload` messages with inline plan content.
+    /// Pulls messages from the `DAG_EVENTS` stream with filter `ergatai.task.submit.*`.
+    /// Tasks are durable: if this consumer crashes, JetStream redelivers after `ack_wait`.
     ///
     /// Returns a `JoinHandle` that can be aborted to stop consuming.
     /// If NATS is not initialized, the spawned task exits immediately.
@@ -410,40 +410,93 @@ impl TaskScheduler {
                 }
             };
 
-            let bus = ergatai_nats::EventBus::new(conn);
-
-            // Subscribe to ALL task submissions (across all agents)
-            let mut sub = match bus.subscribe_all_task_submits().await {
-                Ok(s) => s,
+            // Initialize JetStream pull consumer on the DAG_EVENTS stream,
+            // filtered to task submissions only.
+            let mut messages = match init_task_submission_consumer(&conn).await {
+                Ok(m) => m,
                 Err(e) => {
-                    tracing::error!(error = %e, "Failed to subscribe to task submissions");
+                    tracing::error!(error = %e, "Failed to initialize task submission consumer");
                     return;
                 }
             };
 
-            tracing::info!("NATS task consumer started");
+            tracing::info!(
+                "JetStream task consumer started (stream: {}, filter: ergatai.task.submit.*)",
+                ergatai_nats::DAG_EVENTS_STREAM
+            );
 
             use futures_util::StreamExt;
-            while let Some(nats_msg) = sub.next().await {
-                match serde_json::from_slice::<ergatai_nats::TaskSubmitPayload>(&nats_msg.payload) {
-                    Ok(payload) => {
-                        tracing::info!(
-                            task_id = %payload.task_id,
-                            agent = %payload.target_agent,
-                            "Received NATS task submission"
-                        );
+            loop {
+                // Use timeout so we periodically yield and can be aborted cleanly.
+                let next = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    messages.next(),
+                )
+                .await;
 
-                        if let Err(e) = scheduler.handle_nats_task(payload).await {
-                            tracing::error!(error = %e, "Failed to handle NATS task");
+                match next {
+                    // Timeout — no message within 5s, loop and check for abort
+                    Err(_) => continue,
+
+                    // Stream closed
+                    Ok(None) => {
+                        tracing::warn!("Task submission stream closed, consumer exiting");
+                        break;
+                    }
+
+                    // Message received
+                    Ok(Some(Ok(js_msg))) => {
+                        match serde_json::from_slice::<ergatai_nats::TaskSubmitPayload>(
+                            &js_msg.payload,
+                        ) {
+                            Ok(payload) => {
+                                let seq = js_msg.info().ok().map(|i| i.stream_sequence).unwrap_or(0);
+                                tracing::info!(
+                                    task_id = %payload.task_id,
+                                    agent = %payload.target_agent,
+                                    seq = seq,
+                                    "Received JetStream task submission"
+                                );
+
+                                match scheduler.handle_nats_task(payload).await {
+                                    Ok(()) => {
+                                        if let Err(e) = js_msg.ack().await {
+                                            tracing::warn!(error = %e, "Failed to ack task");
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::error!(error = %e, "Failed to handle task — naking for redelivery");
+                                        if let Err(nak_err) = js_msg
+                                            .ack_with(async_nats::jetstream::message::AckKind::Nak(None))
+                                            .await
+                                        {
+                                            tracing::warn!(error = %nak_err, "Failed to nak task");
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                // Malformed message — ack to discard (retry won't help)
+                                tracing::warn!(
+                                    error = %e,
+                                    subject = js_msg.subject.as_str(),
+                                    "Failed to deserialize task submission — acking to discard"
+                                );
+                                if let Err(ack_err) = js_msg.ack().await {
+                                    tracing::warn!(error = %ack_err, "Failed to ack malformed task");
+                                }
+                            }
                         }
                     }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "Failed to deserialize task submission");
+
+                    // Transport error
+                    Ok(Some(Err(e))) => {
+                        tracing::warn!(error = %e, "Error receiving task from stream");
                     }
                 }
             }
 
-            tracing::warn!("NATS task consumer subscription closed");
+            tracing::warn!("JetStream task consumer stopped");
         })
     }
 
@@ -563,6 +616,54 @@ impl TaskScheduler {
 
         Ok(())
     }
+}
+
+/// Initialize the JetStream pull consumer for task submissions on the DAG_EVENTS stream.
+///
+/// Returns a boxed stream of JetStream messages filtered to `ergatai.task.submit.*`.
+/// The consumer is durable (`task_submissions`) and resumes from the last ack on restart.
+async fn init_task_submission_consumer(
+    connection: &ergatai_nats::NatsConnection,
+) -> ErgataiResult<futures_util::stream::BoxStream<'static, Result<async_nats::jetstream::Message, Box<dyn std::error::Error + Send + Sync>>>> {
+    use async_nats::jetstream::consumer::{pull, AckPolicy, DeliverPolicy};
+    use futures_util::StreamExt;
+
+    let stream = connection
+        .jetstream()
+        .get_stream(ergatai_nats::DAG_EVENTS_STREAM)
+        .await
+        .map_err(|e| {
+            ErgataiError::NatsError(format!(
+                "Stream {} not found: {}",
+                ergatai_nats::DAG_EVENTS_STREAM,
+                e
+            ))
+        })?;
+
+    let consumer_config = pull::Config {
+        durable_name: Some(ergatai_nats::TASK_SUBMISSIONS_CONSUMER.to_string()),
+        filter_subject: "ergatai.task.submit.*".to_string(),
+        deliver_policy: DeliverPolicy::All,
+        ack_policy: AckPolicy::Explicit,
+        ack_wait: std::time::Duration::from_secs(60),
+        max_deliver: 5,
+        ..Default::default()
+    };
+
+    let consumer = stream
+        .get_or_create_consumer(ergatai_nats::TASK_SUBMISSIONS_CONSUMER, consumer_config)
+        .await
+        .map_err(|e| {
+            ErgataiError::NatsError(format!("Failed to create task submission consumer: {}", e))
+        })?;
+
+    let messages = consumer.messages().await.map_err(|e| {
+        ErgataiError::NatsError(format!("Failed to get message stream: {}", e))
+    })?;
+
+    Ok(Box::pin(messages.map(|r| {
+        r.map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+    })))
 }
 
 /// Global scheduler instance

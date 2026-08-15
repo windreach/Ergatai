@@ -209,6 +209,7 @@ impl AuditManager {
     }
 
     /// Internal stats computation (accepts Connection reference — no lock acquisition)
+    #[allow(clippy::type_complexity)]
     fn get_stats_inner(
         &self,
         conn: &Connection,

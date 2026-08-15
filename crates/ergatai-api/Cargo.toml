@@ -14,6 +14,10 @@ path = "src/main.rs"
 ergatai-core = { path = "../ergatai-core" }
 # NATS messaging
 ergatai-nats = { path = "../ergatai-nats" }
+# Error types
+ergatai-error = { path = "../ergatai-error" }
+# Agent runtime (pluggable backends)
+ergatai-runtime = { path = "../ergatai-runtime" }
 
 # NATS client (for message forwarding)
 async-nats.workspace = true

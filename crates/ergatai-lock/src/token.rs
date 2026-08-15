@@ -168,6 +168,7 @@ pub struct FileToken {
 
 impl FileToken {
     /// Create a new file token.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         agent_id: String,
         session_id: String,
@@ -194,6 +195,7 @@ impl FileToken {
     }
 
     /// Create a new file token with explicit priority.
+    #[allow(clippy::too_many_arguments)]
     pub fn with_priority(
         agent_id: String,
         session_id: String,

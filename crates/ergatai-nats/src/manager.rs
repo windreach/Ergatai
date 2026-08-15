@@ -7,6 +7,8 @@ use tokio::sync::RwLock;
 use tracing::info;
 
 use ergatai_error::ErgataiResult;
+use crate::agent_message_stream::all_agent_message_stream_configs;
+use crate::dag_event_stream::all_dag_event_stream_configs;
 use crate::file_access_streams::all_file_access_stream_configs;
 use crate::{NatsConnection, NatsServer};
 
@@ -98,7 +100,12 @@ async fn init_jetstream_streams(connection: &NatsConnection) -> ErgataiResult<()
 
     let jetstream = async_nats::jetstream::new(connection.client().clone());
 
-    let configs = all_file_access_stream_configs();
+    let configs = [
+        all_file_access_stream_configs(),
+        all_agent_message_stream_configs(),
+        all_dag_event_stream_configs(),
+    ]
+    .concat();
     info!("Creating {} JetStream streams", configs.len());
 
     for config in configs {

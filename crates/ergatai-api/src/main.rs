@@ -36,7 +36,7 @@ use ergatai_core::nats;
 
 // MCP module
 mod mcp;
-use mcp::{create_mcp_service, start_peer_reaper};
+use mcp::{create_mcp_service, start_message_delivery_consumer, start_peer_reaper};
 
 /// Shared application state available to all handlers.
 #[derive(Clone)]
@@ -135,6 +135,19 @@ struct Args {
     /// Can also be set via ERGATAI_SSE_KEEP_ALIVE environment variable.
     #[arg(long, env = "ERGATAI_SSE_KEEP_ALIVE", default_value = "15")]
     sse_keep_alive: u64,
+
+    /// Agent runtime backend. Controls how agent workspaces (sessions/panes) are created.
+    /// Valid values: `rmux` (rmux SDK, preferred) or `tmux` (tmux CLI, original).
+    /// Can also be set via ERGATAI_RUNTIME_BACKEND environment variable.
+    #[arg(long, env = "ERGATAI_RUNTIME_BACKEND", default_value = "rmux")]
+    runtime_backend: String,
+
+    /// Session name prefix for the agent runtime backend.
+    /// For rmux: rmux session names will be `{prefix}-{workspace_id}`.
+    /// For tmux: tmux session names will be `{prefix}-{workspace_id}`.
+    /// Can also be set via ERGATAI_TMUX_SESSION environment variable.
+    #[arg(long, env = "ERGATAI_TMUX_SESSION", default_value = "ergatai-opencode")]
+    session_prefix: String,
 }
 
 /// Parse arguments and set environment variables BEFORE the tokio runtime starts.
@@ -216,15 +229,55 @@ async fn async_main(args: Args) -> Result<()> {
     let mcp_registry = std::sync::Arc::new(mcp::AgentRegistry::new());
     let peer_registry = mcp::server::new_peer_registry();
 
-    // Initialize Tmux manager for agent message injection
-    let tmux_manager = std::sync::Arc::new(ergatai_core::tmux::TmuxManager::new("ergatai-opencode"));
-    tracing::info!("Tmux manager initialized (session: ergatai)");
+    // Initialize AgentRuntime with selected backend
+    // Backend choice: --runtime-backend rmux|tmux (default: rmux)
+    // Session prefix: --session-prefix or ERGATAI_TMUX_SESSION (default: ergatai-opencode)
+    let runtime_backend_name = args.runtime_backend.to_lowercase();
+    let runtime_backend: std::sync::Arc<dyn ergatai_runtime::AgentRuntimeBackend> =
+        match runtime_backend_name.as_str() {
+            "rmux" => {
+                tracing::info!("Using rmux backend (rmux SDK-based terminal multiplexer)");
+                std::sync::Arc::new(ergatai_runtime::RmuxBackend::new(&args.session_prefix))
+            }
+            "tmux" | "local-pty" => {
+                tracing::info!("Using tmux backend (tmux CLI-based terminal multiplexer)");
+                std::sync::Arc::new(ergatai_runtime::LocalPtyBackend::new(&args.session_prefix))
+            }
+            other => {
+                return Err(anyhow::anyhow!(
+                    "Unknown runtime backend '{}'. Valid options: rmux, tmux",
+                    other
+                ));
+            }
+        };
+
+    match ergatai_runtime::init_agent_runtime(runtime_backend) {
+        Ok(runtime) => {
+            // Initialize the backend (connect to daemon, check dependencies)
+            if let Err(e) = runtime.initialize().await {
+                tracing::warn!("AgentRuntime backend initialization warning: {}", e);
+                // For rmux, a warning here means the daemon isn't running yet.
+                // The daemon will be auto-started on first use by the SDK.
+                if runtime_backend_name == "rmux" {
+                    tracing::info!("rmux daemon will be auto-started on first workspace creation");
+                }
+            }
+            tracing::info!(
+                "AgentRuntime initialized (backend: {}, session prefix: {})",
+                runtime_backend_name,
+                args.session_prefix
+            );
+        }
+        Err(e) => {
+            tracing::error!("Failed to initialize AgentRuntime: {}", e);
+            return Err(anyhow::anyhow!("AgentRuntime initialization failed: {}", e));
+        }
+    }
 
     let mcp_cancellation_token = CancellationToken::new();
     let mcp_service = create_mcp_service(
         mcp_registry.clone(),
         peer_registry.clone(),
-        tmux_manager.clone(),
         mcp_cancellation_token.clone(),
         args.sse_keep_alive,
     );
@@ -232,7 +285,7 @@ async fn async_main(args: Args) -> Result<()> {
         "MCP server initialized (protocol 2025-06-18, Streamable HTTP, SSE keep-alive: {}s)",
         args.sse_keep_alive
     );
-    tracing::info!("Agent messaging: Tmux injection (preferred) + MCP notification (fallback)");
+    tracing::info!("Agent messaging: AgentRuntime injection (preferred) + MCP notification (fallback)");
 
     // Start background peer reaper — detects abrupt disconnects (kill, network drop)
     // and cleans up stale agent registrations within 10 seconds.
@@ -247,8 +300,41 @@ async fn async_main(args: Args) -> Result<()> {
     match nats::init_nats().await {
         Ok(conn) => {
             tracing::info!("✅ NATS initialized successfully");
-            // NATS connection is stored globally, can be retrieved via get_nats_connection()
-            let _ = conn;
+
+            // Start the message delivery consumer — pulls from AGENT_MESSAGES
+            // JetStream stream and delivers via AgentRuntime injection / MCP notification.
+            // This provides reliable, persisted delivery for agent-to-agent messages.
+            let delivery_handle = start_message_delivery_consumer(
+                conn,
+                peer_registry.clone(),
+                mcp_cancellation_token.clone(),
+            );
+            tracing::info!("Message delivery consumer started (AGENT_MESSAGES JetStream)");
+
+            // Monitor the consumer task — log if it exits unexpectedly before cancellation.
+            // The consumer is expected to run until the cancellation token fires; an early
+            // exit indicates a bug or NATS connectivity failure that should be visible.
+            let cancel_monitor = mcp_cancellation_token.clone();
+            tokio::spawn(async move {
+                match delivery_handle.await {
+                    Ok(()) => {
+                        if !cancel_monitor.is_cancelled() {
+                            tracing::error!(
+                                "Message delivery consumer exited unexpectedly \
+                                 (not due to shutdown) — agent message delivery is now broken. \
+                                 Restart ergatai-api to restore."
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            "Message delivery consumer panicked — agent message delivery is broken. \
+                             Restart ergatai-api to restore."
+                        );
+                    }
+                }
+            });
         }
         Err(e) => {
             tracing::error!("❌ Failed to initialize NATS: {}", e);
