@@ -6,7 +6,7 @@ Ergatai is a **multi-agent collaboration middleware** that lets AI agents commun
 
 Pure Rust. Local-first. No cloud dependencies.
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-2021-orange.svg)](https://www.rust-lang.org)
 [![Docs](https://img.shields.io/badge/docs-latest-blue.svg)](#architecture)
 [![Contributing](https://img.shields.io/badge/contributions-welcome-brightgreen.svg)](#contributing)
@@ -449,7 +449,7 @@ Contributions are welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) before
 
 ## License
 
-This project is licensed under the MIT License — see [LICENSE](LICENSE) for details.
+This project is licensed under the Apache License 2.0 — see [LICENSE](LICENSE) for details.
 
 ---
 

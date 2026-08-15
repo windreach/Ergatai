@@ -3,7 +3,7 @@ name = "ergatai-acp"
 version = "0.1.0"
 edition = "2021"
 authors = ["Ergatai Team"]
-license = "MIT"
+license = "Apache-2.0"
 repository = "https://github.com/ergatai/ergatai"
 description = "ACP (Agent Client Protocol) implementation for Ergatai"
 
