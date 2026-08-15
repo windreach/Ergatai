@@ -14,13 +14,15 @@ use std::sync::LazyLock;
 use tracing::{debug, info, warn};
 
 use ergatai_error::ErgataiResult;
-use ergatai_nats::{get_nats_connection, is_nats_initialized, AgentMessagePayload, EventBus};
+use ergatai_nats::{get_nats_connection, AgentMessagePayload, EventBus};
 
 // Compile regex once at startup.
-// Use look-behind to require @ appears at start of string or after whitespace,
-// preventing false positives on email addresses (user@example.com) and URLs.
+// Match @agent only at start of line or after whitespace.
+// This prevents false positives on email addresses (user@example.com).
+// Note: Rust's regex crate does not support look-behind, so we consume the
+// leading whitespace in the match. Capture group 1 still holds only the name.
 static MENTION_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?m)(?:^|(?<=\s))@([a-zA-Z0-9_-]+)").expect("valid regex"));
+    LazyLock::new(|| Regex::new(r"(?m)(?:^|\s)@([a-zA-Z0-9_-]+)").expect("valid regex"));
 
 /// Detect @agent mentions in text
 ///
@@ -184,7 +186,9 @@ mod tests {
     fn test_extract_mentions_adjacent() {
         let text = "@agent1@agent2";
         let mentions = extract_mentions(text);
-        // Should match both (regex finds @agent1, then @agent2)
-        assert_eq!(mentions.len(), 2);
+        // Only match the first one (the second @ is not preceded by whitespace or start-of-line)
+        // This is the correct behavior to avoid matching email addresses
+        assert_eq!(mentions.len(), 1);
+        assert_eq!(mentions[0], "agent1");
     }
 }

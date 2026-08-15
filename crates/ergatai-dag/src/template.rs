@@ -59,7 +59,8 @@ pub fn render_template(template: &str, context: &HashMap<String, String>) -> Str
 ///
 /// Returns a deduplicated Vec of variable names found in `{{...}}` blocks.
 pub fn extract_references(template: &str) -> Vec<String> {
-    let mut refs = Vec::new();
+    // Pre-allocate with a reasonable default
+    let mut refs = Vec::with_capacity(4);
     let mut seen = std::collections::HashSet::new();
     let mut remaining = template;
 

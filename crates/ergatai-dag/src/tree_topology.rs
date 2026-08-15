@@ -87,7 +87,8 @@ impl TaskTree {
     /// Find all nodes that are ready to execute
     /// (status=Pending and parent is Completed)
     pub fn ready_tasks(&self) -> Vec<&TaskNode> {
-        let mut ready = Vec::new();
+        // Pre-allocate with a reasonable default
+        let mut ready = Vec::with_capacity(8);
         // Root is always ready if pending (no parent)
         if matches!(self.root.status, TaskStatus::Pending) {
             ready.push(&self.root);

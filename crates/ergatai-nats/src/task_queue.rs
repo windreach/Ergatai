@@ -160,40 +160,53 @@ impl<T: Serialize + for<'de> Deserialize<'de> + Send + Sync + 'static> NatsTaskQ
             .await
             .map_err(|e| ErgataiError::NatsError(format!("Failed to create consumer: {}", e)))?;
 
-        // Fetch one message
+        // Use batch() with max_messages(1) for per-message consume.
+        // messages() creates a long-lived subscription that loses state between calls.
+        // batch() is a one-shot request that fetches exactly N messages.
         let mut messages = consumer
+            .batch()
+            .max_messages(1)
             .messages()
             .await
-            .map_err(|e| ErgataiError::NatsError(format!("Failed to get messages: {}", e)))?;
+            .map_err(|e| ErgataiError::NatsError(format!("Failed to fetch message: {}", e)))?;
 
-        // Try to get a message with timeout
-        let message = tokio::time::timeout(Duration::from_millis(100), messages.next()).await;
+        // Try to get a message with timeout (retry with increasing delays)
+        let mut last_timeout = 50;
+        for _ in 0..3 {
+            match tokio::time::timeout(Duration::from_millis(last_timeout), messages.next()).await {
+                Ok(Some(Ok(msg))) => {
+                    let payload: TaskMessage<T> = serde_json::from_slice(&msg.payload)?;
+                    let message_id_for_log = payload.message_id.clone();
 
-        match message {
-            Ok(Some(Ok(msg))) => {
-                let payload: TaskMessage<T> = serde_json::from_slice(&msg.payload)?;
-                let message_id_for_log = payload.message_id.clone();
+                    let ack = ConsumerAck {
+                        message: msg,
+                        message_id: message_id_for_log,
+                    };
 
-                let ack = ConsumerAck {
-                    message: msg,
-                    message_id: message_id_for_log,
-                };
-
-                debug!(message_id = payload.message_id, "Task consumed");
-                Ok(Some((payload, ack)))
-            }
-            Ok(Some(Err(e))) => {
-                warn!(error = %e, "Error receiving message");
-                Err(ErgataiError::NatsError(format!(
-                    "Message receive error: {}",
-                    e
-                )))
-            }
-            Ok(None) | Err(_) => {
-                // No messages available or timeout
-                Ok(None)
+                    debug!(message_id = payload.message_id, "Task consumed");
+                    return Ok(Some((payload, ack)));
+                }
+                Ok(Some(Err(e))) => {
+                    warn!(error = %e, "Error receiving message");
+                    return Err(ErgataiError::NatsError(format!(
+                        "Message receive error: {}",
+                        e
+                    )));
+                }
+                Ok(None) => {
+                    // Batch exhausted (no more messages)
+                    return Ok(None);
+                }
+                Err(_) => {
+                    // Timeout, try again with longer timeout
+                    last_timeout += 50;
+                    continue;
+                }
             }
         }
+
+        // All retry attempts timed out - no message available
+        Ok(None)
     }
 
     /// Get the number of pending messages in the queue
@@ -316,7 +329,7 @@ mod tests {
     /// Skips if nats-server is not available.
     #[tokio::test]
     async fn test_task_queue_full_flow() {
-        let server = match crate::NatsServer::start().await {
+        let server = match crate::shared_test_server().await {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("⚠️  Skipping (nats-server not available): {}", e);
@@ -324,16 +337,17 @@ mod tests {
             }
         };
 
-        let conn = crate::NatsConnection::connect_to_server(&server)
+        let conn = crate::NatsConnection::connect_to_server(server)
             .await
             .unwrap();
 
-        // Create queue
+        // Create queue with unique names to avoid state conflicts
+        let process_id = std::process::id();
         let queue: NatsTaskQueue<TestPayload> = NatsTaskQueue::new(
             conn.clone(),
-            format!("test_queue_{}", std::process::id()),
-            "test_worker".to_string(),
-            format!("ergatai.test.tasks.{}", std::process::id()),
+            format!("test_queue_{}", process_id),
+            format!("test_worker_{}", process_id), // Unique consumer name
+            format!("ergatai.test.tasks.{}", process_id),
         )
         .await
         .unwrap();
@@ -357,7 +371,7 @@ mod tests {
         assert!(!id2.is_empty());
 
         // Check pending count
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
         let pending = queue.pending_count().await.unwrap();
         assert_eq!(pending, 3, "Should have 3 pending tasks");
 
@@ -367,10 +381,16 @@ mod tests {
         assert_eq!(msg1.correlation_id, "corr-1");
         ack1.ack().await.unwrap();
 
+        // Wait to ensure next message is ready and ack is processed
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
         // Consume and ack task 2
         let (msg2, ack2) = queue.consume().await.unwrap().expect("Should get task 2");
         assert_eq!(msg2.payload.data, "task2");
         ack2.ack().await.unwrap();
+
+        // Wait to ensure next message is ready and ack is processed
+        tokio::time::sleep(Duration::from_millis(150)).await;
 
         // Consume and nack task 3 (will not be redelivered in this test)
         let (msg3, ack3) = queue.consume().await.unwrap().expect("Should get task 3");
@@ -389,7 +409,7 @@ mod tests {
     /// Test empty queue returns None
     #[tokio::test]
     async fn test_consume_empty_queue() {
-        let server = match crate::NatsServer::start().await {
+        let server = match crate::shared_test_server().await {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("⚠️  Skipping (nats-server not available): {}", e);
@@ -397,7 +417,7 @@ mod tests {
             }
         };
 
-        let conn = crate::NatsConnection::connect_to_server(&server)
+        let conn = crate::NatsConnection::connect_to_server(server)
             .await
             .unwrap();
 

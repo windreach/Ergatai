@@ -8,6 +8,6 @@ pub mod server;
 pub mod message_forwarder;
 
 // Re-export AgentRegistry from ergatai-acp for backward compatibility
-pub use ergatai_acp::agent_registry::{AgentRegistry, AgentInfo, AgentStatus, agent_registry};
-pub use server::{ErgataiMcpServer, create_mcp_service};
+pub use ergatai_acp::agent_registry::AgentRegistry;
+pub use server::create_mcp_service;
 pub use message_forwarder::start_nats_acp_forwarder;

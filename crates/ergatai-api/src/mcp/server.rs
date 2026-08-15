@@ -2,42 +2,49 @@
 //!
 //! Implements MCP protocol 2025-06-18 with Streamable HTTP transport.
 //! Agents connect via POST/GET /mcp and can call tools like list_agents,
-//! send_message, set_acp_endpoint, etc.
+//! send_message, submit_orchestration, etc.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use rmcp::{
-    ErrorData, ServerHandler,
+    ErrorData, RoleServer, ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
-        CallToolResult, ContentBlock, InitializeRequestParams, InitializeResult,
-        ServerCapabilities, ServerInfo,
+        CallToolResult, ContentBlock, CustomNotification, InitializeRequestParams,
+        InitializeResult, ServerCapabilities, ServerInfo, ServerNotification,
     },
-    service::RequestContext,
+    service::{Peer, RequestContext},
     tool, tool_handler, tool_router,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use ergatai_acp::agent_registry::AgentRegistry;
-use ergatai_nats::{get_nats_connection, is_nats_initialized, AgentMessagePayload, EventBus};
-use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::message_relay;
+/// Shared registry of MCP peer handles for pushing notifications to agents.
+/// Key: agent_id (e.g., "opencode@abcd1234")
+/// Value: Peer handle for sending notifications to that agent's MCP session.
+pub type PeerRegistry = Arc<RwLock<HashMap<String, Peer<RoleServer>>>>;
+
+/// Create a new empty PeerRegistry.
+pub fn new_peer_registry() -> PeerRegistry {
+    Arc::new(RwLock::new(HashMap::new()))
+}
 
 /// MCP Server state - shared across all sessions via Arc
 #[derive(Clone)]
 pub struct ErgataiMcpServer {
     tool_router: ToolRouter<Self>,
     registry: Arc<AgentRegistry>,
+    /// Shared peer registry for pushing notifications to agents
+    peer_registry: PeerRegistry,
     /// Per-session agent ID (set during initialize, used in send_message)
     session_agent_id: Arc<RwLock<Option<String>>>,
-    /// Ergatai's own address (for endpoint validation)
-    ergatai_own_address: Arc<String>,
 }
 
 impl std::fmt::Debug for ErgataiMcpServer {
@@ -48,12 +55,50 @@ impl std::fmt::Debug for ErgataiMcpServer {
 
 impl ErgataiMcpServer {
     /// Create a new server instance (called per-session by the factory)
-    pub fn new(registry: Arc<AgentRegistry>, ergatai_own_address: Arc<String>) -> Self {
+    pub fn new(
+        registry: Arc<AgentRegistry>,
+        peer_registry: PeerRegistry,
+    ) -> Self {
         Self {
             tool_router: Self::tool_router(),
             registry,
+            peer_registry,
             session_agent_id: Arc::new(RwLock::new(None)),
-            ergatai_own_address,
+        }
+    }
+}
+
+/// When the per-session `ErgataiMcpServer` is dropped (session ends — client
+/// disconnect, idle timeout, or server shutdown), automatically unregister the
+/// agent from the shared registry and remove its peer handle. Without this,
+/// dead agents accumulate as zombies because rmcp's `ServerHandler` has no
+/// `on_close` callback.
+impl Drop for ErgataiMcpServer {
+    fn drop(&mut self) {
+        // `Drop` is synchronous — use `try_read` (non-blocking) to grab the
+        // agent ID, then spawn the async cleanup on the tokio runtime.
+        // The session worker task is still on the runtime when it drops us,
+        // so `tokio::spawn` is safe here.
+        let agent_id = match self.session_agent_id.try_read() {
+            Ok(guard) => guard.clone(),
+            Err(_) => {
+                warn!(
+                    "ErgataiMcpServer::drop: session_agent_id lock contended, \
+                     skipping unregister (stale-agent reaper will clean up)"
+                );
+                None
+            }
+        };
+
+        if let Some(agent_id) = agent_id {
+            let registry = self.registry.clone();
+            let peer_registry = self.peer_registry.clone();
+            info!("MCP session ending, unregistering agent: {}", agent_id);
+            tokio::spawn(async move {
+                registry.unregister_agent(&agent_id).await;
+                peer_registry.write().await.remove(&agent_id);
+                info!("Agent {} unregistered (MCP session closed)", agent_id);
+            });
         }
     }
 }
@@ -78,14 +123,6 @@ struct SendMessageParams {
     message_type: Option<String>,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
-struct SetAcpEndpointParams {
-    /// ACP HTTP endpoint URL (e.g., "http://localhost:8080")
-    endpoint: String,
-    /// Agent ID (optional, defaults to the calling agent's ID)
-    #[serde(default)]
-    agent_id: Option<String>,
-}
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct SubmitOrchestrationParams {
@@ -149,10 +186,9 @@ impl ErgataiMcpServer {
         )]))
     }
 
-    /// Send a message to another agent.
-    /// Message is routed via NATS and delivered to the target agent's ACP endpoint.
-    /// **Target agent MUST have an ACP endpoint registered to receive messages.**
-    #[tool(description = "Send a message to another agent via NATS routing")]
+    /// Send a message to another agent via MCP notification.
+    /// The target agent receives it as a custom notification on their MCP connection.
+    #[tool(description = "Send a message to another agent via MCP notification")]
     async fn send_message(
         &self,
         params: Parameters<SendMessageParams>,
@@ -188,65 +224,57 @@ impl ErgataiMcpServer {
             }
         };
 
-        // Check if target agent has an ACP endpoint (REQUIRED)
-        let acp_endpoint = self.registry.get_acp_endpoint(&resolved_agent_id).await;
+        // Look up the target agent's peer handle
+        let peer = {
+            let peers = self.peer_registry.read().await;
+            peers.get(&resolved_agent_id).cloned()
+        };
 
-        if acp_endpoint.is_none() {
-            return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
-                "Agent {} has no ACP endpoint registered. \
-                 Agents MUST register their ACP endpoint via set_acp_endpoint to receive messages.",
-                resolved_agent_id
-            ))]));
-        }
-
-        // Route message via NATS
-        info!("Routing message to {} via NATS", resolved_agent_id);
-
-        if !is_nats_initialized().await {
-            return Ok(CallToolResult::error(vec![ContentBlock::text(
-                "NATS not initialized. Cannot route message.".to_string(),
-            )]));
-        }
-
-        let conn = match get_nats_connection().await {
-            Some(c) => c,
+        let peer = match peer {
+            Some(p) => p,
             None => {
-                return Ok(CallToolResult::error(vec![ContentBlock::text(
-                    "NATS connection not available.".to_string(),
-                )]));
+                return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                    "Agent {} has no active MCP connection. Peer handle not found.",
+                    resolved_agent_id
+                ))]));
             }
         };
 
-        let bus = EventBus::new(conn);
+        // Get the sender agent ID
+        let from_agent = self.session_agent_id.read().await
+            .clone()
+            .unwrap_or_else(|| "unknown-mcp-client".to_string());
+
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
 
-        // Get the actual sender agent ID from the session
-        let from_agent = self.session_agent_id.read().await
-            .clone()
-            .unwrap_or_else(|| "unknown-mcp-client".to_string());
+        // Build the notification payload
+        let payload = serde_json::json!({
+            "from_agent": from_agent,
+            "to_agent": resolved_agent_id,
+            "content": message,
+            "message_type": message_type,
+            "timestamp": timestamp,
+        });
 
-        let payload = AgentMessagePayload {
-            from_agent,
-            to_agent: resolved_agent_id.clone(),
-            content: message.to_string(),
-            thread_id: None,
-            timestamp,
-            metadata: HashMap::new(),
-        };
+        // Send as MCP custom notification
+        let notification = CustomNotification::new(
+            "ergatai/message",
+            Some(payload),
+        );
 
-        match bus.publish_agent_message(&payload).await {
+        match peer.send_notification(ServerNotification::CustomNotification(notification)).await {
             Ok(_) => {
                 let message_id = uuid::Uuid::new_v4().to_string();
                 let response_json = serde_json::json!({
                     "message_id": message_id,
-                    "status": "routed",
+                    "status": "delivered",
                     "target_agent_id": resolved_agent_id,
                     "message_type": message_type,
-                    "delivery_method": "nats_to_acp",
-                    "note": "Message published to NATS. Will be delivered to agent's ACP endpoint."
+                    "delivery_method": "mcp_notification",
+                    "note": "Message delivered via MCP notification."
                 });
 
                 Ok(CallToolResult::success(vec![ContentBlock::text(
@@ -254,154 +282,13 @@ impl ErgataiMcpServer {
                 )]))
             }
             Err(e) => {
-                error!("Failed to publish message to NATS: {}", e);
+                error!("Failed to send MCP notification to {}: {}", resolved_agent_id, e);
                 Ok(CallToolResult::error(vec![ContentBlock::text(format!(
-                    "Failed to route message: {}",
+                    "Failed to deliver message: {}",
                     e
                 ))]))
             }
         }
-    }
-
-    /// Register the agent's ACP HTTP endpoint so Ergatai can push tasks to it.
-    /// Call this after connecting via MCP to enable bidirectional communication.
-    #[tool(
-        description = "Register the agent's ACP HTTP endpoint so Ergatai can push tasks to it"
-    )]
-    async fn set_acp_endpoint(
-        &self,
-        params: Parameters<SetAcpEndpointParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let endpoint = &params.0.endpoint;
-
-        info!("🔧 set_acp_endpoint called with endpoint: {}", endpoint);
-
-        // Validate endpoint URL by parsing — reject malformed URLs and non-HTTP schemes.
-        let parsed = match url::Url::parse(endpoint) {
-            Ok(u) => u,
-            Err(_) => {
-                return Ok(CallToolResult::error(vec![ContentBlock::text(
-                    "Invalid endpoint URL. Must be a valid absolute URL (e.g. http://localhost:8080)",
-                )]));
-            }
-        };
-        match parsed.scheme() {
-            "http" | "https" => {}
-            other => {
-                return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
-                    "Invalid endpoint scheme '{}'. Only http and https are allowed.",
-                    other
-                ))]));
-            }
-        }
-        if parsed.host_str().is_none() {
-            return Ok(CallToolResult::error(vec![ContentBlock::text(
-                "Invalid endpoint URL: missing host.",
-            )]));
-        }
-
-        // SECURITY: Prevent agents from registering Ergatai's own endpoints
-        // (would create a message loop where Ergatai sends messages to itself).
-        // Compare by (scheme, host, port) — not substring — to avoid bypasses like
-        // `http://localhost:3000.evil.com` matching the substring "localhost:3000".
-        let own_parsed = url::Url::parse(&format!("http://{}", self.ergatai_own_address.as_str()));
-        let same_origin = own_parsed.as_ref().ok().is_some_and(|own| {
-            let own_host = own.host_str().unwrap_or("");
-            let ep_host = parsed.host_str().unwrap_or("");
-            let own_port = own.port_or_known_default().unwrap_or(80);
-            let ep_port = parsed.port_or_known_default().unwrap_or(80);
-            own_host == ep_host && own_port == ep_port
-        });
-        if same_origin {
-            return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
-                "Invalid endpoint: Cannot register Ergatai's own address ({}) as ACP endpoint. \
-                 Agents must run their own ACP server on a different port.",
-                self.ergatai_own_address
-            ))]));
-        }
-
-        // SECURITY (IDOR fix): Always bind endpoint update to this session's
-        // authenticated agent_id. Never trust a caller-supplied agent_id to
-        // modify a different agent's registration — that would let any MCP
-        // client hijack another agent's ACP endpoint and intercept its messages.
-        let session_agent_id = match self.session_agent_id.read().await.clone() {
-            Some(id) => id,
-            None => {
-                tracing::warn!("set_acp_endpoint called before initialize (no session agent_id)");
-                return Ok(CallToolResult::error(vec![ContentBlock::text(
-                    "Session not initialized. Call initialize first.",
-                )]));
-            }
-        };
-
-        // If the client supplied an agent_id, it MUST match this session's agent.
-        // Reject mismatches — they indicate either a confused client or an IDOR attempt.
-        if let Some(provided_id) = &params.0.agent_id {
-            let matches_exact = provided_id == &session_agent_id;
-            // Prefix match: session id is "simple-agent@ead00fad", client may pass "simple-agent"
-            let matches_prefix = session_agent_id
-                .strip_suffix(&format!("@{}", &session_agent_id[session_agent_id.find('@').map(|i| i + 1).unwrap_or(session_agent_id.len())..]))
-                .is_some_and(|base| base == provided_id);
-            let matches_short = session_agent_id
-                .find('@')
-                .is_some_and(|i| &session_agent_id[..i] == provided_id);
-
-            if !matches_exact && !matches_prefix && !matches_short {
-                tracing::warn!(
-                    provided = %provided_id,
-                    session = %session_agent_id,
-                    "Agent attempted to set endpoint for a different agent ID (possible IDOR); rejecting"
-                );
-                return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
-                    "agent_id '{}' does not match this session's agent '{}'. \
-                     Omit the agent_id parameter to use the session's authenticated ID.",
-                    provided_id, session_agent_id
-                ))]));
-            }
-        }
-
-        // Always use the session's authenticated agent_id — never the caller-supplied one
-        let agent_id = session_agent_id;
-
-        // Find the matching agent in the registry (session agent_id is authoritative)
-        let agents = self.registry.list_agents().await;
-        let matching_agent = agents
-            .iter()
-            .find(|a| a.agent_id == agent_id)
-            .map(|a| a.agent_id.clone());
-
-        let agent_id = match matching_agent {
-            Some(id) => id,
-            None => {
-                return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
-                    "Agent {} is not registered. Connect via MCP first.",
-                    agent_id
-                ))]));
-            }
-        };
-
-        info!("✅ Agent {} registering ACP endpoint: {}", agent_id, endpoint);
-        if let Err(e) = self.registry
-            .set_acp_endpoint(&agent_id, endpoint.to_string())
-            .await
-        {
-            return Err(ErrorData::invalid_params(format!("Invalid ACP endpoint: {}", e), None::<serde_json::Value>));
-        }
-
-        // Verify it was stored
-        let stored = self.registry.get_acp_endpoint(&agent_id).await;
-        info!("✅ ACP endpoint stored in registry: {:?}", stored);
-
-        let result = serde_json::json!({
-            "agent_id": agent_id,
-            "endpoint": endpoint,
-            "status": "registered",
-            "message": "ACP endpoint registered successfully. Ergatai can now push tasks to this agent."
-        });
-
-        Ok(CallToolResult::success(vec![ContentBlock::text(
-            serde_json::to_string_pretty(&result).unwrap_or_default(),
-        )]))
     }
 
     /// Submit a DAG workflow for multi-agent collaboration
@@ -463,7 +350,7 @@ impl ErgataiMcpServer {
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for ErgataiMcpServer {
-    /// Handle initialize - auto-register the agent
+    /// Handle initialize - auto-register the agent and save peer handle
     async fn initialize(
         &self,
         request: InitializeRequestParams,
@@ -487,7 +374,7 @@ impl ServerHandler for ErgataiMcpServer {
         // Store the agent ID for this session (used in send_message)
         *self.session_agent_id.write().await = Some(unique_agent_id.clone());
 
-        // Register agent in registry with unique ID
+        // Register agent in registry (no ACP endpoint needed - we use MCP notifications)
         if let Err(e) = self.registry
             .register_agent(unique_agent_id.clone(), connection_id.clone(), None, None)
             .await
@@ -495,7 +382,16 @@ impl ServerHandler for ErgataiMcpServer {
             return Err(ErrorData::invalid_params(format!("Failed to register agent: {}", e), None::<serde_json::Value>));
         }
 
-        info!("Agent registered: {} (connection: {})", unique_agent_id, connection_id);
+        // Save the peer handle for pushing notifications to this agent
+        self.peer_registry.write().await.insert(
+            unique_agent_id.clone(),
+            context.peer.clone(),
+        );
+
+        info!(
+            "Agent registered: {} (connection: {}, peer handle saved)",
+            unique_agent_id, connection_id
+        );
 
         // Build the initialize result
         let mut server_info = self.get_info();
@@ -538,12 +434,12 @@ use rmcp::transport::streamable_http_server::{
 ///
 /// # Arguments
 /// * `registry` - Agent registry for tracking connected agents
+/// * `peer_registry` - Shared registry of MCP peer handles for pushing notifications
 /// * `cancellation_token` - Token for graceful shutdown
-/// * `ergatai_own_address` - Ergatai's own address (e.g., "localhost:3000") for endpoint validation
 pub fn create_mcp_service(
     registry: Arc<AgentRegistry>,
+    peer_registry: PeerRegistry,
     cancellation_token: CancellationToken,
-    ergatai_own_address: String,
 ) -> StreamableHttpService<ErgataiMcpServer, LocalSessionManager> {
     let config = StreamableHttpServerConfig::default()
         .with_sse_keep_alive(Some(std::time::Duration::from_secs(15)))
@@ -554,9 +450,8 @@ pub fn create_mcp_service(
             "localhost", "127.0.0.1", "::1", "0.0.0.0",
         ]);
 
-    let own_address = Arc::new(ergatai_own_address);
     StreamableHttpService::new(
-        move || Ok(ErgataiMcpServer::new(registry.clone(), own_address.clone())),
+        move || Ok(ErgataiMcpServer::new(registry.clone(), peer_registry.clone())),
         Default::default(),
         config,
     )

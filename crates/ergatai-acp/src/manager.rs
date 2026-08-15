@@ -253,7 +253,7 @@ impl SessionManager {
     pub async fn close_chat_sessions(&self) {
         let (chat_ids, dag_count): (Vec<String>, usize) = {
             let sessions = self.sessions.read().await;
-            let mut chat_ids = Vec::new();
+            let mut chat_ids = Vec::with_capacity(sessions.len());
             let mut dag_count = 0;
             for h in sessions.values() {
                 if h.kind == SessionKind::Chat {
@@ -293,7 +293,7 @@ impl SessionManager {
     pub async fn close_by_kind(&self, kind: SessionKind) {
         let (ids, other_count): (Vec<String>, usize) = {
             let sessions = self.sessions.read().await;
-            let mut ids = Vec::new();
+            let mut ids = Vec::with_capacity(sessions.len());
             let mut other_count = 0;
             for h in sessions.values() {
                 if h.kind == kind {

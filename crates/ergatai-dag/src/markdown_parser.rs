@@ -26,7 +26,8 @@ pub fn parse_markdown_tree(content: &str) -> ErgataiResult<TaskTree> {
     let lines: Vec<&str> = content.lines().collect();
     let mut iter = lines.into_iter().enumerate().peekable();
 
-    let mut root_nodes = Vec::new();
+    // Pre-allocate with a reasonable default for root nodes
+    let mut root_nodes = Vec::with_capacity(4);
 
     while let Some((_, line)) = iter.next() {
         let trimmed = line.trim();

@@ -991,9 +991,6 @@ mod tests {
     // ================================================================
     #[tokio::test]
     async fn test_lock_upgrade_read_to_write_no_conflict() {
-        use crate::LockModeManager;
-        use std::sync::Arc;
-
         let (_temp, manager) = setup_test_env();
         let root = test_project_root();
 
@@ -1400,7 +1397,7 @@ mod tests {
         manager.acquire_lock(&token_a, "main.rs").await.unwrap();
 
         let mgr_a = Arc::clone(&manager);
-        let mgr_b = Arc::clone(&manager);
+        let _mgr_b = Arc::clone(&manager);
         let token_a_id = token_a.id.clone();
 
         // Spawn thread to release lock

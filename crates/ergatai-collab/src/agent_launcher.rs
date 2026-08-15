@@ -102,7 +102,7 @@ impl AgentLauncher {
 
     /// Launch all agents for a task plan
     pub async fn launch_agents(&self, plan: &TaskPlan) -> ErgataiResult<Vec<String>> {
-        let mut agent_ids = Vec::new();
+        let mut agent_ids = Vec::with_capacity(plan.assignments.len());
 
         for assignment in &plan.assignments {
             let agent_id = self.launch_agent(plan, assignment).await?;
@@ -153,7 +153,9 @@ impl AgentLauncher {
                 "**".to_string() // Full project access when no files specified
             } else {
                 // Build scope from file list
-                let mut patterns = Vec::new();
+                let mut patterns = Vec::with_capacity(
+                    assignment.files_to_create.len() + assignment.files_to_modify.len(),
+                );
                 patterns.extend(
                     assignment
                         .files_to_create
@@ -382,7 +384,8 @@ Write your results in markdown:
 
     /// Format files section for instruction
     fn format_files_section(&self, assignment: &AgentAssignment) -> String {
-        let mut sections = Vec::new();
+        // Pre-allocate for both sections
+        let mut sections = Vec::with_capacity(2);
 
         if !assignment.files_to_create.is_empty() {
             sections.push("**Files to create:**".to_string());
@@ -635,7 +638,7 @@ Write your results in markdown:
                 .map(|(id, _)| id.clone())
                 .collect();
 
-            let mut sessions = Vec::new();
+            let mut sessions = Vec::with_capacity(stale.len());
             for id in &stale {
                 if let Some(agent) = agents.remove(id) {
                     // Collect session IDs for closing after releasing lock

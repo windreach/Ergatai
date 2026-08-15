@@ -58,7 +58,8 @@ struct McpConfig {
 
 /// Find MCP config files
 fn find_mcp_configs() -> Vec<PathBuf> {
-    let mut configs = Vec::new();
+    // At most 3 configs: user config, local .mcp.json, local mcp.json
+    let mut configs = Vec::with_capacity(3);
 
     // 1. User config
     if let Some(config_dir) = dirs::config_dir() {
@@ -114,7 +115,8 @@ fn parse_mcp_config(path: &Path) -> Vec<(String, McpServerEntry)> {
 
 /// Scan all MCP servers from configs
 pub fn scan_mcp_servers() -> ErgataiResult<Vec<McpServerInfo>> {
-    let mut servers = Vec::new();
+    // Pre-allocate with a reasonable default capacity
+    let mut servers = Vec::with_capacity(8);
     let mut seen: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
 
     // Determine the canonical user config directory once

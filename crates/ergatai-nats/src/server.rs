@@ -4,6 +4,7 @@
 
 use std::path::PathBuf;
 use std::process::{Child, Command};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use tokio::time::sleep;
@@ -20,6 +21,12 @@ const MAX_PORT_ATTEMPTS: u16 = 10;
 /// Time to wait for nats-server to start (milliseconds)
 const STARTUP_WAIT_MS: u64 = 200;
 
+/// Maximum number of retry attempts when port binding fails
+const MAX_BIND_RETRIES: u32 = 3;
+
+/// Delay between bind retries (milliseconds)
+const BIND_RETRY_DELAY_MS: u64 = 50;
+
 /// NATS server process manager
 ///
 /// Spawns nats-server as a child process and ensures it's killed on drop.
@@ -29,6 +36,78 @@ pub struct NatsServer {
 }
 
 impl NatsServer {
+    /// Start a new nats-server instance with a custom store directory.
+    ///
+    /// Used by tests to avoid loading stale persistent data.
+    pub async fn start_with_store_dir(store_dir: PathBuf) -> ErgataiResult<Self> {
+        let binary_path = Self::find_binary()?;
+
+        // Ensure store directory exists
+        tokio::fs::create_dir_all(&store_dir).await.map_err(|e| {
+            ErgataiError::internal(format!("Failed to create NATS store directory: {}", e))
+        })?;
+
+        let mut last_error = None;
+        for attempt in 0..MAX_BIND_RETRIES {
+            let port = Self::find_available_port().await?;
+
+            info!(port = port, binary = %binary_path.display(), store = %store_dir.display(), attempt = attempt + 1, "Starting nats-server");
+
+            match Command::new(&binary_path)
+                .args([
+                    "-p",
+                    &port.to_string(),
+                    "-a",
+                    "127.0.0.1",
+                    "--jetstream",
+                    "-sd",
+                    store_dir
+                        .to_str()
+                        .ok_or_else(|| ErgataiError::internal("Invalid NATS store directory path"))?,
+                ])
+                .spawn()
+            {
+                Ok(mut child) => {
+                    sleep(Duration::from_millis(STARTUP_WAIT_MS)).await;
+
+                    match child.try_wait() {
+                        Ok(Some(status)) => {
+                            warn!(port = port, status = %status, attempt = attempt + 1, "nats-server exited prematurely, retrying with different port");
+                            last_error = Some(format!("nats-server exited with status: {}", status));
+                            sleep(Duration::from_millis(BIND_RETRY_DELAY_MS)).await;
+                            continue;
+                        }
+                        Ok(None) => {
+                            info!(port = port, "nats-server started successfully");
+                            return Ok(Self {
+                                child: Some(child),
+                                port,
+                            });
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "Failed to check nats-server status");
+                            return Ok(Self {
+                                child: Some(child),
+                                port,
+                            });
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(error = %e, attempt = attempt + 1, "Failed to spawn nats-server, retrying");
+                    last_error = Some(format!("Failed to spawn: {}", e));
+                    sleep(Duration::from_millis(BIND_RETRY_DELAY_MS)).await;
+                }
+            }
+        }
+
+        Err(ErgataiError::internal(format!(
+            "Failed to start nats-server after {} attempts: {}",
+            MAX_BIND_RETRIES,
+            last_error.unwrap_or_else(|| "Unknown error".to_string())
+        )))
+    }
+
     /// Start a new nats-server instance
     ///
     /// Locates the nats-server binary in Electron resources, finds an available port,
@@ -41,40 +120,8 @@ impl NatsServer {
     /// - No available port in range [4222, 4232)
     /// - Failed to spawn child process
     pub async fn start() -> ErgataiResult<Self> {
-        let binary_path = Self::find_binary()?;
-        let port = Self::find_available_port().await?;
         let store_dir = Self::get_store_dir()?;
-
-        // Ensure store directory exists
-        tokio::fs::create_dir_all(&store_dir).await.map_err(|e| {
-            ErgataiError::internal(format!("Failed to create NATS store directory: {}", e))
-        })?;
-
-        info!(port = port, binary = %binary_path.display(), store = %store_dir.display(), "Starting nats-server");
-
-        let child = Command::new(&binary_path)
-            .args([
-                "-p",
-                &port.to_string(),
-                "-a",
-                "127.0.0.1",   // Bind to localhost only
-                "--jetstream", // Enable JetStream
-                "-sd",
-                store_dir
-                    .to_str()
-                    .ok_or_else(|| ErgataiError::internal("Invalid NATS store directory path"))?, // Store directory for persistence
-            ])
-            .spawn()?;
-
-        // Wait for server to initialize
-        sleep(Duration::from_millis(STARTUP_WAIT_MS)).await;
-
-        info!(port = port, "nats-server started");
-
-        Ok(Self {
-            child: Some(child),
-            port,
-        })
+        Self::start_with_store_dir(store_dir).await
     }
 
     /// Get the port this server is listening on
@@ -193,6 +240,49 @@ impl NatsServer {
             .await
             .is_ok()
     }
+}
+
+/// Shared NATS server for all tests in the process.
+///
+/// Instead of each test spawning its own nats-server process (wasteful,
+/// causes port conflicts), all tests share a single server instance.
+/// Tests isolate data via unique stream/consumer names.
+///
+/// Uses a Mutex<Option<>> for lazy init + Box::leak to keep the server alive
+/// until process exit (the child process is never dropped/killed).
+static SHARED_TEST_SERVER: Mutex<Option<&'static NatsServer>> = Mutex::new(None);
+
+/// Get a shared nats-server for testing.
+///
+/// Starts the server on first call with a fresh temp store directory
+/// (avoids loading stale persistent data from production).
+/// Returns the same instance on subsequent calls.
+/// The server process lives until the test process exits.
+///
+/// Note: Holds std::sync::Mutex across async operation, which is acceptable here because:
+/// 1. This is test-only code with one-time initialization
+/// 2. Prevents race condition where multiple threads create zombie NATS processes
+pub async fn shared_test_server() -> ErgataiResult<&'static NatsServer> {
+    // Hold lock throughout initialization to prevent race condition
+    let mut guard = SHARED_TEST_SERVER.lock().unwrap();
+
+    // Check if already initialized
+    if let Some(server) = *guard {
+        return Ok(server);
+    }
+
+    // Start server with a unique temp store directory
+    let store_dir = std::env::temp_dir()
+        .join("ergatai-test-nats")
+        .join(format!("pid-{}", std::process::id()));
+    // Clean any stale data from previous runs with the same PID
+    let _ = std::fs::remove_dir_all(&store_dir);
+
+    let server = NatsServer::start_with_store_dir(store_dir).await?;
+    let leaked: &'static NatsServer = Box::leak(Box::new(server));
+
+    *guard = Some(leaked);
+    Ok(leaked)
 }
 
 impl Drop for NatsServer {

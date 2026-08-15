@@ -253,7 +253,7 @@ mod tests {
     async fn test_connection_and_pubsub() {
         use futures_util::StreamExt;
 
-        let server = match crate::NatsServer::start().await {
+        let server = match crate::shared_test_server().await {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("⚠️  Skipping (nats-server not available): {}", e);
@@ -261,7 +261,7 @@ mod tests {
             }
         };
 
-        let conn = NatsConnection::connect_to_server(&server).await.unwrap();
+        let conn = NatsConnection::connect_to_server(server).await.unwrap();
         assert!(conn.is_connected());
 
         // Subscribe first
@@ -284,7 +284,7 @@ mod tests {
     /// Test stream creation
     #[tokio::test]
     async fn test_create_stream() {
-        let server = match crate::NatsServer::start().await {
+        let server = match crate::shared_test_server().await {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("⚠️  Skipping (nats-server not available): {}", e);
@@ -292,7 +292,7 @@ mod tests {
             }
         };
 
-        let conn = NatsConnection::connect_to_server(&server).await.unwrap();
+        let conn = NatsConnection::connect_to_server(server).await.unwrap();
 
         let config = Config {
             name: "TEST_STREAM".to_string(),

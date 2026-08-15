@@ -506,7 +506,7 @@ mod tests {
 
     #[test]
     fn test_system_token_invalid_when_zero_ttl() {
-        let mut token = SystemToken::new(
+        let token = SystemToken::new(
             "agent".to_string(),
             "session".to_string(),
             "/project".to_string(),
@@ -561,7 +561,7 @@ mod tests {
 
     #[test]
     fn test_file_token_invalid_when_expired() {
-        let mut token = FileToken::new(
+        let token = FileToken::new(
             "agent".to_string(),
             "session".to_string(),
             TokenId::new(),

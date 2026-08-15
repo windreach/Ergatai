@@ -89,7 +89,7 @@ impl DagScheduler {
             ready
         };
 
-        let mut submitted = Vec::new();
+        let mut submitted = Vec::with_capacity(ready_nodes.len());
         for node in ready_nodes {
             match self.generate_and_submit(&node).await {
                 Ok(task_id) => {
@@ -365,7 +365,8 @@ impl DagScheduler {
         let graph = self.graph.lock().await;
         let ctx = self.context.lock().await;
 
-        let mut lines = Vec::new();
+        // Pre-allocate for header + upstream dependencies
+        let mut lines = Vec::with_capacity(2 + node.depends_on.len());
         lines.push(String::new());
         lines.push("### Upstream Context".to_string());
 
@@ -434,7 +435,7 @@ impl DagScheduler {
             ready_nodes.len()
         );
 
-        let mut newly_submitted = Vec::new();
+        let mut newly_submitted = Vec::with_capacity(ready_nodes.len());
         for node in ready_nodes {
             match self.generate_and_submit(&node).await {
                 Ok(task_id) => {
@@ -608,7 +609,7 @@ impl DagScheduler {
         let to_skip: Vec<String> = {
             let graph = self.graph.lock().await;
             let mut queue = vec![failed_id.to_string()];
-            let mut to_skip = Vec::new();
+            let mut to_skip = Vec::with_capacity(graph.nodes.len() / 2);
             let mut seen = std::collections::HashSet::new(); // O(1) lookup
 
             while let Some(current) = queue.pop() {

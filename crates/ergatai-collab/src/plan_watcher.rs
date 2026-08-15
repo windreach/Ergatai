@@ -23,7 +23,8 @@ impl PollingWatcher {
 
     /// Poll for new result files
     pub async fn poll_new_results(&mut self) -> Vec<(String, String, PathBuf)> {
-        let mut new_results = Vec::new();
+        // Pre-allocate with a reasonable default
+        let mut new_results = Vec::with_capacity(8);
 
         let mut entries = match tokio::fs::read_dir(&self.results_dir).await {
             Ok(rd) => rd,
@@ -49,7 +50,8 @@ impl PollingWatcher {
 
     /// Get list of plan files
     pub async fn list_plans(&self) -> Vec<PathBuf> {
-        let mut plans = Vec::new();
+        // Pre-allocate with a reasonable default
+        let mut plans = Vec::with_capacity(8);
 
         let mut entries = match tokio::fs::read_dir(&self.plan_dir).await {
             Ok(rd) => rd,

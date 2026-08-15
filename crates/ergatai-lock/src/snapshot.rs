@@ -5,7 +5,7 @@
 //!
 //! ## Architecture
 //!
-//! ```
+//! ```text
 //! Before WRITE:
 //!   Agent requests WRITE lock on src/auth.rs
 //!     ↓

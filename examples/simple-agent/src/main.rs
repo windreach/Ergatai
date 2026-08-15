@@ -22,12 +22,12 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{error, info};
 use uuid::Uuid;
 
 /// Agent state shared across handlers
+#[allow(dead_code)] // Example code demonstrating state structure
 struct AgentState {
     agent_id: String,
     ergatai_endpoint: String,
@@ -36,6 +36,7 @@ struct AgentState {
     sessions: Arc<tokio::sync::RwLock<std::collections::HashMap<String, SessionState>>>,
 }
 
+#[allow(dead_code)] // Example code demonstrating state structure
 struct SessionState {
     session_id: String,
     cwd: String,
@@ -45,6 +46,7 @@ struct SessionState {
 /// Global state
 static AGENT_STATE: OnceLock<Arc<AgentState>> = OnceLock::new();
 
+#[allow(dead_code)] // Example code demonstrating state access pattern
 fn get_state() -> Arc<AgentState> {
     AGENT_STATE
         .get()
@@ -214,7 +216,7 @@ async fn handle_acp_request(
 }
 
 /// Handle ACP initialize
-async fn handle_initialize(request: &serde_json::Value) -> Result<serde_json::Value, serde_json::Value> {
+async fn handle_initialize(_request: &serde_json::Value) -> Result<serde_json::Value, serde_json::Value> {
     info!("ACP initialize request");
 
     Ok(json!({

@@ -263,7 +263,8 @@ fn extract_merge_strategy(content: &str) -> Option<String> {
 }
 
 fn parse_assignments(content: &str) -> ErgataiResult<Vec<AgentAssignment>> {
-    let mut assignments = Vec::new();
+    // Pre-allocate with a reasonable default
+    let mut assignments = Vec::with_capacity(4);
     let mut current_assignment: Option<AgentAssignmentBuilder> = None;
 
     for line in content.lines() {
@@ -358,7 +359,7 @@ impl TaskPlan {
 
         // First pass: create nodes and build agent_name -> UUID mapping
         let mut name_to_uuid: HashMap<String, String> = HashMap::new();
-        let mut nodes: Vec<TaskNode> = Vec::new();
+        let mut nodes: Vec<TaskNode> = Vec::with_capacity(self.assignments.len());
 
         for assignment in &self.assignments {
             let id = Uuid::new_v4().to_string();

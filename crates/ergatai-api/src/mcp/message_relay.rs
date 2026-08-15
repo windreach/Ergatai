@@ -28,6 +28,7 @@ use ergatai_core::acp::manager::SessionKind;
 /// * `message` - The message to send
 /// * `registry` - Agent registry to look up the ACP endpoint
 /// * `cwd` - Working directory for the session (used if creating a new connection)
+#[allow(dead_code)] // Reserved for future message relay functionality
 pub async fn send_message_to_agent(
     target_agent_id: &str,
     message: &str,
@@ -90,6 +91,7 @@ pub async fn send_message_to_agent(
 }
 
 /// Result of message relay
+#[allow(dead_code)] // Reserved for future message relay functionality
 pub struct MessageRelayResult {
     pub message_id: String,
     pub status: String,
@@ -101,6 +103,7 @@ pub struct MessageRelayResult {
 /// Disconnect from an agent.
 ///
 /// Called when an agent disconnects or is no longer available.
+#[allow(dead_code)] // Reserved for future connection management
 pub async fn disconnect_agent(agent_id: &str) -> Result<()> {
     let manager = http_connection_manager();
     if manager.is_connected(agent_id).await {
@@ -111,6 +114,7 @@ pub async fn disconnect_agent(agent_id: &str) -> Result<()> {
 }
 
 /// List all active ACP HTTP connections.
+#[allow(dead_code)] // Reserved for future connection listing API
 pub async fn list_connections() -> Vec<(String, String)> {
     let manager = http_connection_manager();
     manager.list_connections().await

@@ -1,20 +1,65 @@
 # Ergatai
 
-> ⚠️ **Project under active development**
+> Tell your AI agents what to do — together.
 
-Ergatai is a **multi-agent collaboration middleware** that enables AI agents to communicate and work together seamlessly. It acts as a message broker, relaying messages between agents via MCP (Model Context Protocol) and ACP (Agent Client Protocol).
+Ergatai is a **multi-agent collaboration middleware** that lets AI agents communicate and coordinate on tasks. It acts as a message broker, relaying messages between agents via MCP (Model Context Protocol) and ACP (Agent Client Protocol).
 
-**Pure Rust implementation** focused on performance and security. Agents connect via **MCP** to send messages, and Ergatai uses **ACP** to forward messages to other agents, enabling seamless agent-to-agent collaboration without direct dependencies.
+Pure Rust. Local-first. No cloud dependencies.
 
-## 🚀 Quick Start
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/rust-2021-orange.svg)](https://www.rust-lang.org)
+[![Docs](https://img.shields.io/badge/docs-latest-blue.svg)](#architecture)
+[![Contributing](https://img.shields.io/badge/contributions-welcome-brightgreen.svg)](#contributing)
 
-### 1. Start Ergatai MCP Server
+---
+
+## What can Ergatai do?
+
+Ergatai connects AI agents so they can work together on complex tasks — like a team of specialists coordinating on a project. You describe what needs to be done, and Ergatai routes the work across agents.
+
+### 🔄 Agent-to-Agent Communication
+
+Agents can send messages to each other seamlessly. Claude Code can ask Cursor to refactor a module, and Codex can report results back.
+
+```
+User: "Claude, ask Cursor to write unit tests for src/auth.rs"
+Claude: [forwards to Cursor via Ergatai]
+Cursor: [runs tests, reports back]
+Claude: "Tests written. All 12 passing."
+```
+
+### 📋 DAG-Based Task Orchestration
+
+Submit multi-step workflows where different agents handle different phases — with dependencies between tasks.
+
+```markdown
+## Task A — Code Analysis
+- agent: claude-code
+- task: Review all changes in PR #42 and identify risky modules
+
+## Task B — Test Writing
+- agent: cursor
+- task: Write unit tests for modules identified in Task A
+- depends_on: [Task A]
+
+## Task C — Security Review
+- agent: codex
+- task: Run security audit on changed files
+- depends_on: [Task A]
+```
+
+### 🔒 Safe Concurrent File Access
+
+When multiple agents edit the same codebase, Ergatai prevents conflicts with token-based locking, automatic git snapshots, and heartbeat monitoring.
+
+---
+
+## Quickstart
+
+### 1. Build and Start the Server
 
 ```bash
-# Build
 cargo build --release -p ergatai-api
-
-# Start the server
 ./target/release/ergatai-api --port 3000
 ```
 
@@ -22,7 +67,8 @@ MCP endpoint: `http://localhost:3000/mcp`
 
 ### 2. Configure Your Agent
 
-**Claude Code** (`~/.claude/claude_desktop_config.json`):
+**Claude Code** — add to `~/.claude/claude_desktop_config.json`:
+
 ```json
 {
   "mcpServers": {
@@ -33,7 +79,8 @@ MCP endpoint: `http://localhost:3000/mcp`
 }
 ```
 
-**Cursor** (`.cursor/mcp.json`):
+**Cursor** — add to `.cursor/mcp.json`:
+
 ```json
 {
   "mcpServers": {
@@ -44,81 +91,88 @@ MCP endpoint: `http://localhost:3000/mcp`
 }
 ```
 
-📖 **See [MCP Configuration Guide](docs/MCP_CONFIG_GUIDE.md) for detailed setup instructions.**
+📖 See [MCP Configuration Guide](docs/MCP_CONFIG_GUIDE.md) for full details.
 
 ### 3. Start Collaborating
 
-Once configured, your agent can use Ergatai's MCP tools:
+Once connected, agents can use Ergatai tools:
 
 ```
 User: List all connected agents
-Claude: [calls list_agents tool]
-Claude: Currently connected agents:
-  - claude-code (active)
-  - cursor (active)
+Claude: [calls list_agents]
+Claude: Connected: claude-code (active), cursor (active)
 
-User: Send a message to cursor agent
-Claude: [calls send_message tool]
-Claude: Message sent to cursor agent
+User: Send a message to cursor
+Claude: [calls send_message → target: cursor]
+Claude: Message delivered. Session reused from previous exchange.
 ```
+
+---
 
 ## Architecture
 
 ```
-┌─────────────┐         ┌─────────────┐         ┌─────────────┐
-│  Agent A    │ ←─MCP─→ │  Ergatai    │ ←─ACP─→ │  Agent B    │
-│ (Claude)    │         │  MCP Server │         │ (Cursor)    │
-└─────────────┘         └─────────────┘         └─────────────┘
-                               ↓
-                        ┌─────────────┐
-                        │  Agent C    │
-                        │ (Codex)     │
-                        └─────────────┘
+┌──────────────┐    MCP     ┌──────────────┐    ACP     ┌──────────────┐
+│   Agent A    │ ←────────→ │   Ergatai    │ ←────────→ │   Agent B    │
+│  (Claude)    │            │  MCP Server  │            │   (Cursor)   │
+└──────────────┘            └──────┬───────┘            └──────────────┘
+                                   │
+                              ┌────▼─────┐
+                              │  NATS    │
+                              │ JetStream│
+                              └────┬─────┘
+                                   │
+                              ┌────▼─────┐
+                              │  Agent C  │
+                              │ (Codex)  │
+                              └──────────┘
 ```
 
-### Two-Layer Communication
+### Two-Layer Protocol Stack
 
-**MCP (Model Context Protocol)** - Agent → Ergatai
-- Agents connect to Ergatai as MCP clients
-- Ergatai acts as MCP server
-- Agents send messages and orchestration requests via MCP
-
-**ACP (Agent Client Protocol)** - Ergatai → Agent
-- Ergatai connects to agents as ACP client
-- Agents act as ACP servers
-- Ergatai forwards messages to target agents via ACP
+| Layer | Protocol | Direction | Purpose |
+|-------|----------|-----------|---------|
+| **Agent → Ergatai** | MCP (Streamable HTTP) | Inbound | Agents connect as MCP clients; send messages and orchestration requests |
+| **Ergatai → Agent** | ACP (JSON-RPC) | Outbound | Ergatai connects as ACP client; forwards messages to target agents |
+| **Internal** | NATS + JetStream | Event bus | Task routing, completion events, file change notifications |
 
 ### How It Works
 
-1. **Agent Registration**: When an agent connects via MCP, it's automatically registered
-2. **Message Sending**: Agent A calls `send_message` via MCP
-3. **Message Relay**: Ergatai receives the message and forwards it to Agent B via ACP
-4. **Response**: Agent B processes and responds through the same path
+1. **Agent Registration** — When an agent connects via MCP, it is automatically discovered and registered
+2. **Message Relay** — Agent A calls `send_message` via MCP; Ergatai forwards it to Agent B via ACP
+3. **Orchestration** — Submit a DAG definition; Ergatai parses dependencies and schedules tasks across agents
+4. **Conflict Prevention** — Token-based file locks ensure concurrent edits never corrupt the codebase
+
+---
 
 ## Features
 
 | Capability | Description |
 |------------|-------------|
-| **Agent-to-Agent Communication** | Agents can send messages to each other through Ergatai |
-| **Multi-Agent Orchestration** | Submit DAG workflows for coordinated task execution |
-| **Safe Concurrency** | Token-based file locking prevents conflicting edits |
-| **Agent Discovery** | Automatic agent registration via MCP connection |
-| **Agent Agnostic** | Supports any MCP-compatible agent — Claude Code, Cursor, Codex, and more |
-| **Local First** | All execution happens on your machine, no cloud dependencies |
-| **Crash Recovery** | Heartbeat monitoring and automatic lock reclamation |
+| **Agent-to-Agent Messaging** | Agents send and receive messages through Ergatai's relay |
+| **DAG Orchestration** | Submit markdown-formatted workflows with task dependencies |
+| **Safe Concurrency** | Token-based READ/WRITE/ADMIN locks with automatic reclamation |
+| **Agent Discovery** | Automatic registration when agents connect via MCP |
+| **Agent Agnostic** | Works with any MCP-compatible agent — Claude, Cursor, Codex, and more |
+| **Local First** | All execution runs locally; no data leaves your machine |
+| **Crash Recovery** | Heartbeat monitoring reclaims stale locks automatically |
+| **TLS Support** | Optional HTTPS with rustls for secure deployments |
+| **Rate Limiting** | Per-agent rate limits prevent spam and runaway loops |
+| **Prometheus Metrics** | `/metrics` endpoint for observability |
+
+---
 
 ## MCP Tools
 
-Ergatai exposes the following MCP tools:
+Ergatai exposes four tools to connected agents:
 
 ### `list_agents`
 
-List all connected agents and their status.
+List all connected agents and their current status.
 
+**Input:**
 ```json
-{
-  "include_capabilities": true
-}
+{ "include_capabilities": true }
 ```
 
 **Response:**
@@ -128,7 +182,7 @@ List all connected agents and their status.
     {
       "agent_id": "claude-code",
       "status": "active",
-      "capabilities": ["chat", "code"],
+      "capabilities": ["chat", "code", "tools"],
       "connected_at": "2026-08-14T10:00:00Z",
       "last_heartbeat": "2026-08-14T10:05:00Z"
     }
@@ -139,12 +193,13 @@ List all connected agents and their status.
 
 ### `send_message`
 
-Send a message to another agent.
+Send a message to another registered agent.
 
+**Input:**
 ```json
 {
   "target_agent_id": "cursor",
-  "message": "Please help me refactor src/auth.rs",
+  "message": "Please refactor src/auth.rs to use the new middleware pattern",
   "message_type": "request"
 }
 ```
@@ -152,209 +207,266 @@ Send a message to another agent.
 **Response:**
 ```json
 {
-  "message_id": "msg-123",
+  "message_id": "msg-a1b2c3",
   "status": "sent",
   "target_agent_id": "cursor",
   "message_type": "request",
-  "session_id": "session-456",
+  "session_id": "session-x9y8z7",
   "session_reused": true
 }
 ```
 
 ### `submit_orchestration`
 
-Submit a DAG workflow for multi-agent collaboration.
+Submit a DAG workflow for multi-agent parallel execution.
 
+**Input:**
 ```json
 {
-  "dag_definition": "## Task A\n- agent: claude-code\n- task: analyze code\n\n## Task B\n- agent: cursor\n- task: write tests\n- depends_on: [Task A]",
+  "dag_definition": "## Task A\n- agent: claude-code\n- task: Analyze codebase structure\n\n## Task B\n- agent: cursor\n- task: Write unit tests\n- depends_on: [Task A]\n\n## Task C\n- agent: codex\n- task: Run security scan\n- depends_on: [Task A]",
   "context": {
-    "project": "ergatai"
+    "project": "my-app",
+    "branch": "main"
   }
 }
 ```
 
 ### `check_dag_status`
 
-Check the status of a DAG execution.
+Check the execution progress of a submitted DAG.
 
+**Input:**
 ```json
-{
-  "dag_id": "dag-123"
-}
+{ "dag_id": "dag-abc123" }
 ```
+
+---
 
 ## Supported Agents
 
-Ergatai supports any agent that implements the MCP protocol:
+Ergatai works with any agent that implements the MCP protocol:
 
-| Agent | Status | Description |
-|-------|--------|-------------|
-| Claude Code | ✅ Verified | Anthropic's official CLI |
-| Cursor | ✅ Verified | Cursor IDE Agent |
-| Codex | ✅ Supported | OpenAI Codex CLI |
+| Agent | Status | Notes |
+|-------|--------|-------|
+| Claude Code | ✅ Verified | Native MCP support |
+| Cursor | ✅ Verified | IDE-integrated agent |
+| Codex | ✅ Supported | OpenAI CLI agent |
 | Goose | ✅ Supported | Block's AI assistant |
-| Cline | ✅ Supported | VS Code plugin |
-| Aider | ✅ Supported | Terminal AI coding tool |
-| Custom Agents | ✅ Supported | Any MCP-compatible agent |
+| Cline | ✅ Supported | VS Code extension |
+| Aider | ✅ Supported | Terminal coding agent |
+| Custom Agents | ✅ Supported | Any MCP-compatible runtime |
+
+---
 
 ## Project Structure
 
 ```
 ergatai/
 ├── crates/
-│   ├── ergatai-core/      # Core library (business logic)
-│   ├── ergatai-api/       # MCP Server (main entry point)
+│   ├── ergatai-core/      # Core library — business logic, agents, NATS, DAG
+│   ├── ergatai-api/       # MCP server + REST API (main entry point)
 │   │   └── src/
-│   │       ├── main.rs
+│   │       ├── main.rs             # Server bootstrap, routes, middleware
 │   │       └── mcp/
-│   │           ├── server.rs         # MCP server implementation
-│   │           ├── tools.rs          # MCP tool handlers
-│   │           ├── agent_registry.rs # Agent tracking
-│   │           └── message_relay.rs  # ACP message forwarding
-│   ├── ergatai-acp/       # ACP protocol implementation
-│   ├── ergatai-dag/       # DAG orchestration engine
-│   ├── ergatai-lock/      # File access control
-│   ├── ergatai-nats/      # NATS messaging
-│   ├── ergatai-agent/     # Agent management
-│   ├── ergatai-collab/    # Collaboration logic
-│   └── ergatai-error/     # Error handling
+│   │           ├── server.rs       # MCP Streamable HTTP server
+│   │           ├── tools.rs        # MCP tool handlers (list/send/submit/check)
+│   │           ├── agent_registry.rs # Agent discovery and tracking
+│   │           └── message_relay.rs  # NATS → ACP forwarding
+│   ├── ergatai-acp/       # Agent Client Protocol implementation
+│   ├── ergatai-dag/       # DAG parser, scheduler, and dependency resolution
+│   ├── ergatai-lock/      # Token-based file access control
+│   ├── ergatai-nats/      # Embedded NATS server + JetStream streams
+│   ├── ergatai-agent/     # Agent config, discovery, and hosted agents
+│   ├── ergatai-collab/    # Cross-agent collaboration primitives
+│   └── ergatai-error/     # Shared error types
 ├── docs/
 │   ├── MCP_CONFIG_GUIDE.md
-│   └── superpowers/specs/
+│   └── ACP_SDK_GUIDE.md
+├── examples/
+│   └── simple-agent/      # Minimal MCP agent example
 ├── Cargo.toml
 └── README.md
 ```
+
+---
 
 ## Development
 
 ### Build
 
 ```bash
-# Build all crates
+# Build everything
 cargo build --workspace
 
-# Build release version
+# Release build
 cargo build --release --workspace
 
-# Build specific crate
+# Single crate
 cargo build -p ergatai-api
 ```
 
-### Run Tests
+### Run
 
 ```bash
-# Run all tests
+# Development
+cargo run -p ergatai-api -- --port 3000
+
+# Verbose logging
+RUST_LOG=debug cargo run -p ergatai-api -- --port 3000
+
+# With authentication token
+ERGATAI_API_TOKEN=secret cargo run -p ergatai-api -- --port 3000
+```
+
+### Tests
+
+```bash
 cargo test --workspace
-
-# Run tests for a specific crate
-cargo test -p ergatai-api
-
-# Run with output
-cargo test --workspace -- --nocapture
+cargo test --workspace -- --nocapture   # with output
 ```
 
 ### Code Quality
 
 ```bash
-# Lint
 cargo clippy --workspace -- -D warnings
-
-# Format
 cargo fmt --all
-
-# Check formatting
 cargo fmt --all -- --check
 ```
 
-### Run MCP Server
-
-```bash
-# Development mode
-cargo run -p ergatai-api -- --port 3000
-
-# With verbose logging
-RUST_LOG=debug cargo run -p ergatai-api -- --port 3000
-
-# With authentication
-ERGATAI_API_TOKEN=your-token cargo run -p ergatai-api -- --port 3000
-```
+---
 
 ## Tech Stack
 
 | Component | Technology | Version |
 |-----------|-----------|---------|
 | Language | Rust | 2021 edition |
-| MCP Protocol | Custom JSON-RPC | 2024-11-05 |
+| MCP Protocol | Streamable HTTP | 2024-11-05 |
 | Agent Protocol | agent-client-protocol | 2.x |
 | Messaging | async-nats + JetStream | 0.38 |
-| Database | rusqlite (SQLite) | 0.31 |
+| Database | rusqlite (embedded SQLite) | 0.31 |
 | HTTP Server | axum | 0.7 |
+| TLS | rustls (via axum-server) | — |
 | Async Runtime | tokio | 1.36 |
 | Serialization | serde + serde_json | 1.0 |
+| CLI | clap | 4.5 |
+| Observability | Prometheus (metrics crate) | — |
+
+---
 
 ## File Access Control
 
-When multiple agents collaborate on the same codebase, Ergatai provides safe concurrent file access:
+When multiple agents collaborate on the same repository, Ergatai ensures safe concurrent writes:
 
-- **Token-based locking**: READ/WRITE/ADMIN modes
-- **Heartbeat monitoring**: Automatic timeout and lock reclamation
-- **Git snapshots**: Automatic snapshots before writes for rollback
-- **Conflict arbitration**: Priority-based conflict resolution
-- **Audit logging**: Complete security audit trail
+- **Token-based locking** — READ / WRITE / ADMIN modes with explicit acquire/release
+- **Heartbeat monitoring** — Stale locks are reclaimed after 90s of inactivity
+- **Git snapshots** — Automatic pre-write snapshots enable rollback on conflict
+- **Conflict arbitration** — Priority-based resolution when two agents contend for the same file
+- **Audit logging** — Every lock acquire, release, and conflict is logged for traceability
+
+---
+
+## FAQ
+
+**Should I use Ergatai or wire agents directly?**
+
+Use Ergatai when you have 2+ agents that need to coordinate — it removes the need for each agent to know about every other agent. Use direct wiring only for simple point-to-point communication.
+
+**Can I use this with my own custom agent?**
+
+Yes. As long as your agent implements the MCP protocol (can connect as an MCP client), Ergatai will discover it automatically and enable messaging.
+
+**Does Ergatai send data to the cloud?**
+
+No. Ergatai runs entirely locally. NATS, the MCP server, and all message forwarding happen on your machine. No telemetry, no phoning home.
+
+**How does Ergatai handle agent crashes?**
+
+The agent reaper checks heartbeats every 30s. If an agent goes silent for 90s, it is marked disconnected and its locks are released. Pending messages to that agent are queued until it reconnects.
+
+**Can I add custom MCP tools?**
+
+Yes. Ergatai's tool handlers live in `crates/ergatai-api/src/mcp/tools.rs`. You can extend them with your own logic, or fork the server and add new tools following the same pattern.
+
+**What's the difference between the API server and the core library?**
+
+`ergatai-api` is the standalone MCP server (the entry point you run). `ergatai-core` is the reusable library — if you want to embed Ergatai's collaboration logic inside another application, you depend on `ergatai-core`.
+
+---
 
 ## Roadmap
 
-### Current Phase (v0.1.0)
+### v0.1.0 — Current
 
-- [x] MCP Server implementation
-- [x] Agent auto-registration
-- [x] Message relay infrastructure
-- [x] Agent discovery
-- [ ] Complete ACP message forwarding
-- [ ] DAG orchestration integration
-- [ ] End-to-end testing
+- [x] MCP server with Streamable HTTP transport
+- [x] Agent auto-registration on connect
+- [x] Message relay (MCP → NATS → ACP)
+- [x] Agent discovery and heartbeat
+- [x] DAG orchestration engine
+- [x] Token-based file locking
+- [x] Prometheus metrics
+- [x] TLS support
+- [ ] End-to-end integration tests
+- [ ] Web dashboard
 
-### Near-term Plans
+### Near-term
 
 - [ ] On-demand ACP session spawning
-- [ ] Agent health checks and heartbeat
-- [ ] Enhanced error handling
-- [ ] Performance optimization
-- [ ] Documentation improvements
-
-### Future Plans
-
-- [ ] Web dashboard for monitoring
-- [ ] Plugin system for custom tools
-- [ ] Agent performance analytics
+- [ ] Enhanced error reporting across agent boundaries
+- [ ] Persistent message queue (retry on reconnect)
+- [ ] Plugin system for custom tool handlers
 - [ ] Multi-workspace support
-- [ ] Enterprise features
+
+### Future
+
+- [ ] GUI dashboard for monitoring agent activity
+- [ ] Agent performance analytics
+- [ ] Cloud-hosted mode (optional remote NATS)
+- [ ] Enterprise features (SAML, audit export)
+
+---
 
 ## Security
 
-Recent security improvements (2026-08-13):
+Security improvements (2026-08-14):
 
-- ✅ API path traversal protection + Bearer token authentication
-- ✅ Sensitive file detection enhanced
-- ✅ Configuration file permission protection (`0o600`)
-- ✅ Install command whitelist hardening
-- ✅ NATS zombie process fix
-- ✅ Signal handler improvements
-- ✅ Lock manager correctness enhancements
+- ✅ API path traversal protection
+- ✅ Bearer token authentication (`--api-token`)
+- ✅ Sensitive file detection
+- ✅ Configuration file permission hardening (`0o600`)
+- ✅ Install command whitelist
+- ✅ NATS zombie process cleanup
+- ✅ Signal handler for graceful shutdown
+- ✅ Lock manager correctness fixes
+- ✅ Rate limiting per agent (1 req/s, burst 20)
+
+---
 
 ## Contributing
 
-Contributions are welcome! Please feel free to submit issues and pull requests.
+Contributions are welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) before submitting a pull request.
+
+---
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the MIT License — see [LICENSE](LICENSE) for details.
 
-## Acknowledgments
+---
 
-- [agent-client-protocol](https://github.com/anthropics/agent-client-protocol) - ACP protocol implementation
-- [async-nats](https://github.com/nats-io/nats.rs) - NATS client
-- [axum](https://github.com/tokio-rs/axum) - Web framework
-- [tokio](https://tokio.rs/) - Async runtime
-- [Model Context Protocol](https://modelcontextprotocol.io/) - MCP specification
+## Citation
+
+If you use Ergatai in your research or project, please cite:
+
+```bibtex
+@software{ergatai2026,
+  author = {Ergatai Team},
+  title = {Ergatai: Multi-Agent Collaboration Middleware},
+  year = {2026},
+  publisher = {GitHub},
+  url = {https://github.com/ergatai/ergatai}
+}
+```
+
+---
+
+Made with ❤️ by the Ergatai team

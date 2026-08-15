@@ -8,7 +8,7 @@
 //!
 //! ## Architecture
 //!
-//! ```
+//! ```text
 //! Watchdog Background Task:
 //!   ├── Check all active tokens every 10s
 //!   │   ├── heartbeat_at + 3x interval < now → timeout
@@ -230,7 +230,8 @@ impl Watchdog {
             let mut states = timeout_states.lock().await;
             let busy = busy_status.lock().await;
 
-            let mut actions = Vec::new();
+            // Pre-allocate for the number of active tokens
+            let mut actions = Vec::with_capacity(active_tokens.len());
 
             for token in &active_tokens {
                 let token_id = token.id.as_str().to_string();

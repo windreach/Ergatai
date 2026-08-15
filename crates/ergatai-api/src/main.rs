@@ -31,9 +31,7 @@ use tower_governor::{
     governor::GovernorConfigBuilder,
     key_extractor::KeyExtractor,
 };
-use tracing::{error, info, warn};
-
-use ergatai_core::acp::manager::{self as acp_manager, SessionKind};
+use ergatai_core::acp::manager as acp_manager;
 // TODO(middleware): Re-enable after HTTP client migration
 // use ergatai_core::acp::sdk_session::spawn_session_task_with_kind;
 // use ergatai_core::agent::config::{get_agent_config, AgentConfig};
@@ -51,6 +49,7 @@ use mcp::{create_mcp_service, start_nats_acp_forwarder};
 struct AppState {
     /// Default working directory for new chat sessions when the request does not
     /// provide one. Falls back to the process cwd.
+    #[allow(dead_code)] // Reserved for future chat session management
     default_cwd: String,
     /// Optional API token for authentication. If set, all requests must include
     /// an `Authorization: Bearer <token>` header.
@@ -225,14 +224,15 @@ async fn async_main(args: Args) -> Result<()> {
 
     // Initialize MCP server with Streamable HTTP transport
     let mcp_registry = std::sync::Arc::new(mcp::AgentRegistry::new());
+    let peer_registry = mcp::server::new_peer_registry();
     let mcp_cancellation_token = CancellationToken::new();
-    let ergatai_own_address = format!("{}:{}", args.host, args.port);
     let mcp_service = create_mcp_service(
         mcp_registry.clone(),
+        peer_registry.clone(),
         mcp_cancellation_token.clone(),
-        ergatai_own_address,
     );
     tracing::info!("MCP server initialized (protocol 2025-06-18, Streamable HTTP)");
+    tracing::info!("Agent messaging: MCP notification (no ACP HTTP endpoint required)");
 
     // Initialize NATS (embedded server + JetStream)
     match nats::init_nats().await {
@@ -247,9 +247,9 @@ async fn async_main(args: Args) -> Result<()> {
         }
     }
 
-    // Start NATS → ACP message forwarder
+    // Start NATS → ACP message forwarder (legacy, kept for backward compatibility)
     start_nats_acp_forwarder(mcp_registry.clone(), mcp_cancellation_token.clone());
-    tracing::info!("NATS → ACP message forwarder started");
+    tracing::info!("NATS → ACP message forwarder started (legacy)");
 
     // Build application router
     let state = app_state_with_token(args.api_token.clone()).clone();
@@ -402,6 +402,7 @@ async fn metrics_endpoint() -> impl IntoResponse {
 // ── Request / response types ──
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)] // Reserved for future chat session API
 struct CreateChatRequest {
     /// Agent name to start the session with (e.g. "claude", "codex", or a hosted agent name).
     agent: String,
@@ -411,6 +412,7 @@ struct CreateChatRequest {
 }
 
 #[derive(Debug, Serialize)]
+#[allow(dead_code)] // Reserved for future chat session API
 struct CreateChatResponse {
     session_id: String,
     agent: String,
@@ -423,6 +425,7 @@ struct ErrorResponse {
 }
 
 #[derive(Debug, Serialize)]
+#[allow(dead_code)] // Reserved for future agent listing API
 struct AgentSummary {
     name: String,
     display_name: Option<String>,
@@ -503,6 +506,7 @@ async fn auth_middleware(
 /// - Don't exist or aren't directories
 /// - Contain path traversal attempts (..)
 /// - Are absolute paths outside the allowed base (if configured)
+#[allow(dead_code)] // Reserved for future chat session validation
 fn validate_cwd(cwd: &str) -> Result<PathBuf, String> {
     let path = Path::new(cwd);
 

@@ -35,6 +35,7 @@ pub struct AgentRegistry {
 #[derive(Debug, Clone)]
 struct AgentRecord {
     pub info: AgentInfo,
+    #[allow(dead_code)] // Reserved for future MCP connection tracking
     pub mcp_connection_id: String,
     pub acp_connection_id: Option<String>,
 }

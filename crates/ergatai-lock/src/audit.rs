@@ -143,7 +143,8 @@ impl AuditManager {
             "SELECT timestamp, agent_id, session_id, action, file_path, mode, reason
              FROM audit_log WHERE 1=1",
         );
-        let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        // Pre-allocate for up to 4 filter parameters
+        let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::with_capacity(4);
 
         if let Some(agent) = agent_id {
             query.push_str(" AND agent_id = ?");
@@ -339,7 +340,8 @@ impl AuditManager {
         conn: &Connection,
         period_start: &DateTime<Utc>,
     ) -> Result<Vec<SuspiciousActivity>, ErgataiError> {
-        let mut activities = Vec::new();
+        // Pre-allocate with a reasonable default
+        let mut activities = Vec::with_capacity(8);
         let period_str = period_start.to_rfc3339();
 
         // 1. Agents with high conflict rates (use params![] — 🔴-8 fix)
@@ -802,7 +804,7 @@ mod tests {
                 ).unwrap();
             }
             // Conflict operations
-            for i in 0..15 {
+            for _i in 0..15 {
                 conn.execute(
                     "INSERT INTO audit_log (timestamp, agent_id, session_id, action, file_path, mode)
                      VALUES (datetime('now'), 'agent2', 'session2', 'WRITE_CONFLICT', 'conflict.rs', 'WRITE')",
@@ -827,7 +829,7 @@ mod tests {
         {
             let conn = manager.conn.lock().unwrap();
             // High conflict rate agent
-            for i in 0..20 {
+            for _i in 0..20 {
                 conn.execute(
                     "INSERT INTO audit_log (timestamp, agent_id, session_id, action, file_path, mode)
                      VALUES (datetime('now'), 'bad-agent', 'session1', 'WRITE_CONFLICT', 'file.rs', 'WRITE')",
