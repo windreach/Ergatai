@@ -346,7 +346,7 @@ RUST_LOG=trace cargo run --bin ergatai -- chat
 
 ### Configuration
 - `Cargo.toml` - Workspace configuration
-- `ARCHITECTURE.md` - Detailed architecture documentation
+- `docs/dev/ARCHITECTURE.md` - Detailed architecture documentation
 
 ## Building & Releasing
 

@@ -283,9 +283,22 @@ impl ErgataiMcpServer {
             }
             Err(e) => {
                 error!("Failed to send MCP notification to {}: {}", resolved_agent_id, e);
+
+                // Transport closed — the target agent disconnected abruptly.
+                // Auto-unregister it so list_agents stays accurate.
+                warn!("Agent {} transport closed, auto-unregistering", resolved_agent_id);
+                let registry = self.registry.clone();
+                let peer_registry = self.peer_registry.clone();
+                let agent_id = resolved_agent_id.clone();
+                tokio::spawn(async move {
+                    registry.unregister_agent(&agent_id).await;
+                    peer_registry.write().await.remove(&agent_id);
+                    info!("Agent {} auto-unregistered (transport closed)", agent_id);
+                });
+
                 Ok(CallToolResult::error(vec![ContentBlock::text(format!(
-                    "Failed to deliver message: {}",
-                    e
+                    "Agent {} is no longer connected (transport closed). It has been auto-unregistered.",
+                    resolved_agent_id
                 ))]))
             }
         }
@@ -442,7 +455,7 @@ pub fn create_mcp_service(
     cancellation_token: CancellationToken,
 ) -> StreamableHttpService<ErgataiMcpServer, LocalSessionManager> {
     let config = StreamableHttpServerConfig::default()
-        .with_sse_keep_alive(Some(std::time::Duration::from_secs(15)))
+        .with_sse_keep_alive(Some(std::time::Duration::from_secs(5)))
         .with_sse_retry(Some(std::time::Duration::from_secs(3)))
         .with_json_response(true)
         .with_cancellation_token(cancellation_token)
@@ -455,4 +468,44 @@ pub fn create_mcp_service(
         Default::default(),
         config,
     )
+}
+
+/// Start a background task that periodically checks all peer connections
+/// and removes agents whose MCP transport has been closed (e.g. abrupt disconnect).
+///
+/// This complements the `Drop`-based cleanup which only fires on graceful session close.
+/// When a client is killed (SIGKILL, network drop), the SSE session may linger until
+/// the transport detects the broken connection. The reaper proactively cleans these up.
+pub fn start_peer_reaper(
+    registry: Arc<AgentRegistry>,
+    peer_registry: PeerRegistry,
+    cancellation_token: CancellationToken,
+) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+        loop {
+            tokio::select! {
+                _ = cancellation_token.cancelled() => {
+                    info!("Peer reaper shutting down");
+                    break;
+                }
+                _ = interval.tick() => {
+                    let stale_peers: Vec<String> = {
+                        let peers = peer_registry.read().await;
+                        peers.iter()
+                            .filter(|(_, peer)| peer.is_transport_closed())
+                            .map(|(id, _)| id.clone())
+                            .collect()
+                    };
+
+                    for agent_id in stale_peers {
+                        warn!("Peer reaper: detected dead transport for {}, cleaning up", agent_id);
+                        registry.unregister_agent(&agent_id).await;
+                        peer_registry.write().await.remove(&agent_id);
+                        info!("Peer reaper: agent {} unregistered", agent_id);
+                    }
+                }
+            }
+        }
+    });
 }

@@ -1,0 +1,28 @@
+# CodeGraph 索引排除配置
+# 这些目录不应被索引，因为它们不是项目代码的一部分
+
+# 独立 git 仓库（vendored SDK）
+docs/acp-sdk/
+
+# 孤立演示代码
+network-demo/
+
+# 废弃代码（已弃用但仍在源码树中）
+docs/dev/deprecated-engines/
+
+# 构建产物
+out/
+dist/
+build/
+target/
+
+# 依赖目录
+node_modules/
+
+# 测试覆盖率报告
+coverage/
+
+# 临时文件
+*.tmp
+*.temp
+.cache/

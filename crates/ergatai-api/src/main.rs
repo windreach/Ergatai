@@ -42,7 +42,7 @@ use ergatai_core::nats;
 
 // MCP module
 mod mcp;
-use mcp::{create_mcp_service, start_nats_acp_forwarder};
+use mcp::{create_mcp_service, start_nats_acp_forwarder, start_peer_reaper};
 
 /// Shared application state available to all handlers.
 #[derive(Clone)]
@@ -233,6 +233,15 @@ async fn async_main(args: Args) -> Result<()> {
     );
     tracing::info!("MCP server initialized (protocol 2025-06-18, Streamable HTTP)");
     tracing::info!("Agent messaging: MCP notification (no ACP HTTP endpoint required)");
+
+    // Start background peer reaper — detects abrupt disconnects (kill, network drop)
+    // and cleans up stale agent registrations within 10 seconds.
+    start_peer_reaper(
+        mcp_registry.clone(),
+        peer_registry.clone(),
+        mcp_cancellation_token.clone(),
+    );
+    tracing::info!("Peer reaper started (10s interval, auto-cleans dead transports)");
 
     // Initialize NATS (embedded server + JetStream)
     match nats::init_nats().await {

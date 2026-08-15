@@ -32,16 +32,8 @@ npm-debug.log*
 # Claude binary (downloaded at build time)
 resources/bin/
 
-# AI tool artifacts & config (local-only)
-.plan/
-.architecture/
-.codegraph/
-.tasks/
-.superpowers/
-.deprecated-engines/
-.codegraphignore
-.rustsafe-*.md
-ocr-review-report.md
+# Development docs (local-only)
+docs/dev/
 
 # AI-generated docs (local-only)
 docs/superpowers/
