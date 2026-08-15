@@ -12,7 +12,6 @@ ergatai-nats = { path = "../ergatai-nats" }
 ergatai-dag = { path = "../ergatai-dag" }
 ergatai-lock = { path = "../ergatai-lock" }
 ergatai-agent = { path = "../ergatai-agent" }
-ergatai-acp = { path = "../ergatai-acp" }
 ergatai-collab = { path = "../ergatai-collab" }
 
 # Async
@@ -40,16 +39,9 @@ rusqlite.workspace = true
 # NATS
 async-nats.workspace = true
 
-# ACP Protocol SDK
-agent-client-protocol = { version = "2", features = ["unstable_protocol_v2"] }
-agent-client-protocol-tokio = "0.11"
-
 # Utilities
 uuid.workspace = true
 chrono.workspace = true
-
-# HTTP client (for ACP SDK)
-reqwest = { version = "0.11", features = ["json", "stream"] }
 
 # File system
 dirs = "5.0"
@@ -78,7 +70,6 @@ sha2 = "0.10"
 rand = "0.8"
 
 # Encoding
-url = { version = "2.0", features = ["serde"] }
 toml = "1.0"
 
 # Filter expressions

@@ -1,4 +1,4 @@
-# 前端接口文档 - ACP Chat Protocol
+# 前端接口文档 - Agent Chat Protocol
 
 > 本文档描述前端（React + @ai-sdk/react）期望接收的所有消息格式
 

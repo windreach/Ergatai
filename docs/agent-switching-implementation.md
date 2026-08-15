@@ -11,7 +11,7 @@
 dag.getAgentsStatus() → Array<{
   task_id: string
   agent_name: string
-  session_id: string | null  // ACP session ID
+  session_id: string | null  // Agent session ID（tmux 注入 / MCP 连接）
   status: string
 }>
 ```
@@ -64,7 +64,7 @@ onSelectAgent(agentId) {
   
   // 3. 在所有 SubChats 中找到匹配的
   const targetSubChat = allSubChats.find(
-    sc => sc.acpSessionId === sessionId
+    sc => sc.sessionId === sessionId
   )
   
   // 4. 切换到该 SubChat
@@ -81,7 +81,7 @@ onSelectAgent(agentId) {
 ┌─────────────────────────────────────────────────────┐
 │ 1. Rust DagScheduler 创建 Agent                     │
 │    task_id: "n1"                                    │
-│    session_id: "acp-session-xyz"                    │
+│    session_id: "agent-session-xyz"                    │
 └─────────────────────────────────────────────────────┘
     ↓
 ┌─────────────────────────────────────────────────────┐
@@ -123,9 +123,9 @@ onSelectAgent(agentId) {
 |------|--------|------|
 | DAG Node | `node.id` (e.g., "n1") | `dag.getState()` |
 | Task | `task_id` | `dag.getAgentsStatus()` |
-| ACP Session | `session_id` | `dag.getAgentsStatus()` |
+| Agent Session | `session_id` | `dag.getAgentsStatus()` |
 | SubChat | `subChatId` | `allSubChats[]` |
-| **关联** | `subChat.acpSessionId === agent.sessionId` | 前端匹配 |
+| **关联** | `subChat.sessionId === agent.sessionId` | 前端匹配 |
 
 ---
 
@@ -145,7 +145,7 @@ onSelectAgent(agentId) {
    ## Task C - agent-c: 写测试
    ```
 
-3. **DagDetector 自动提交** → Rust 创建 3 个 ACP Sessions
+3. **DagDetector 自动提交** → Rust 创建 3 个 Agent Sessions（tmux 注入 / MCP 连接）
 
 4. **AgentsPanel 显示**:
    ```
@@ -157,8 +157,8 @@ onSelectAgent(agentId) {
    ```
 
 5. **用户点击 "Agent-A: 分析代码"**:
-   - 查找 agent.sessionId = "acp-session-aaa"
-   - 查找 subChat.acpSessionId = "acp-session-aaa"
+   - 查找 agent.sessionId = "agent-session-aaa"
+   - 查找 subChat.sessionId = "agent-session-aaa"
    - 找到 subChat.id = "subchat-123"
    - 调用 `setActiveSubChat("subchat-123")`
 
@@ -186,7 +186,7 @@ console.table(agents)
 // 在 React DevTools 中
 // 找到 AgentsSubChatsSidebar 组件
 // 查看 allSubChats 数组
-// 每个 subChat 都有 acpSessionId
+// 每个 subChat 都有 sessionId
 ```
 
 ### 3. 测试切换逻辑
@@ -216,7 +216,7 @@ DEBUG=agents:* bun run dev
 当前使用 2 秒轮询，可以改为 NATS 事件推送：
 
 ```typescript
-// 监听 ACP session 创建事件
+// 监听 Agent session 创建事件
 useEffect(() => {
   const unsubscribe = trpc.dag.onAgentCreated.subscribe(
     {},
@@ -255,8 +255,8 @@ function sendMessageToAgent(agentId: string, message: string) {
   const agent = agents.find(a => a.agentId === agentId)
   const subChat = findSubChatBySessionId(agent.sessionId)
   
-  // 调用 trpc.acp.sendMessage
-  trpc.acp.sendMessage.mutate({
+  // 调用 trpc.agent.sendMessage
+  trpc.agent.sendMessage.mutate({
     subChatId: subChat.id,
     message,
   })

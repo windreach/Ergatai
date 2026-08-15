@@ -2,7 +2,7 @@
 
 ## ✅ 已实现
 
-在第一次 ACP prompt 时自动注入系统指令，告诉主 Agent 如何使用 DAG 多 Agent 协作。
+在第一次 agent prompt 时自动注入系统指令，告诉主 Agent 如何使用 DAG 多 Agent 协作。
 
 ---
 
@@ -51,7 +51,7 @@
 
 ### 重要说明
 
-- 每个 DAG task 会创建**独立的 ACP session**
+- 每个 DAG task 会创建**独立的 agent session**（tmux 注入或 MCP 连接）
 - 不是 Claude Code 的 sub-agent，是 Ergatai 的并行任务系统
 - 任务可以并行执行，有文件锁保护
 ```
@@ -62,7 +62,7 @@
 
 ### 1. 指令注入逻辑
 
-**文件**: `src/main/lib/trpc/routers/acp.ts`
+**文件**: `src/main/lib/trpc/routers/agent.ts`
 
 ```typescript
 // 导入系统指令
@@ -73,7 +73,7 @@ const finalPrompt = sessionId
   ? prompt // 恢复的 session，不重复注入
   : prependSystemInstruction(prompt) // 新 session，注入指令
 
-await acpSendPrompt(acpSessionId, finalPrompt)
+await sendPrompt(sessionId, finalPrompt)
 ```
 
 ### 2. 注入条件
@@ -200,12 +200,12 @@ bun run dev
 
 ```bash
 # 启用详细日志
-DEBUG=acp:* bun run dev
+DEBUG=agent:* bun run dev
 ```
 
 日志会显示：
 ```
-[ACP] Sending prompt (length=1234): ## Ergatai 多 Agent 协作...
+[Agent] Sending prompt (length=1234): ## Ergatai 多 Agent 协作...
 ```
 
 ### 2. 验证指令效果
@@ -258,7 +258,7 @@ const enableInstructions = !settings.disableErgataiInstructions
 | 文件 | 作用 |
 |------|------|
 | `src/main/lib/ergatai-system-instruction.ts` | 系统指令定义 |
-| `src/main/lib/trpc/routers/acp.ts` | 指令注入逻辑 |
+| `src/main/lib/trpc/routers/agent.ts` | 指令注入逻辑 |
 | `src/main/lib/dag-detector.ts` | DAG 检测和自动提交 |
 | `src-rust/src/cross_agent/dag_scheduler.rs` | DAG 调度器 |
 

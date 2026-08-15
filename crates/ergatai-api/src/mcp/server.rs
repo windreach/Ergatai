@@ -21,9 +21,10 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
-use ergatai_acp::agent_registry::AgentRegistry;
+use ergatai_core::agent_registry::AgentRegistry;
+use ergatai_core::tmux::TmuxManager;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Shared registry of MCP peer handles for pushing notifications to agents.
@@ -43,6 +44,8 @@ pub struct ErgataiMcpServer {
     registry: Arc<AgentRegistry>,
     /// Shared peer registry for pushing notifications to agents
     peer_registry: PeerRegistry,
+    /// Tmux manager for injecting messages into agent panes
+    tmux_manager: Arc<TmuxManager>,
     /// Per-session agent ID (set during initialize, used in send_message)
     session_agent_id: Arc<RwLock<Option<String>>>,
     /// Tracks consecutive send_message failures per target agent.
@@ -64,11 +67,13 @@ impl ErgataiMcpServer {
     pub fn new(
         registry: Arc<AgentRegistry>,
         peer_registry: PeerRegistry,
+        tmux_manager: Arc<TmuxManager>,
     ) -> Self {
         Self {
             tool_router: Self::tool_router(),
             registry,
             peer_registry,
+            tmux_manager,
             session_agent_id: Arc::new(RwLock::new(None)),
             send_failures: Arc::new(RwLock::new(HashMap::new())),
         }
@@ -180,10 +185,6 @@ impl ErgataiMcpServer {
                     "last_heartbeat": agent.last_heartbeat,
                 });
 
-                if let Some(ref endpoint) = agent.acp_endpoint {
-                    agent_json["acp_endpoint"] = serde_json::json!(endpoint);
-                }
-
                 if include_capabilities {
                     if let Some(caps) = &agent.capabilities {
                         agent_json["capabilities"] = serde_json::json!(caps);
@@ -204,9 +205,12 @@ impl ErgataiMcpServer {
         )]))
     }
 
-    /// Send a message to another agent via MCP notification.
-    /// The target agent receives it as a custom notification on their MCP connection.
-    #[tool(description = "Send a message to another agent via MCP notification")]
+    /// Send a message to another agent.
+    ///
+    /// Delivery order:
+    /// 1. Tmux injection — if target agent is running in a tmux pane, inject message directly.
+    /// 2. MCP custom notification — fallback when tmux is not available.
+    #[tool(description = "Send a message to another agent (tmux injection preferred, MCP notification fallback)")]
     async fn send_message(
         &self,
         params: Parameters<SendMessageParams>,
@@ -221,7 +225,10 @@ impl ErgataiMcpServer {
         );
 
         // Find the matching agent - support both exact ID and name prefix
+        // Check both MCP registry and tmux manager
         let agents = self.registry.list_agents().await;
+        let tmux_agents = self.tmux_manager.list_agents().await;
+
         let matching_agent = agents
             .iter()
             .find(|a| {
@@ -230,30 +237,24 @@ impl ErgataiMcpServer {
                 // Or prefix match (e.g., "simple-agent" matches "simple-agent@ead00fad")
                 || a.agent_id.starts_with(&format!("{}@", target_agent_id))
             })
-            .map(|a| a.agent_id.clone());
+            .map(|a| a.agent_id.clone())
+            .or_else(|| {
+                // Check tmux agents
+                tmux_agents
+                    .iter()
+                    .find(|a| {
+                        a.agent_id == *target_agent_id
+                        || a.agent_id.starts_with(&format!("{}@", target_agent_id))
+                    })
+                    .map(|a| a.agent_id.clone())
+            });
 
         let resolved_agent_id = match matching_agent {
             Some(id) => id,
             None => {
                 return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
-                    "Agent {} not found. Agent must connect via MCP first.",
+                    "Agent {} not found. Agent must connect via MCP or be running in tmux.",
                     target_agent_id
-                ))]));
-            }
-        };
-
-        // Look up the target agent's peer handle
-        let peer = {
-            let peers = self.peer_registry.read().await;
-            peers.get(&resolved_agent_id).cloned()
-        };
-
-        let peer = match peer {
-            Some(p) => p,
-            None => {
-                return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
-                    "Agent {} has no active MCP connection. Peer handle not found.",
-                    resolved_agent_id
                 ))]));
             }
         };
@@ -268,76 +269,21 @@ impl ErgataiMcpServer {
             .unwrap_or_default()
             .as_secs();
 
-        // Build the notification payload
-        let payload = serde_json::json!({
-            "from_agent": from_agent,
-            "to_agent": resolved_agent_id,
-            "content": message,
-            "message_type": message_type,
-            "timestamp": timestamp,
-        });
-
-        // Send as MCP custom notification
-        let notification = CustomNotification::new(
-            "ergatai/message",
-            Some(payload),
-        );
-
-        match peer.send_notification(ServerNotification::CustomNotification(notification)).await {
-            Ok(_) => {
-                // Success — reset the failure counter for this target
-                self.send_failures.write().await.remove(&resolved_agent_id);
-
-                let message_id = uuid::Uuid::new_v4().to_string();
-                let response_json = serde_json::json!({
-                    "message_id": message_id,
-                    "status": "delivered",
-                    "target_agent_id": resolved_agent_id,
-                    "message_type": message_type,
-                    "delivery_method": "mcp_notification",
-                    "note": "Message delivered via MCP notification."
-                });
-
-                Ok(CallToolResult::success(vec![ContentBlock::text(
-                    serde_json::to_string_pretty(&response_json).unwrap_or_default(),
-                )]))
-            }
-            Err(e) => {
-                error!("Failed to send MCP notification to {}: {}", resolved_agent_id, e);
-
-                // Increment consecutive failure counter for this target
-                let mut failures = self.send_failures.write().await;
-                let count = failures.entry(resolved_agent_id.clone()).or_insert(0);
-                *count += 1;
-                let current = *count;
-
-                if current >= MAX_SEND_FAILURES {
-                    warn!(
-                        "Agent {} reached {}/{} consecutive send failures, auto-unregistering",
-                        resolved_agent_id, current, MAX_SEND_FAILURES
-                    );
-                    let registry = self.registry.clone();
-                    let peer_registry = self.peer_registry.clone();
-                    let agent_id = resolved_agent_id.clone();
-                    failures.remove(&resolved_agent_id);
-                    tokio::spawn(async move {
-                        do_unregister_agent(
-                            &registry, &peer_registry, &agent_id,
-                            &format!("{} consecutive send failures", MAX_SEND_FAILURES),
-                        ).await;
-                    });
-                    Ok(CallToolResult::error(vec![ContentBlock::text(format!(
-                        "Agent {} has been auto-unregistered after {} consecutive send failures.",
-                        resolved_agent_id, MAX_SEND_FAILURES
-                    ))]))
-                } else {
-                    Ok(CallToolResult::error(vec![ContentBlock::text(format!(
-                        "Failed to deliver message to {} ({}/{} consecutive failures)",
-                        resolved_agent_id, current, MAX_SEND_FAILURES
-                    ))]))
-                }
-            }
+        // ── Try tmux injection first (preferred method) ──
+        if let Ok(result) = self.try_tmux_injection(&resolved_agent_id, &from_agent, message).await {
+            self.send_failures.write().await.remove(&resolved_agent_id);
+            return Ok(result);
         }
+
+        // ── Fallback: MCP custom notification ──
+        self.send_mcp_notification(
+            &resolved_agent_id,
+            &from_agent,
+            message,
+            message_type,
+            timestamp,
+        )
+        .await
     }
 
     /// Submit a DAG workflow for multi-agent collaboration
@@ -347,20 +293,68 @@ impl ErgataiMcpServer {
         params: Parameters<SubmitOrchestrationParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let dag_definition = &params.0.dag_definition;
-        let _context = &params.0.context;
+        let context_value = &params.0.context;
 
         info!("Submitting DAG orchestration ({} bytes)", dag_definition.len());
 
-        // TODO: Integrate with actual DAG scheduler
-        // The dag_definition contains the markdown-formatted DAG that should
-        // be parsed and executed by DagScheduler
-        let dag_id = uuid::Uuid::new_v4().to_string();
+        // Check if a DAG is already running
+        if let Some(existing) = ergatai_core::cross_agent::get_dag_scheduler() {
+            if !existing.is_complete().await {
+                return Err(ErrorData::internal_error(
+                    "A DAG is already running. Wait for it to complete or check its status.",
+                    None,
+                ));
+            }
+        }
+
+        // Parse markdown → TaskGraph
+        let graph = ergatai_core::orchestration::parse_dag_markdown(dag_definition)
+            .map_err(|e| {
+                ErrorData::invalid_params(
+                    format!("Failed to parse DAG definition: {}", e),
+                    None,
+                )
+            })?;
+
+        // Build DagContext from optional context parameter
+        let mut dag_context = ergatai_core::orchestration::DagContext::empty();
+        if let Some(ctx_val) = context_value {
+            if let Some(vars) = ctx_val.as_object() {
+                for (k, v) in vars {
+                    dag_context.set_global(
+                        k.clone(),
+                        v.as_str().unwrap_or_default().to_string(),
+                    );
+                }
+            }
+        }
+
+        // Create DagScheduler
+        let project_root =
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let scheduler = ergatai_core::cross_agent::DagScheduler::with_context(
+            project_root,
+            graph,
+            dag_context,
+        );
+
+        // Register globally + start NATS event listener
+        ergatai_core::cross_agent::set_dag_scheduler(scheduler.clone());
+        scheduler.clone().start_event_listener();
+
+        // Submit the graph (dispatches ready nodes)
+        let submitted = scheduler.submit_graph().await.map_err(|e| {
+            ErrorData::internal_error(format!("Failed to submit DAG: {}", e), None)
+        })?;
+
+        let progress = scheduler.progress().await;
+        let status = scheduler.status_prompt().await;
 
         let result = serde_json::json!({
-            "dag_id": dag_id,
             "status": "submitted",
-            "message": "DAG workflow submitted successfully (scheduler integration pending)",
-            "note": "DAG definition received but execution not yet implemented"
+            "submitted_nodes": submitted.len(),
+            "progress": progress,
+            "graph_status": status,
         });
 
         Ok(CallToolResult::success(vec![ContentBlock::text(
@@ -374,24 +368,187 @@ impl ErgataiMcpServer {
         &self,
         params: Parameters<CheckDagStatusParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let dag_id = &params.0.dag_id;
+        let _dag_id = &params.0.dag_id;
 
-        info!("Checking DAG status for {}", dag_id);
+        info!("Checking DAG status");
 
-        // TODO: Query actual DAG scheduler. Until then, return an honest
-        // "unknown" status rather than fabricating progress numbers — callers
-        // should not be misled into believing work is happening.
-        let result = serde_json::json!({
-            "dag_id": dag_id,
-            "status": "unknown",
-            "progress": null,
-            "results": null,
-            "note": "DAG scheduler integration pending. Submit via submit_orchestration and monitor via agent completion events."
+        match ergatai_core::cross_agent::get_dag_scheduler() {
+            None => {
+                let result = serde_json::json!({
+                    "status": "no_dag",
+                    "message": "No DAG scheduler is active",
+                });
+                Ok(CallToolResult::success(vec![ContentBlock::text(
+                    serde_json::to_string_pretty(&result).unwrap_or_default(),
+                )]))
+            }
+            Some(scheduler) => {
+                let progress = scheduler.progress().await;
+                let is_complete = scheduler.is_complete().await;
+                let status_text = scheduler.status_prompt().await;
+                let snapshot = scheduler.graph_snapshot().await.ok();
+
+                let status = if is_complete { "completed" } else { "running" };
+
+                let result = serde_json::json!({
+                    "status": status,
+                    "progress": progress,
+                    "is_complete": is_complete,
+                    "graph_status": status_text,
+                    "graph_snapshot": snapshot,
+                });
+                Ok(CallToolResult::success(vec![ContentBlock::text(
+                    serde_json::to_string_pretty(&result).unwrap_or_default(),
+                )]))
+            }
+        }
+    }
+
+    // ── Private helpers for send_message ──
+
+    /// Inject message via tmux (preferred method when agent is in tmux pane).
+    async fn try_tmux_injection(
+        &self,
+        resolved_agent_id: &str,
+        from_agent: &str,
+        message: &str,
+    ) -> Result<CallToolResult, ErrorData> {
+        // Format the message with sender info
+        let formatted_message = format!(
+            "Message from {}: {}",
+            from_agent, message
+        );
+
+        info!(
+            "Attempting tmux injection to agent {}: {}",
+            resolved_agent_id, formatted_message
+        );
+
+        // Try to inject via tmux using MCP agent ID mapping
+        match self.tmux_manager.inject_message_by_mcp_id(resolved_agent_id, &formatted_message).await {
+            Ok(()) => {
+                info!("Message injected to {} via tmux", resolved_agent_id);
+                Ok(CallToolResult::success(vec![ContentBlock::text(
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "status": "sent",
+                        "target_agent": resolved_agent_id,
+                        "delivery_method": "tmux_injection",
+                        "note": "Message injected into agent's tmux pane. Agent will process it as user input."
+                    }))
+                    .unwrap_or_default(),
+                )]))
+            }
+            Err(e) => {
+                warn!("Tmux injection to {} failed: {}", resolved_agent_id, e);
+                Err(ErrorData::internal_error(
+                    format!("Tmux injection failed: {}", e),
+                    None,
+                ))
+            }
+        }
+    }
+
+    /// Send MCP custom notification (fallback when tmux injection is unavailable).
+    async fn send_mcp_notification(
+        &self,
+        resolved_agent_id: &str,
+        from_agent: &str,
+        message: &str,
+        message_type: &str,
+        timestamp: u64,
+    ) -> Result<CallToolResult, ErrorData> {
+        let peer = {
+            let peers = self.peer_registry.read().await;
+            peers.get(resolved_agent_id).cloned()
+        };
+
+        let peer = match peer {
+            Some(p) => p,
+            None => {
+                return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                    "Agent {} has no active MCP connection. \
+                     Cannot deliver message.",
+                    resolved_agent_id
+                ))]));
+            }
+        };
+
+        let payload = serde_json::json!({
+            "from_agent": from_agent,
+            "to_agent": resolved_agent_id,
+            "content": message,
+            "message_type": message_type,
+            "timestamp": timestamp,
         });
 
-        Ok(CallToolResult::success(vec![ContentBlock::text(
-            serde_json::to_string_pretty(&result).unwrap_or_default(),
-        )]))
+        let notification = CustomNotification::new("ergatai/message", Some(payload));
+
+        match peer
+            .send_notification(ServerNotification::CustomNotification(notification))
+            .await
+        {
+            Ok(_) => {
+                self.send_failures
+                    .write()
+                    .await
+                    .remove(resolved_agent_id);
+
+                let message_id = uuid::Uuid::new_v4().to_string();
+                let response_json = serde_json::json!({
+                    "message_id": message_id,
+                    "status": "delivered",
+                    "target_agent_id": resolved_agent_id,
+                    "message_type": message_type,
+                    "delivery_method": "mcp_notification",
+                    "note": "Delivered via MCP notification. \
+                             Target agent must handle 'ergatai/message' custom notifications to see this message."
+                });
+
+                Ok(CallToolResult::success(vec![ContentBlock::text(
+                    serde_json::to_string_pretty(&response_json).unwrap_or_default(),
+                )]))
+            }
+            Err(e) => {
+                error!(
+                    "Failed to send MCP notification to {}: {}",
+                    resolved_agent_id, e
+                );
+
+                let mut failures = self.send_failures.write().await;
+                let count = failures.entry(resolved_agent_id.to_string()).or_insert(0);
+                *count += 1;
+                let current = *count;
+
+                if current >= MAX_SEND_FAILURES {
+                    warn!(
+                        "Agent {} reached {}/{} consecutive send failures, auto-unregistering",
+                        resolved_agent_id, current, MAX_SEND_FAILURES
+                    );
+                    let registry = self.registry.clone();
+                    let peer_registry = self.peer_registry.clone();
+                    let agent_id = resolved_agent_id.to_string();
+                    failures.remove(resolved_agent_id);
+                    tokio::spawn(async move {
+                        do_unregister_agent(
+                            &registry,
+                            &peer_registry,
+                            &agent_id,
+                            &format!("{} consecutive send failures", MAX_SEND_FAILURES),
+                        )
+                        .await;
+                    });
+                    Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                        "Agent {} has been auto-unregistered after {} consecutive send failures.",
+                        resolved_agent_id, MAX_SEND_FAILURES
+                    ))]))
+                } else {
+                    Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                        "Failed to deliver message to {} ({}/{} consecutive failures)",
+                        resolved_agent_id, current, MAX_SEND_FAILURES
+                    ))]))
+                }
+            }
+        }
     }
 }
 
@@ -423,12 +580,35 @@ impl ServerHandler for ErgataiMcpServer {
         // Store the agent ID for this session (used in send_message)
         *self.session_agent_id.write().await = Some(unique_agent_id.clone());
 
-        // Register agent in registry (no ACP endpoint needed - we use MCP notifications)
+        // Register agent in registry
         if let Err(e) = self.registry
-            .register_agent(unique_agent_id.clone(), connection_id.clone(), None, None)
+            .register_agent(unique_agent_id.clone(), connection_id.clone(), None)
             .await
         {
             return Err(ErrorData::invalid_params(format!("Failed to register agent: {}", e), None::<serde_json::Value>));
+        }
+
+        // Try to auto-map to tmux pane
+        // First, scan tmux to ensure we have the latest pane list
+        if let Err(e) = self.tmux_manager.scan_and_register_panes().await {
+            debug!("Failed to scan tmux panes (session may not exist yet): {}", e);
+        }
+
+        // Atomically find and claim an unmapped tmux pane.
+        // This prevents two concurrent MCP connections from mapping to the same pane.
+        match self.tmux_manager.try_claim_unmapped_pane(&unique_agent_id).await {
+            Some(pane) => {
+                info!(
+                    "Auto-mapped MCP agent {} to tmux pane {}",
+                    unique_agent_id, pane
+                );
+            }
+            None => {
+                debug!(
+                    "No unmapped tmux pane found for MCP agent {} (base name: {})",
+                    unique_agent_id, agent_id
+                );
+            }
         }
 
         // Save the peer handle for pushing notifications to this agent
@@ -485,11 +665,13 @@ use rmcp::transport::streamable_http_server::{
 /// # Arguments
 /// * `registry` - Agent registry for tracking connected agents
 /// * `peer_registry` - Shared registry of MCP peer handles for pushing notifications
+/// * `tmux_manager` - Tmux manager for injecting messages into agent panes
 /// * `cancellation_token` - Token for graceful shutdown
 /// * `sse_keep_alive_secs` - SSE keep-alive interval in seconds (default 15)
 pub fn create_mcp_service(
     registry: Arc<AgentRegistry>,
     peer_registry: PeerRegistry,
+    tmux_manager: Arc<TmuxManager>,
     cancellation_token: CancellationToken,
     sse_keep_alive_secs: u64,
 ) -> StreamableHttpService<ErgataiMcpServer, LocalSessionManager> {
@@ -509,7 +691,7 @@ pub fn create_mcp_service(
     session_manager.session_config.keep_alive = Some(std::time::Duration::from_secs(120));
 
     StreamableHttpService::new(
-        move || Ok(ErgataiMcpServer::new(registry.clone(), peer_registry.clone())),
+        move || Ok(ErgataiMcpServer::new(registry.clone(), peer_registry.clone(), tmux_manager.clone())),
         std::sync::Arc::new(session_manager),
         config,
     )

@@ -1,4 +1,4 @@
-// Agent Launcher - Starts agents in isolated worktrees via ACP protocol
+// Agent Launcher - Starts agents in tmux panes and injects tasks
 // Manages agent sessions and monitors their completion
 //
 // ARCHITECTURE NOTE (Phase 8 - File Access Control Integration):
@@ -24,9 +24,7 @@ use tokio::sync::Mutex;
 use tracing::info;
 
 use super::task_coordinator::{AgentAssignment, TaskCoordinator, TaskPlan};
-use ergatai_acp::manager::{manager as session_manager, SessionCommand};
-use ergatai_acp::agent_registry::agent_registry;
-use ergatai_acp::http_client::http_connection_manager;
+use crate::tmux::TmuxManager;
 
 /// Agent session status
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -46,8 +44,8 @@ pub struct RunningAgent {
     pub plan_file: PathBuf,
     pub result_file: PathBuf,
     pub status: AgentStatus,
-    /// ACP session ID (set after session creation succeeds)
-    pub session_id: Option<String>,
+    /// Tmux pane ID where the agent is running (e.g. "ergatai-opencode:0.0")
+    pub pane_id: Option<String>,
     /// File access token ID (for file access control)
     pub token_id: Option<String>,
 }
@@ -82,7 +80,7 @@ fn safe_truncate_utf8(s: &str, max_len: usize) -> String {
     format!("{}\n\n[... truncated ...]", &s[..end])
 }
 
-/// Agent Launcher - manages agent ACP sessions
+/// Agent Launcher - manages agent tmux sessions
 pub struct AgentLauncher {
     coordinator: Arc<TaskCoordinator>,
     running_agents: Arc<Mutex<HashMap<String, RunningAgent>>>,
@@ -247,7 +245,7 @@ impl AgentLauncher {
             plan_file: plan.plan_file.clone(),
             result_file: result_file.clone(),
             status: AgentStatus::Starting,
-            session_id: Some(session_id.clone()),
+            pane_id: None,
             token_id: Some(file_token.id.to_string()),
         };
 
@@ -256,7 +254,7 @@ impl AgentLauncher {
             .await
             .insert(agent_id.clone(), running_agent);
 
-        // Launch ACP session — pass instruction text as prompt
+        // Launch agent in tmux pane — pass instruction text as injected prompt
         // Extract node_id from plan file (DAG nodes use {node_id}.md naming)
         let node_id = plan
             .plan_file
@@ -264,7 +262,7 @@ impl AgentLauncher {
             .and_then(|s| s.to_str())
             .map(|s| s.to_string());
 
-        self.spawn_acp_session(
+        self.spawn_tmux_session(
             &agent_id,
             &work_dir,
             &assignment.agent_name,
@@ -415,16 +413,19 @@ Write your results in markdown:
         }
     }
 
-    /// Spawn an ACP session for the agent and send the instruction as a prompt.
+    /// Spawn an agent in a tmux pane and inject the instruction as a prompt.
     ///
-    /// In middleware mode:
-    /// 1. Look up agent's ACP endpoint from AgentRegistry
-    /// 2. Connect via HttpClient
-    /// 3. Send prompts via HTTP
+    /// Steps:
+    /// 1. Create a TmuxManager (session = "ergatai-dag-{task_id}")
+    /// 2. Ensure session exists (create if missing)
+    /// 3. Launch the agent command in a new pane (cwd = work_dir)
+    /// 4. Inject the instruction via `send-keys -l`
+    /// 5. Spawn a background watcher that polls for pane exit and
+    ///    publishes NATS events so DagScheduler picks up completion/failure.
     ///
     /// If `node_id` is Some, the agent is part of a DAG — completion/failure
     /// automatically triggers `DagScheduler::on_node_completed/failed`.
-    async fn spawn_acp_session(
+    async fn spawn_tmux_session(
         &self,
         agent_id: &str,
         worktree_path: &Path,
@@ -436,118 +437,233 @@ Write your results in markdown:
             agent = %agent_id,
             agent_name = %agent_name,
             worktree = %worktree_path.display(),
-            "Spawning ACP session for agent via HTTP"
+            "Spawning agent in tmux pane"
         );
 
-        // 1. Get agent's ACP endpoint from registry
-        let registry = agent_registry();
-        let acp_endpoint = registry
-            .get_acp_endpoint(agent_id)
-            .await
-            .ok_or_else(|| {
-                ergatai_error::ErgataiError::AgentSpawnFailed(format!(
-                    "Agent '{}' has no ACP endpoint registered. \
-                     Agents must register their ACP endpoint via ergatai.set_acp_endpoint tool.",
-                    agent_id
-                ))
-            })?;
+        // 1. Check tmux is available
+        TmuxManager::check_tmux().await.map_err(|e| {
+            ergatai_error::ErgataiError::AgentSpawnFailed(format!(
+                "tmux not available: {}",
+                e
+            ))
+        })?;
+
+        // 2. Create TmuxManager with a DAG-specific session name
+        let session_name = format!("ergatai-dag-{}", agent_id.replace('|', "-"));
+        let tmux = TmuxManager::new(&session_name);
+
+        // Ensure session exists (best-effort; ignore "already exists" errors)
+        if let Err(e) = tmux.create_session(200, 50).await {
+            tracing::debug!(
+                session = %session_name,
+                "create_session returned error (may already exist): {}",
+                e
+            );
+        }
+
+        // 3. Build the agent launch command.
+        //    We `cd` into worktree_path first, then exec the agent binary.
+        //    Default: `claude` (Claude Code CLI). Users can override by setting
+        //    AGENT_COMMAND env var, or by pre-mapping in tmux before DAG launch.
+        let agent_command = std::env::var("ERGATAI_AGENT_CMD")
+            .unwrap_or_else(|_| "claude".to_string());
+
+        let launch_cmd = format!(
+            "cd {} && {}",
+            worktree_path.to_string_lossy(),
+            agent_command
+        );
+
+        let pane_id = tmux.launch_agent(agent_id, &launch_cmd).await.map_err(|e| {
+            ergatai_error::ErgataiError::AgentSpawnFailed(format!(
+                "Failed to launch agent '{}' in tmux: {}",
+                agent_id, e
+            ))
+        })?;
 
         tracing::info!(
             agent = %agent_id,
-            endpoint = %acp_endpoint,
-            "Found ACP endpoint for agent"
+            pane = %pane_id,
+            "Agent launched in tmux pane"
         );
 
-        // 2. Connect via HttpConnectionManager
-        let http_manager = http_connection_manager();
-        let cwd = worktree_path.to_string_lossy().to_string();
-
-        // Check if already connected
-        let session_id = if http_manager.is_connected(agent_id).await {
-            tracing::info!(
-                agent = %agent_id,
-                "Reusing existing HTTP connection to agent"
-            );
-            // TODO: Enhance HttpConnectionManager to return existing session_id
-            // For now, we must create a new connection for each DAG task
-            // because session state is task-specific
-            http_manager
-                .connect(agent_id, &acp_endpoint, cwd, ergatai_acp::manager::SessionKind::Dag)
-                .await
-                .map_err(|e| {
-                    ergatai_error::ErgataiError::AgentSpawnFailed(format!(
-                        "Failed to reconnect to agent '{}': {}",
-                        agent_id, e
-                    ))
-                })?
-        } else {
-            tracing::info!(
-                agent = %agent_id,
-                "Creating new HTTP connection to agent"
-            );
-            http_manager
-                .connect(agent_id, &acp_endpoint, cwd, ergatai_acp::manager::SessionKind::Dag)
-                .await
-                .map_err(|e| {
-                    ergatai_error::ErgataiError::AgentSpawnFailed(format!(
-                        "Failed to connect to agent '{}': {}",
-                        agent_id, e
-                    ))
-                })?
-        };
-
-        tracing::info!(
-            agent = %agent_id,
-            session_id = %session_id,
-            "HTTP ACP session created"
-        );
-
-        // 3. Update RunningAgent with session_id
+        // 4. Update RunningAgent with pane_id + status
         {
             let mut agents = self.running_agents.lock().await;
             if let Some(agent) = agents.get_mut(agent_id) {
                 agent.status = AgentStatus::Running;
-                agent.session_id = Some(session_id.clone());
+                agent.pane_id = Some(pane_id.clone());
             }
         }
 
-        // 4. Send instruction as prompt
+        // 5. Inject instruction via tmux send-keys (literal mode).
+        //    Small delay to let the agent process start up.
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+        tmux.inject_message(agent_id, instruction).await.map_err(|e| {
+            ergatai_error::ErgataiError::AgentSpawnFailed(format!(
+                "Failed to inject instruction to agent '{}': {}",
+                agent_id, e
+            ))
+        })?;
+
         tracing::info!(
             agent = %agent_id,
             instruction_len = instruction.len(),
-            "Sending instruction to agent"
+            "Instruction injected to agent via tmux"
         );
 
-        http_manager
-            .send_prompt(agent_id, instruction.to_string())
-            .await
-            .map_err(|e| {
-                ergatai_error::ErgataiError::AgentSpawnFailed(format!(
-                    "Failed to send prompt to agent '{}': {}",
-                    agent_id, e
-                ))
-            })?;
+        // 6. Background watcher — poll for pane exit, then publish NATS event.
+        if let Some(node_id_val) = node_id {
+            let agent_id_monitor = agent_id.to_string();
+            let agent_name_monitor = agent_name.to_string();
+            let node_id_monitor = node_id_val.clone();
+            let running_agents = self.running_agents.clone();
+            let session_name_monitor = session_name.clone();
 
-        tracing::info!(
-            agent = %agent_id,
-            "Instruction sent to agent successfully"
-        );
-
-        // 5. Monitor for completion (in background)
-        // TODO: Implement completion monitoring via SessionNotification
-        // For now, we'll assume the agent completes successfully
-        // In a real implementation, we would:
-        // - Listen for SessionNotification from the agent
-        // - Update agent status based on notifications
-        // - Trigger DagScheduler::on_node_completed/failed if node_id is Some
-
-        if let Some(node_id) = node_id {
             tracing::info!(
                 agent = %agent_id,
-                node_id = %node_id,
-                "Agent is part of DAG, will notify DagScheduler on completion"
+                node_id = %node_id_val,
+                "Spawning pane-exit watcher for DAG agent"
             );
-            // TODO: Set up completion notification to DagScheduler
+
+            tokio::spawn(async move {
+                // Poll every 5s for pane existence
+                let poll_interval = std::time::Duration::from_secs(5);
+                let max_silent = std::time::Duration::from_secs(3600); // 1h hard cap
+                let started = std::time::Instant::now();
+
+                loop {
+                    tokio::time::sleep(poll_interval).await;
+
+                    // Check if pane still exists
+                    let pane_alive = tokio::process::Command::new("tmux")
+                        .args(["list-panes", "-t", &session_name_monitor, "-F", "#{pane_id}"])
+                        .output()
+                        .await
+                        .map(|o| {
+                            o.status.success()
+                                && String::from_utf8_lossy(&o.stdout)
+                                    .lines()
+                                    .any(|_| true)
+                        })
+                        .unwrap_or(false);
+
+                    if !pane_alive {
+                        tracing::info!(
+                            agent = %agent_id_monitor,
+                            node_id = %node_id_monitor,
+                            "Agent pane exited"
+                        );
+                        break;
+                    }
+
+                    if started.elapsed() > max_silent {
+                        tracing::warn!(
+                            agent = %agent_id_monitor,
+                            "Agent exceeded max runtime, marking as failed"
+                        );
+                        // Kill the pane
+                        let _ = tokio::process::Command::new("tmux")
+                            .args(["kill-pane", "-t", &agent_id_monitor])
+                            .output()
+                            .await;
+                        break;
+                    }
+                }
+
+                // Capture pane output for result summary (best-effort)
+                let result_summary = tmux.capture_pane(&agent_id_monitor)
+                    .await
+                    .ok()
+                    .map(|s| {
+                        if s.len() > 2000 {
+                            s[s.len() - 2000..].to_string()
+                        } else {
+                            s
+                        }
+                    });
+
+                // Determine success/failure heuristically:
+                //   - result file exists → Completed
+                //   - otherwise → Failed
+                let result_file_path = {
+                    let agents = running_agents.lock().await;
+                    agents.get(&agent_id_monitor).map(|a| a.result_file.clone())
+                };
+
+                let result_file_exists = if let Some(ref path) = result_file_path {
+                    tokio::fs::try_exists(path).await.unwrap_or(false)
+                } else {
+                    false
+                };
+
+                let (status, error_msg) = if result_file_exists {
+                    (AgentStatus::Completed, None)
+                } else {
+                    (
+                        AgentStatus::Failed,
+                        Some(format!(
+                            "Agent pane exited without producing result file: {}",
+                            result_file_path
+                                .as_ref()
+                                .map(|p| p.display().to_string())
+                                .unwrap_or_else(|| "(unknown)".into())
+                        )),
+                    )
+                };
+
+                // Update RunningAgent status
+                {
+                    let mut agents = running_agents.lock().await;
+                    if let Some(agent) = agents.get_mut(&agent_id_monitor) {
+                        agent.status = status.clone();
+                    }
+                }
+
+                // Publish NATS event for DagScheduler
+                if ergatai_nats::is_nats_initialized().await {
+                    if let Some(conn) = ergatai_nats::get_nats_connection().await {
+                        let bus = ergatai_nats::event_bus::EventBus::new(conn);
+                        match &result_file_exists {
+                            true => {
+                                let payload = ergatai_nats::events::NodeCompletePayload {
+                                    node_id: node_id_monitor.clone(),
+                                    task_id: node_id_monitor.clone(),
+                                    agent_name: agent_name_monitor.clone(),
+                                    result_summary,
+                                    outputs: HashMap::new(),
+                                    result_file: result_file_path
+                                        .map(|p| p.to_string_lossy().to_string()),
+                                };
+                                if let Err(e) = bus.publish_node_complete(&payload).await {
+                                    tracing::error!(
+                                        error = %e,
+                                        node_id = %node_id_monitor,
+                                        "Failed to publish node_complete"
+                                    );
+                                }
+                            }
+                            false => {
+                                let payload = ergatai_nats::events::NodeFailedPayload {
+                                    node_id: node_id_monitor.clone(),
+                                    task_id: node_id_monitor.clone(),
+                                    agent_name: agent_name_monitor.clone(),
+                                    error: error_msg.unwrap_or_default(),
+                                    retryable: false,
+                                };
+                                if let Err(e) = bus.publish_node_failed(&payload).await {
+                                    tracing::error!(
+                                        error = %e,
+                                        node_id = %node_id_monitor,
+                                        "Failed to publish node_failed"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            });
         }
 
         Ok(())
@@ -579,20 +695,27 @@ Write your results in markdown:
         any
     }
 
-    /// Clean up agent resources (ACP session + worktree + tokens)
+    /// Clean up agent resources (tmux pane + file tokens)
     pub async fn cleanup_agent(&self, agent_id: &str) -> ErgataiResult<()> {
         if let Some(agent) = self.running_agents.lock().await.remove(agent_id) {
-            // Close ACP session if still active
-            if let Some(ref session_id) = agent.session_id {
-                if let Some(cmd_tx) = session_manager().get_cmd_tx(session_id).await {
-                    let _ = cmd_tx.send(SessionCommand::Close);
+            // Stop the tmux pane if still running
+            if agent.pane_id.is_some() {
+                let session_name = format!("ergatai-dag-{}", agent_id.replace('|', "-"));
+                let tmux = TmuxManager::new(&session_name);
+                if let Err(e) = tmux.stop_agent(agent_id).await {
+                    tracing::debug!(
+                        agent_id = %agent_id,
+                        error = %e,
+                        "Failed to stop agent tmux pane (may have already exited)"
+                    );
                 }
+            }
 
-                // Clear watchdog busy status
-                if let Ok(watchdog) = ergatai_lock::get_watchdog(&agent.task_id).await {
-                    let watchdog = watchdog.write().await;
-                    let _ = watchdog.clear_busy(session_id).await;
-                }
+            // Clear watchdog busy status (keyed by logical session id)
+            let session_id = format!("session-{}", agent_id);
+            if let Ok(watchdog) = ergatai_lock::get_watchdog(&agent.task_id).await {
+                let watchdog = watchdog.write().await;
+                let _ = watchdog.clear_busy(&session_id).await;
             }
 
             // SECURITY: Revoke file access tokens so completed/failed agents
@@ -627,46 +750,49 @@ Write your results in markdown:
     /// Called at the start of each new DAG run to prevent ghost agents
     /// from previous runs appearing in `get_all_status()` results.
     pub async fn clear_stale_agents(&self) -> ErgataiResult<()> {
-        // Collect stale agent info while holding lock, then release lock before sending Close
-        let stale_sessions: Vec<(String, String)> = {
+        let stale_agents: Vec<(String, String, Option<String>)> = {
             let mut agents = self.running_agents.lock().await;
-            let stale: Vec<String> = agents
+            let stale: Vec<_> = agents
                 .iter()
                 .filter(|(_, a)| {
                     a.status == AgentStatus::Completed || a.status == AgentStatus::Failed
                 })
-                .map(|(id, _)| id.clone())
+                .map(|(id, a)| (id.clone(), a.task_id.clone(), a.pane_id.clone()))
                 .collect();
 
-            let mut sessions = Vec::with_capacity(stale.len());
-            for id in &stale {
-                if let Some(agent) = agents.remove(id) {
-                    // Collect session IDs for closing after releasing lock
-                    if let Some(session_id) = agent.session_id {
-                        sessions.push((id.clone(), session_id));
-                    }
+            let mut result = Vec::with_capacity(stale.len());
+            for (id, task_id, pane_id) in stale {
+                if agents.remove(&id).is_some() {
+                    result.push((id, task_id, pane_id));
                 }
             }
 
-            if !stale.is_empty() {
-                tracing::info!(count = stale.len(), "Cleared stale agents from registry");
+            if !result.is_empty() {
+                tracing::info!(count = result.len(), "Cleared stale agents from registry");
             }
 
-            sessions
+            result
             // Lock released here
         };
 
-        // Now send Close commands and revoke tokens without holding the lock
-        for (agent_id, session_id) in &stale_sessions {
-            if let Some(cmd_tx) = session_manager().get_cmd_tx(session_id).await {
-                if let Err(e) = cmd_tx.send(SessionCommand::Close) {
-                    tracing::warn!(
+        // Now clean up tmux panes + tokens without holding the lock
+        for (agent_id, task_id, pane_id) in &stale_agents {
+            if pane_id.is_some() {
+                let session_name = format!("ergatai-dag-{}", agent_id.replace('|', "-"));
+                let tmux = TmuxManager::new(&session_name);
+                if let Err(e) = tmux.stop_agent(agent_id).await {
+                    tracing::debug!(
                         agent_id = %agent_id,
-                        session_id = %session_id,
                         error = %e,
-                        "Failed to close lingering ACP session for stale agent"
+                        "Failed to stop stale agent tmux pane"
                     );
                 }
+            }
+
+            let session_id = format!("session-{}", agent_id);
+            if let Ok(watchdog) = ergatai_lock::get_watchdog(&task_id).await {
+                let watchdog = watchdog.write().await;
+                let _ = watchdog.clear_busy(&session_id).await;
             }
         }
 

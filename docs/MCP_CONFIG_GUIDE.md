@@ -233,11 +233,11 @@ MCP endpoint: `http://localhost:3000/mcp`
 ## 架构说明
 
 ```
-Agent A ←→ MCP ←→ Ergatai ←→ ACP ←→ Agent B
+Agent A ←→ MCP ←→ Ergatai ←→ tmux 注入 / MCP 通知 ←→ Agent B
 ```
 
 - **MCP**: Agent → Ergatai（agent 发送消息）
-- **ACP**: Ergatai → Agent（Ergatai 转发消息给其他 agents）
+- **tmux 注入 / MCP 通知**: Ergatai → Agent（Ergatai 转发消息给其他 agents）
 
 Ergatai 在中间作为消息 relay，让 agents 可以互相通信。
 

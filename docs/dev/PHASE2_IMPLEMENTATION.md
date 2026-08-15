@@ -71,7 +71,7 @@ Successfully implemented Phase 2 of the Ergatai CLI TUI rewrite, adding Claude C
 ### 5. `/root/ergatai/crates/ergatai-cli/src/ui/render/mod.rs`
 **Changes:**
 - Added Ctrl-T keybinding to toggle thinking visibility
-- Updated `handle_acp_event()` to handle:
+- Updated `handle_agent_event()` to handle:
   - `agent_thought_chunk` - calls `append_thinking_chunk()`
   - `tool_call` - parses and calls `add_tool_call()`
   - `tool_call_update` - parses and calls `update_tool_call()`
@@ -119,7 +119,7 @@ Successfully implemented Phase 2 of the Ergatai CLI TUI rewrite, adding Claude C
    - Solution: Use `.clone()` on strings that reference the ToolCall struct
    - All other strings created via `format!()` are already owned
 
-3. **JSON field variations**: ACP events use both snake_case and camelCase
+3. **JSON field variations**: tmux 注入 events use both snake_case and camelCase
    - Solution: Check both variants with `.or_else()` fallback chain
 
 ## Testing Recommendations

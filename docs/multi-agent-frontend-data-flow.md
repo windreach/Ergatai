@@ -24,12 +24,12 @@
 ┌─────────────────────────────────────────────────────┐
 │ Rust DagScheduler                                    │
 │ 1. 解析 Markdown → TaskGraph                        │
-│ 2. 创建 ACP Sessions                                │
+│ 2. 创建 Agent Sessions（tmux 注入 / MCP 连接）       │
 │ 3. 分发任务给子 Agent A/B/C                         │
 └─────────────────────────────────────────────────────┘
     ↓
 ┌─────────────────────────────────────────────────────┐
-│ 子 Agent 执行 (通过 ACP)                             │
+│ 子 Agent 执行（通过 tmux 注入 / MCP 通知）           │
 │ • Agent-A: 分析代码 → Running                       │
 │ • Agent-B: 等待依赖 → Pending                       │
 │ • Agent-C: 等待依赖 → Pending                       │

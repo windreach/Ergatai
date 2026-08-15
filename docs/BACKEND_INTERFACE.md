@@ -1,4 +1,4 @@
-# 后端接口文档 - ACP Chat Protocol
+# 后端接口文档 - tmux 注入 + MCP 通知协议
 
 > 本文档描述后端（Rust + TypeScript）生成的所有事件类型和转换逻辑
 
@@ -21,26 +21,27 @@
 
 ## 概述
 
-后端使用 Rust ACP SDK 与 Agent 通信，通过 TypeScript 中间层将 Rust 事件转换为前端可理解的格式。
+后端通过 **tmux 注入**（首选）或 **MCP 通知**（回退）与 Agent 通信，通过 TypeScript 中间层将 Rust 事件转换为前端可理解的格式。
 
 **关键文件：**
-- `src-rust/src/acp/sdk_session.rs` - Rust ACP SDK 会话管理
-- `src-rust/src/acp/manager.rs` - Session 管理器
-- `src-rust/src/napi/acp.rs` - NAPI 绑定
-- `src/main/lib/trpc/routers/acp.ts` - TypeScript 转换层
+- `src-rust/src/tmux/injector.rs` - tmux 注入器（向 agent 的 tmux pane 写入内容）
+- `src-rust/src/mcp/server.rs` - MCP server 会话管理
+- `src-rust/src/napi/events.rs` - NAPI 绑定
+- `src/main/lib/trpc/routers/agent.ts` - TypeScript 转换层
 
 ---
 
 ## 系统架构
 
 ```
-Agent (claude-agent-acp)
-    ↓ ACP Protocol (JSON-RPC over stdin/stdout)
-Rust ACP SDK
+Agent (在 tmux pane 中运行)
+    ↑ tmux send-keys 注入（首选）
+    │ 或 MCP notification（回退）
+Rust tmux 注入器 / MCP server
     ↓ SessionEvent
 Rust Manager (evt_tx)
     ↓ mpsc channel
-TypeScript NAPI (acpPollEvents)
+TypeScript NAPI (pollEvents)
     ↓ SessionEvent[]
 translateEvent()
     ↓ UIMessageChunk[]
@@ -79,13 +80,13 @@ interface NapiSessionEvent {
 
 | 事件类型 | 来源 | 描述 |
 |---|---|---|
-| `agent_message_chunk` | ACP SDK | Agent 文本输出增量 |
-| `agent_thought_chunk` | ACP SDK | Agent 思考过程增量 |
-| `tool_call` | ACP SDK | 工具调用开始 |
-| `tool_call_update` | ACP SDK | 工具调用结果更新 |
-| `permission_request` | ACP SDK | 权限请求（需要用户确认） |
-| `usage_update` | ACP SDK | Token 使用量更新 |
-| `available_commands_update` | ACP SDK | 可用命令列表更新 |
+| `agent_message_chunk` | tmux 注入器 | Agent 文本输出增量 |
+| `agent_thought_chunk` | tmux 注入器 | Agent 思考过程增量 |
+| `tool_call` | tmux 注入器 | 工具调用开始 |
+| `tool_call_update` | tmux 注入器 | 工具调用结果更新 |
+| `permission_request` | tmux 注入器 | 权限请求（需要用户确认） |
+| `usage_update` | tmux 注入器 | Token 使用量更新 |
+| `available_commands_update` | tmux 注入器 | 可用命令列表更新 |
 | `closed` | 本地生成 | Session 关闭 |
 | `task_dispatched` | Pool 系统 | 任务已分发 |
 | `task_completed` | Pool 系统 | 任务已完成 |
@@ -94,7 +95,7 @@ interface NapiSessionEvent {
 | `turn_completed` | Observer | 轮次完成 |
 | `model_switched` | Observer | 模型切换 |
 | `pool_stopped` | Pool 系统 | Agent Pool 停止 |
-| `session_info_update` | ACP SDK | Session 信息更新 |
+| `session_info_update` | tmux 注入器 | Session 信息更新 |
 
 ---
 
@@ -102,7 +103,7 @@ interface NapiSessionEvent {
 
 ### translateEvent 函数
 
-**位置：** `src/main/lib/trpc/routers/acp.ts:78-270`
+**位置：** `src/main/lib/trpc/routers/agent.ts:78-270`
 
 ```typescript
 function translateEvent(event: NapiSessionEvent): any[] {
@@ -509,7 +510,7 @@ case "closed": {
 
 ### 轮询循环
 
-**位置：** `src/main/lib/trpc/routers/acp.ts:350-430`
+**位置：** `src/main/lib/trpc/routers/agent.ts:350-430`
 
 ```typescript
 // 每 100ms 轮询一次
@@ -519,10 +520,10 @@ const timer = setInterval(async () => {
   isPolling = true
 
   try {
-    const events = acpPollEvents()  // 从 Rust 获取所有待处理事件
+    const events = pollEvents()  // 从 Rust 获取所有待处理事件
 
     for (const event of events) {
-      if (event.sessionId !== acpSessionId) continue
+      if (event.sessionId !== sessionId) continue
 
       const chunks = translateEvent(event)
       for (const chunk of chunks) {
@@ -539,7 +540,7 @@ const timer = setInterval(async () => {
       }
     }
   } catch (err) {
-    console.error("[ACP] Poll error:", err)
+    console.error("[Agent] Poll error:", err)
     emit.next({ type: "error", errorText: String(err) })
     clearInterval(timer)
     emit.complete()
@@ -562,21 +563,21 @@ const POLL_INTERVAL = 100  // 轮询间隔（毫秒）
 ### 创建 Session
 
 ```typescript
-// 1. 创建 ACP Session
-const acpSessionId = await acpCreateSession(agent, cwd)
+// 1. 创建 Agent Session（通过 tmux 注入或 MCP 连接）
+const sessionId = await createSession(agent, cwd)
 
 // 2. 保存到映射表
-sessionMap.set(subChatId, acpSessionId)
+sessionMap.set(subChatId, sessionId)
 
 // 3. 保存 Session 元数据
-acpSaveSessionMeta(acpSessionId, agent, cwd)
+saveSessionMeta(sessionId, agent, cwd)
 ```
 
 ### 发送 Prompt
 
 ```typescript
-// 发送 prompt 到 Agent
-await acpSendPrompt(acpSessionId, prompt)
+// 发送 prompt 到 Agent（通过 tmux send-keys 注入到 agent 的 pane）
+await sendPrompt(sessionId, prompt)
 ```
 
 ### 关闭 Session
@@ -588,8 +589,8 @@ clearInterval(timer)
 // 2. 清理映射
 sessionMap.delete(subChatId)
 
-// 3. 关闭 ACP Session
-await acpCloseSession(acpSessionId)
+// 3. 关闭 Agent Session
+await closeSession(sessionId)
 ```
 
 ---
@@ -600,7 +601,7 @@ await acpCloseSession(acpSessionId)
 
 ```typescript
 catch (err) {
-  console.error("[ACP] Poll error:", err)
+  console.error("[Agent] Poll error:", err)
   emit.next({ type: "error", errorText: String(err) })
   clearInterval(timer)
   activePollers.delete(subChatId)
@@ -612,8 +613,8 @@ catch (err) {
 
 ```typescript
 catch (err) {
-  console.error("[ACP] Failed to start session:", err)
-  emit.next({ type: "error", errorText: `Failed to start ACP session: ${err}` })
+  console.error("[Agent] Failed to start session:", err)
+  emit.next({ type: "error", errorText: `Failed to start agent session: ${err}` })
   emit.complete()
   return
 }
@@ -626,31 +627,32 @@ catch (err) {
 ### 后端日志示例
 
 ```
-[ACP] Chat start: sub=6740ekcu agent=claude cwd=/home/yubing/Public
-[ACP] Starting session for agent=claude, cwd=/home/yubing/Public
-[ACP] Creating new session for agent=claude
-[ACP] Session created: 23189f14-3206-406f-80b3-7aedb85a6433
-[ACP] Sending prompt (length=2): 你好...
-[ACP] Prompt sent successfully
-[ACP] Got 71 events, polling iteration 1, types: available_commands_update, usage_update, agent_thought_chunk, ...
-[ACP] Emitted chunk: type=available-commands subChatId=6740ekcu
-[ACP] Emitted chunk: type=message-metadata subChatId=6740ekcu
-[ACP] Emitted chunk: type=reasoning-delta subChatId=6740ekcu
+[Agent] Chat start: sub=6740ekcu agent=claude cwd=/home/yubing/Public
+[Agent] Starting session for agent=claude, cwd=/home/yubing/Public
+[Agent] Creating new session for agent=claude
+[Agent] Session created: 23189f14-3206-406f-80b3-7aedb85a6433
+[Agent] Sending prompt via tmux injection (length=2): 你好...
+[Agent] Prompt injected successfully
+[Agent] Got 71 events, polling iteration 1, types: available_commands_update, usage_update, agent_thought_chunk, ...
+[Agent] Emitted chunk: type=available-commands subChatId=6740ekcu
+[Agent] Emitted chunk: type=message-metadata subChatId=6740ekcu
+[Agent] Emitted chunk: type=reasoning-delta subChatId=6740ekcu
 ...
 ```
 
 ### 启用详细日志
 
-在 `src/main/lib/trpc/routers/acp.ts` 中取消注释：
+在 `src/main/lib/trpc/routers/agent.ts` 中取消注释：
 
 ```typescript
-console.log(`[ACP] Got ${events.length} events, polling iteration ${pollCount}, types: ${events.map(e => e.eventType).join(", ")}`)
-console.log(`[ACP] Emitted chunk: type=${chunk.type} subChatId=${subChatId.slice(-8)}`)
+console.log(`[Agent] Got ${events.length} events, polling iteration ${pollCount}, types: ${events.map(e => e.eventType).join(", ")}`)
+console.log(`[Agent] Emitted chunk: type=${chunk.type} subChatId=${subChatId.slice(-8)}`)
 ```
 
 ---
 
 ## 更新日志
 
-- **2026-08-09**: 初始版本，基于 Rust ACP SDK 和 TypeScript 转换层创建
+- **2026-08-15**: 移除旧协议，改用 tmux 注入（首选）+ MCP 通知（回退）
+- **2026-08-09**: 初始版本，基于 Rust 事件层和 TypeScript 转换层创建
 - **2026-08-09**: 修复 chunk 格式问题（textDelta → delta，添加 id 字段）

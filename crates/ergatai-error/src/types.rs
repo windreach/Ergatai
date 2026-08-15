@@ -144,7 +144,7 @@ pub enum ErgataiError {
         source: Option<BoxError>,
     },
 
-    /// Agent protocol error (JSON-RPC, ACP protocol violations)
+    /// Agent protocol error (JSON-RPC / MCP protocol violations)
     #[error("Agent protocol error: {0}")]
     AgentProtocolError(String),
 
@@ -241,15 +241,6 @@ pub enum ErgataiError {
 impl From<serde_json::Error> for ErgataiError {
     fn from(err: serde_json::Error) -> Self {
         ErgataiError::JsonError {
-            message: err.to_string(),
-            source: Some(Box::new(err)),
-        }
-    }
-}
-
-impl From<agent_client_protocol::Error> for ErgataiError {
-    fn from(err: agent_client_protocol::Error) -> Self {
-        ErgataiError::InternalError {
             message: err.to_string(),
             source: Some(Box::new(err)),
         }

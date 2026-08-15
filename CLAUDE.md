@@ -2,32 +2,34 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+---
+
 ## What is this?
 
 **Ergatai** - A multi-agent collaboration middleware for AI-assisted software engineering. Transforms individual AI coding assistants into a coordinated engineering team with parallel task execution, safe concurrent file access, and DAG-based workflow orchestration.
 
-**Pure Rust implementation** using **MCP (Model Context Protocol)** for all agent communication — agents connect as MCP clients, call tools, and receive messages via **MCP custom notifications** (no HTTP server required), embedded **NATS** event bus for reliable internal messaging, and **DAG-based orchestration engine** with template-driven data flow.
+**Pure Rust implementation** using **tmux injection** (preferred) and **MCP (Model Context Protocol)** notifications (fallback) for all agent communication — agents connect as MCP clients, call tools, and receive messages either injected directly into their tmux pane or pushed via **MCP custom notifications**. Embedded **NATS** event bus handles reliable internal messaging, and a **DAG-based orchestration engine** provides template-driven data flow.
 
 ### Middleware Architecture (Important!)
 
 Ergatai runs as a **middleware** - it does NOT spawn or manage agent processes. Instead:
 
-1. **Agents run independently** and manage their own lifecycle
+1. **Agents run independently** (typically inside tmux panes) and manage their own lifecycle
 2. **Agents connect to Ergatai via MCP** (Streamable HTTP) as MCP clients
 3. **Agents call tools** (send_message, list_agents, etc.) via MCP tool calls
-4. **Agents receive messages** via MCP custom notifications (`ergatai/message`)
-5. **No HTTP server needed** — agents never bind ports or expose endpoints
+4. **Agents receive messages** primarily via **tmux injection** (Ergatai writes directly into the agent's tmux pane); MCP custom notifications (`ergatai/message`) are used as a fallback when tmux is unavailable
+5. **No HTTP server needed on the agent side** — agents never bind ports or expose endpoints
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                      Agent (runs independently)                  │
+│           Agent (runs independently, typically in tmux)          │
 │  ┌──────────────┐                                               │
 │  │   LLM/API    │                                               │
 │  │              │                                               │
 │  └──────────────┘                                               │
 └─────────────────────────────────────────────────────────────────┘
-         │ MCP (tools/call)                    ▲ MCP notifications
-         ▼                                     │ (ergatai/message)
+         │ MCP (tools/call)       ▲ tmux injection (preferred)
+         ▼                        │ or MCP notifications (fallback)
 ┌─────────────────────────────────────────────────────────────────┐
 │                        Ergatai (Middleware)                      │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐  │
@@ -38,6 +40,9 @@ Ergatai runs as a **middleware** - it does NOT spawn or manage agent processes. 
 │  │  Agent       │  │  DAG         │  │  File Access         │  │
 │  │  Registry    │  │  Scheduler   │  │  Control             │  │
 │  └──────────────┘  └──────────────┘  └──────────────────────┘  │
+│  ┌──────────────────────────────────────────────────────────┐  │
+│  │  tmux injector (writes directly into agent's tmux pane)  │  │
+│  └──────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -110,7 +115,6 @@ cargo run -p simple-agent -- --port 8080 --agent-id my-agent --ergatai http://lo
 | Layer | Crate | Responsibility |
 |-------|-------|----------------|
 | **Core** | `ergatai-core` | Business logic facade, re-exports from sub-crates |
-| **ACP** | `ergatai-acp` | ACP protocol layer (HTTP client for middleware mode) |
 | **Collab** | `ergatai-collab` | Multi-agent collaboration (DAG scheduler, task coordinator) |
 | **DAG** | `ergatai-dag` | DAG parsing, template engine, context management |
 | **NATS** | `ergatai-nats` | Embedded NATS server and event bus |
@@ -124,7 +128,6 @@ cargo run -p simple-agent -- --port 8080 --agent-id my-agent --ergatai http://lo
 ```
 crates/
 ├── ergatai-core/    # Core library facade
-├── ergatai-acp/     # ACP protocol (HTTP client)
 ├── ergatai-collab/  # Multi-agent collaboration
 ├── ergatai-dag/     # DAG parsing and orchestration
 ├── ergatai-nats/    # NATS messaging
@@ -148,10 +151,10 @@ examples/
 
 | Layer | Protocol | Direction | Purpose |
 |-------|----------|-----------|---------|
-| **Agent ↔ Ergatai** | MCP (Streamable HTTP) | Bidirectional | Agents call tools; Ergatai pushes messages via custom notifications |
+| **Agent ↔ Ergatai** | MCP (Streamable HTTP) + tmux injection | Bidirectional | Agents call tools via MCP; Ergatai delivers messages via tmux injection (preferred) or MCP custom notifications (fallback) |
 | **Ergatai Internal** | NATS (JetStream) | Event stream | Task routing, completion events, file notifications |
 
-**Key point**: Agents never communicate directly. All inter-agent messaging is relayed through Ergatai. Ergatai uses the MCP peer handle to push `ergatai/message` notifications to the target agent's SSE stream.
+**Key point**: Agents never communicate directly. All inter-agent messaging is relayed through Ergatai. Ergatai delivers messages to agents primarily via **tmux injection** (writing directly into the agent's tmux pane using `tmux send-keys`), falling back to pushing `ergatai/message` MCP notifications to the agent's SSE stream when tmux is unavailable.
 
 ```
 User request: "Refactor this module with 3 agents"
@@ -163,12 +166,6 @@ DagScheduler parses → NATS distributes tasks → Sub-agents A/B/C (MCP executi
 ```
 
 ### Core Modules
-
-**ACP Protocol (`acp/`):**
-- `manager.rs` - Session lifecycle management
-- `sdk_session.rs` - ACP SDK-based sessions
-- `sdk_pool.rs` - Session pooling for efficiency
-- `persistence.rs` - Session state persistence
 
 **NATS Messaging (`nats/`):**
 - `manager.rs` - NATS server management
@@ -281,7 +278,6 @@ ergatai.
 
 ### Core Library
 - `crates/ergatai-core/src/lib.rs` - Library entry point
-- `crates/ergatai-core/src/acp/manager.rs` - ACP session management
 - `crates/ergatai-core/src/nats/manager.rs` - NATS global state
 - `crates/ergatai-core/src/file_access/lock_manager.rs` - Lock management (largest file)
 - `crates/ergatai-core/src/cross_agent/dag_scheduler.rs` - DAG scheduling

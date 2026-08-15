@@ -51,7 +51,7 @@ tracing_subscriber::fmt().with_env_filter(filter).init();
 
 ### 🔴-2: MCP 服务器命令注入面 — 未验证的 config 值直接传递给 Command::new
 
-**文件**: `crates/ergatai-acp/src/mcp.rs:321-336`
+**文件**: `crates/ergatai-tmux/src/mcp.rs:321-336`
 **类别**: 安全 / 命令注入
 
 ```rust
@@ -139,9 +139,9 @@ fn force_exit(code: i32) -> ! {
 
 ## 🟡 中等风险问题
 
-### 🟡-1: HTTP ACP 客户端权限自动批准 — 安全风险
+### 🟡-1: HTTP tmux 注入 客户端权限自动批准 — 安全风险
 
-**文件**: `crates/ergatai-acp/src/http_client.rs:95-106`
+**文件**: `crates/ergatai-tmux/src/http_client.rs:95-106`
 **类别**: 安全 / 权限控制
 
 ```rust
@@ -195,10 +195,10 @@ result: Some(serde_json::to_value(response).unwrap_or_else(|e| {
 
 | 全局单例 | 文件 | 类型 |
 |----------|------|------|
-| `STATE` (SessionManager) | `ergatai-acp/src/manager.rs:313` | `OnceLock<GlobalState>` |
-| `APPROVAL_WAITERS` | `ergatai-acp/src/sdk_session.rs:58` | `OnceLock<Arc<Mutex<...>>>` |
-| `MCP_REGISTRY` | `ergatai-acp/src/mcp.rs:244` | `OnceLock<McpProcessRegistry>` |
-| `POOL_MANAGER` | `ergatai-acp/src/sdk_pool_manager.rs:114` | `OnceLock<GlobalPoolManager>` |
+| `STATE` (SessionManager) | `ergatai-tmux/src/manager.rs:313` | `OnceLock<GlobalState>` |
+| `APPROVAL_WAITERS` | `ergatai-tmux/src/sdk_session.rs:58` | `OnceLock<Arc<Mutex<...>>>` |
+| `MCP_REGISTRY` | `ergatai-tmux/src/mcp.rs:244` | `OnceLock<McpProcessRegistry>` |
+| `POOL_MANAGER` | `ergatai-tmux/src/sdk_pool_manager.rs:114` | `OnceLock<GlobalPoolManager>` |
 | `APP_STATE` | `ergatai-api/src/main.rs:55` | `OnceLock<AppState>` |
 | `HTTP_CONNECTION_MANAGER` | `ergatai-api/src/mcp/message_relay.rs:23` | `OnceLock<HttpConnectionManager>` |
 | `FILE_ACCESS_MANAGER` | `ergatai-lock/src/manager.rs:32` | `OnceLock<RwLock<...>>` |
@@ -218,7 +218,7 @@ result: Some(serde_json::to_value(response).unwrap_or_else(|e| {
 
 ### 🟡-4: Mutex 中毒恢复可能导致不一致状态
 
-**文件**: `crates/ergatai-acp/src/manager.rs:336-348`
+**文件**: `crates/ergatai-tmux/src/manager.rs:336-348`
 **类别**: 正确性 / 并发安全
 
 ```rust
@@ -273,7 +273,7 @@ let state = AGENT_STATE.get().expect("AGENT_STATE must be initialized before han
 
 ### 🟡-6: `SessionManager::register` / `unregister` — 读锁在写锁之后立即获取
 
-**文件**: `crates/ergatai-acp/src/manager.rs:123-137`
+**文件**: `crates/ergatai-tmux/src/manager.rs:123-137`
 **类别**: 性能 / 竞态条件
 
 ```rust
@@ -303,7 +303,7 @@ pub async fn register(&self, handle: SessionHandle) {
 
 ### 🟡-7: 权限请求超时后 pending_perms 泄漏（300秒窗口）
 
-**文件**: `crates/ergatai-acp/src/sdk_session.rs:484-509`
+**文件**: `crates/ergatai-tmux/src/sdk_session.rs:484-509`
 **类别**: 内存泄漏 / DoS
 
 ```rust
@@ -335,7 +335,7 @@ let outcome = match tokio::time::timeout(Duration::from_secs(300), response_rx).
 
 ### 🟢-1: `close_chat_sessions` 的 target 计算竞态
 
-**文件**: `crates/ergatai-acp/src/manager.rs:256-262`
+**文件**: `crates/ergatai-tmux/src/manager.rs:256-262`
 **类别**: 正确性
 
 ```rust
@@ -412,7 +412,7 @@ let is_valid = auth_header
 
 ### 🟢-5: `is_server_running` 的 TOCTOU 竞态
 
-**文件**: `crates/ergatai-acp/src/mcp.rs:259-302`
+**文件**: `crates/ergatai-tmux/src/mcp.rs:259-302`
 **类别**: 正确性
 
 ```rust
@@ -446,13 +446,13 @@ fn is_server_running(name: &str) -> bool {
 | 模式 | 位置 | 说明 |
 |------|------|------|
 | **RAII TransactionGuard** | `ergatai-lock/src/lock_manager.rs:35-65` | 事务自动回滚，防止 panic 导致的锁泄漏 |
-| **CompletionGuard** | `ergatai-acp/src/sdk_pool_manager.rs:338-347` | Drop-based 完成信号，防止 pool agent 永久 busy |
-| **WaiterCleanup** | `ergatai-acp/src/sdk_session.rs:213-221` | RAII 清理审批等待者，防止超时/错误时泄漏 |
-| **kill_on_drop(true)** | `ergatai-acp/src/mcp.rs:335` | 确保 MCP 子进程不会泄漏 |
+| **CompletionGuard** | `ergatai-tmux/src/sdk_pool_manager.rs:338-347` | Drop-based 完成信号，防止 pool agent 永久 busy |
+| **WaiterCleanup** | `ergatai-tmux/src/sdk_session.rs:213-221` | RAII 清理审批等待者，防止超时/错误时泄漏 |
+| **kill_on_drop(true)** | `ergatai-tmux/src/mcp.rs:335` | 确保 MCP 子进程不会泄漏 |
 | **NatsServer Drop** | `ergatai-nats/src/server.rs:198-211` | kill + wait 正确清理子进程 |
 | **路径遍历防护** | `ergatai-api/src/main.rs:262-265` | 拒绝 `..` 组件 |
 | **配置权限保护** | 安全修复（2026-08-13） | 配置文件 0o600 权限 |
-| **spawn_blocking** | `ergatai-acp/src/sdk_session.rs:844` | 正确地将阻塞 I/O 移出 async 上下文 |
+| **spawn_blocking** | `ergatai-tmux/src/sdk_session.rs:844` | 正确地将阻塞 I/O 移出 async 上下文 |
 | **原子操作** | 多处 `AtomicU64/AtomicUsize` | 无锁计数器，避免不必要的 Mutex |
 
 ---

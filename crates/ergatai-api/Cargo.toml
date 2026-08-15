@@ -12,8 +12,6 @@ path = "src/main.rs"
 [dependencies]
 # Core library
 ergatai-core = { path = "../ergatai-core" }
-# ACP protocol (HTTP client)
-ergatai-acp = { path = "../ergatai-acp" }
 # NATS messaging
 ergatai-nats = { path = "../ergatai-nats" }
 
@@ -60,10 +58,6 @@ metrics-exporter-prometheus = "0.16"
 # Utilities
 uuid.workspace = true
 chrono.workspace = true
-url = "2.5"
-
-# HTTP client (for ACP forwarding) - uses rustls from workspace
-reqwest.workspace = true
 
 [dev-dependencies]
 tokio-test = "0.4"

@@ -132,10 +132,10 @@ Ergatai 支持两种 Agent 来源：
 
 | agentBase | 默认 command | 说明 |
 |-----------|-------------|------|
-| `claude` | `claude-agent-acp` | Claude Code ACP wrapper |
-| `codex` | `codex-acp` | Codex ACP wrapper |
+| `claude` | `claude` | Claude Code CLI（在 tmux 中运行） |
+| `codex` | `codex` | Codex CLI |
 | `goose` | `goose` | Goose CLI |
-| `hermes` | `hermes-acp` | Hermes ACP wrapper |
+| `hermes` | `hermes` | Hermes CLI |
 
 ## 启动流程
 
@@ -150,14 +150,14 @@ Ergatai 支持两种 Agent 来源：
     ↓
 3. 裁剪后的 JSON = 原 agent 配置
     ↓
-4. agentBase → 查映射表 → command = "claude-agent-acp"
+4. agentBase → 查映射表 → command = "claude"
    （如果配置中有 command 字段则用用户的）
     ↓
 5. 如果 proxy 不为空 → 注入 HTTP_PROXY/HTTPS_PROXY 到 env
     ↓
-6. 通过 ACP NewSessionRequest.mcpServers 注入 Ergatai MCP Server
+6. 通过 MCP client 配置注入 Ergatai MCP Server
     ↓
-7. 启动子进程：command + args + env + 裁剪后的配置
+7. 在 tmux pane 中启动子进程：command + args + env + 裁剪后的配置
 ```
 
 ## 系统默认 Agent

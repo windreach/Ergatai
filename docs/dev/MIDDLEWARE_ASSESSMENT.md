@@ -1,7 +1,7 @@
 # 中间件架构改造效果评估
 
 **评估日期**: 2026-08-14  
-**评估范围**: 中间件架构完整性、ACP 协议使用情况
+**评估范围**: 中间件架构完整性、tmux 注入协议使用情况
 
 ---
 
@@ -10,7 +10,7 @@
 ### ✅ 已完成的改造（约 60%）
 
 #### 1. 基础架构层
-- ✅ **HTTP ACP 客户端** (`http_client.rs`, 369 行)
+- ✅ **HTTP tmux 注入 客户端** (`http_client.rs`, 369 行)
   - 连接管理
   - 会话创建
   - 基础消息发送
@@ -22,12 +22,12 @@
 
 - ✅ **通信协议**
   - 代理通过 MCP 连接 Ergatai
-  - 代理暴露 ACP HTTP 端点
+  - 代理暴露 tmux 注入 端点
   - 双向通信机制建立
 
 #### 2. 代理管理
 - ✅ **Agent 注册表** - 跟踪已连接的代理
-- ✅ **ACP 端点注册** - 代理可以注册自己的 HTTP 端点
+- ✅ **tmux pane注册** - 代理可以注册自己的 HTTP 端点
 - ✅ **消息路由** - 通过 HTTP 向代理推送消息
 
 #### 3. 示例和测试
@@ -42,8 +42,8 @@
 **位置**: `crates/ergatai-collab/src/agent_launcher.rs:423-439`
 
 ```rust
-async fn spawn_acp_session(...) -> ErgataiResult<()> {
-    // TODO(middleware): Implement HTTP ACP connection
+async fn spawn_agent_session(...) -> ErgataiResult<()> {
+    // TODO(middleware): Implement HTTP tmux 注入 connection
     tracing::warn!("Agent spawning disabled in middleware mode...");
     Err(ErgataiError::AgentSpawnFailed(...))
 }
@@ -57,9 +57,9 @@ async fn spawn_acp_session(...) -> ErgataiResult<()> {
 **需要实现**:
 ```rust
 // 伪代码
-async fn spawn_acp_session(&self, agent_id: &str, ...) {
-    // 1. 从 AgentRegistry 获取 ACP 端点
-    let endpoint = registry.get_acp_endpoint(agent_id).await?;
+async fn spawn_agent_session(&self, agent_id: &str, ...) {
+    // 1. 从 AgentRegistry 获取 tmux 注入 端点
+    let endpoint = registry.get_tmux_pane(agent_id).await?;
     
     // 2. 通过 HttpConnectionManager 连接
     let session_id = http_manager.connect(agent_id, &endpoint, cwd, kind).await?;
@@ -78,18 +78,18 @@ async fn spawn_acp_session(&self, agent_id: &str, ...) {
 ```rust
 // TODO(middleware): Re-enable after HTTP client migration
 // tracing::info!("Step 1/5: shutting down agent pools...");
-// crate::acp::sdk_pool_manager::acp_pool_shutdown_all().await;
+// crate::tmux::sdk_pool_manager::tmux_pool_shutdown_all().await;
 ```
 
 **影响**: 优雅关闭流程不完整
 
 ---
 
-## 二、ACP 协议使用情况分析
+## 二、tmux 注入协议使用情况分析
 
 ### 📊 使用率统计
 
-| 功能类别 | ACP 功能 | 使用状态 | 代码位置 |
+| 功能类别 | tmux 注入 功能 | 使用状态 | 代码位置 |
 |---------|---------|---------|---------|
 | **连接管理** | Initialize | ✅ 已使用 | http_client.rs:121 |
 | | NewSession | ✅ 已使用 | http_client.rs:129 |
@@ -187,17 +187,17 @@ async fn spawn_acp_session(&self, agent_id: &str, ...) {
 
 1. **架构方向正确**
    - 代理独立运行，生命周期自管理
-   - 通过标准协议（MCP/ACP）通信
+   - 通过标准协议（MCP/tmux）通信
    - 松耦合设计
 
 2. **通信机制完善**
    - MCP: 代理 → Ergatai（工具调用）
-   - ACP HTTP: Ergatai → 代理（推送消息）
+   - tmux 注入: Ergatai → 代理（推送消息）
    - 双向通信已建立
 
 3. **代理发现机制**
    - 代理通过 MCP 注册
-   - 代理暴露 ACP 端点
+   - 代理暴露 tmux 注入 端点
    - 动态发现和管理
 
 ### ❌ 不合适的方面
@@ -206,7 +206,7 @@ async fn spawn_acp_session(&self, agent_id: &str, ...) {
    - DAG 执行无法工作 → 多代理协作失效
    - 这是中间件最重要的功能之一
 
-2. **ACP 协议使用不充分**
+2. **tmux 注入协议使用不充分**
    - 只用了 30% 的基础功能
    - 无法监控代理状态
    - 无法控制代理行为
@@ -226,16 +226,16 @@ async fn spawn_acp_session(&self, agent_id: &str, ...) {
 
 ### 🔴 高优先级（必须修复）
 
-#### 1. 完成 DAG 执行的 HTTP ACP 集成
+#### 1. 完成 DAG 执行的 HTTP tmux 注入 集成
 **预估工作量**: 2-3 天  
 **影响**: 核心功能恢复
 
 ```rust
 // agent_launcher.rs
-async fn spawn_acp_session(&self, agent_id: &str, ...) {
+async fn spawn_agent_session(&self, agent_id: &str, ...) {
     let registry = get_agent_registry().await;
-    let endpoint = registry.get_acp_endpoint(agent_id)
-        .ok_or_else(|| anyhow!("Agent {} has no ACP endpoint", agent_id))?;
+    let endpoint = registry.get_tmux_pane(agent_id)
+        .ok_or_else(|| anyhow!("Agent {} has no tmux pane", agent_id))?;
     
     let http_manager = http_connection_manager();
     let session_id = http_manager
@@ -304,12 +304,12 @@ async fn spawn_acp_session(&self, agent_id: &str, ...) {
 **影响**: 可靠性
 
 ```rust
-// 定期检查 ACP 端点
+// 定期检查 tmux 注入 端点
 async fn health_check_loop() {
     loop {
         let agents = registry.list_agents().await;
         for agent in agents {
-            if let Some(endpoint) = agent.acp_endpoint {
+            if let Some(endpoint) = agent.tmux_pane {
                 let healthy = check_health(&endpoint).await;
                 if !healthy {
                     warn!("Agent {} is unhealthy", agent.id);
@@ -339,7 +339,7 @@ async fn health_check_loop() {
 
 - ✅ 架构方向正确（60% 完成）
 - ❌ 核心功能缺失（DAG 执行）
-- ⚠️ ACP 协议使用不充分（30%）
+- ⚠️ tmux 注入协议使用不充分（30%）
 - ❌ 缺少中间件应有的监控和管理功能
 
 ### 是否适合作为中间件？
@@ -353,13 +353,13 @@ async fn health_check_loop() {
 - 基本监控能力
 
 **长期（完成所有改进后）**: ✅✅ **适合成为完整的协作中间件**
-- 完整的 ACP 协议支持
+- 完整的 tmux 注入协议支持
 - 完善的监控和管理
 - 生产级可靠性
 
 ### 建议下一步
 
-1. **立即**: 完成 DAG 执行的 HTTP ACP 集成（2-3 天）
+1. **立即**: 完成 DAG 执行的 HTTP tmux 注入 集成（2-3 天）
 2. **本周**: 实现 SessionNotification 处理（1 天）
 3. **下周**: 实现权限审批流程（2 天）
 4. **后续**: 逐步添加监控、健康检查等功能

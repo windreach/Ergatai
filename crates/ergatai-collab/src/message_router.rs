@@ -4,7 +4,7 @@
 //! When an agent's output contains `@target_agent`, the router:
 //! 1. Extracts the mention
 //! 2. Publishes an AgentMessagePayload to NATS
-//! 3. The target agent's ACP session receives the message
+//! 3. The target agent receives the message via tmux injection or MCP notification
 
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};

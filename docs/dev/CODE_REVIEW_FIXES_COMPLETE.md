@@ -48,7 +48,7 @@ let from_agent = self.session_agent_id.read().await
 
 ### 🔴 Fix #2: Auto-Approving Permission Requests (High - Security)
 
-**File**: `crates/ergatai-acp/src/http_client.rs`
+**File**: `crates/ergatai-tmux/src/http_client.rs`
 
 **Problem**: Permission requests from agents were silently auto-approved without any logging or audit trail, creating a security risk.
 
@@ -149,7 +149,7 @@ pub fn create_mcp_service(
 // Validation now uses dynamic address
 if endpoint.contains(self.ergatai_own_address.as_str()) {
     return Ok(CallToolResult::error(vec![Content::text(format!(
-        "Invalid endpoint: Cannot register Ergatai's own address ({}) as ACP endpoint.",
+        "Invalid endpoint: Cannot register Ergatai's own address ({}) as tmux pane.",
         self.ergatai_own_address
     ))]));
 }
@@ -161,7 +161,7 @@ if endpoint.contains(self.ergatai_own_address.as_str()) {
 
 ### 🟡 Fix #5: Complex Error Handling (Medium)
 
-**File**: `crates/ergatai-acp/src/http_client.rs`
+**File**: `crates/ergatai-tmux/src/http_client.rs`
 
 **Problem**: Error handling used two nested oneshot channels (`session_id_tx` and `inner_session_tx`) with confusing logic that was hard to verify for correctness.
 
@@ -236,7 +236,7 @@ done
 
 ### 🟡 Fix #7: Unused Global Registry (Medium)
 
-**File**: `crates/ergatai-acp/src/agent_registry.rs`
+**File**: `crates/ergatai-tmux/src/agent_registry.rs`
 
 **Problem**: The global `AGENT_REGISTRY` and `agent_registry()` function were defined but appeared unused, creating confusion.
 
@@ -250,7 +250,7 @@ done
 /// Global agent registry instance.
 ///
 /// This is used by components that need to look up agent information
-/// (e.g., AgentLauncher looking up ACP endpoints) without having the
+/// (e.g., AgentLauncher looking up tmux panes) without having the
 /// registry passed explicitly through the call chain.
 static AGENT_REGISTRY: OnceLock<AgentRegistry> = OnceLock::new();
 
@@ -269,7 +269,7 @@ pub fn agent_registry() -> &'static AgentRegistry {
 
 ### 🟡 Fix #8: Lost Task Errors (Medium)
 
-**File**: `crates/ergatai-acp/src/http_client.rs`
+**File**: `crates/ergatai-tmux/src/http_client.rs`
 
 **Problem**: The connection task's `JoinHandle<()>` return type meant errors and panics in the connection task were silently lost.
 
@@ -357,7 +357,7 @@ While all identified issues have been fixed, the following improvements are reco
 
 ### High Priority
 1. **Implement proper approval flow**: Replace auto-approval with user consent UI or configurable policies
-2. **Add HTTPS support**: ACP endpoints currently use HTTP only
+2. **Add HTTPS support**: tmux panes currently use HTTP only
 3. **Add authentication**: Implement mTLS or API tokens for agent authentication
 
 ### Medium Priority

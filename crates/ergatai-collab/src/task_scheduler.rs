@@ -1,5 +1,5 @@
 // Task Scheduler - Manages task distribution to agents
-// Global singleton, persistent queue, ACP-based status checking
+// Global singleton, persistent queue, MCP-based status checking
 
 use std::path::PathBuf;
 use std::sync::Arc;

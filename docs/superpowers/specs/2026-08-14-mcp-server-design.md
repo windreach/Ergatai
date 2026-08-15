@@ -13,27 +13,27 @@
 
 - 无头服务进程（headless daemon）
 - 在 agents 之间转发消息
-- 双向通信：MCP（agent→Ergatai）+ ACP（Ergatai→agent）
+- 双向通信：MCP（agent→Ergatai）+ tmux 注入（Ergatai→agent）
 
 ## 架构设计
 
 ### 通信架构
 
 ```
-Agent A ←→ MCP ←→ Ergatai ←→ ACP ←→ Agent B
+Agent A ←→ MCP ←→ Ergatai ←→ tmux ←→ Agent B
 ```
 
 **两层通信**:
 - **MCP** (Agent → Ergatai): Agent 是 client，Ergatai 是 server
   - Agents 通过 MCP 发送消息给 Ergatai
   - Ergatai 接收并路由消息
-- **ACP** (Ergatai → Agent): Ergatai 是 client，Agent 是 server
-  - Ergatai 通过 ACP 转发消息给目标 agents
-  - Agents 作为 ACP server 接收消息
+- **tmux 注入** (Ergatai → Agent): Ergatai 是 client，Agent 是 server
+  - Ergatai 通过 tmux 转发消息给目标 agents
+  - Agents 作为 tmux server 接收消息
 
 **关键要求**:
 - 每个 agent 必须安装 Ergatai 的 MCP（作为 MCP client）
-- 每个 agent 必须暴露 ACP server（接收 Ergatai 的消息）
+- 每个 agent 必须暴露 tmux server（接收 Ergatai 的消息）
 - Ergatai 在中间 relay 消息
 
 ### 数据流示例
@@ -45,10 +45,10 @@ Agent A ←→ MCP ←→ Ergatai ←→ ACP ←→ Agent B
    ↓ (MCP: agent 是 client, Ergatai 是 server)
 2. Ergatai MCP Server 接收消息
    - 解析目标 agent (Agent B)
-   - 查找 Agent B 的 ACP 连接
+   - 查找 Agent B 的 tmux 连接
    ↓
-3. Ergatai 通过 ACP 转发给 Agent B
-   ↓ (ACP: Ergatai 是 client, agent 是 server)
+3. Ergatai 通过 tmux 转发给 Agent B
+   ↓ (tmux: Ergatai 是 client, agent 是 server)
 4. Agent B 处理并响应
    ↓
 5. Ergatai 通过 MCP 转发回 Agent A
@@ -61,7 +61,7 @@ Agent A ←→ MCP ←→ Ergatai ←→ ACP ←→ Agent B
 2. MCP connection handshake 包含健康检查
 3. 健康检查返回: agent_id, capabilities, status
 4. Ergatai 记录该 agent 为"活跃"
-5. Agent 同时暴露 ACP server，等待 Ergatai 的消息
+5. Agent 同时暴露 tmux server，等待 Ergatai 的消息
 6. 通过 `list_agents` tool 查询活跃 agents
 
 ### 权限模型
@@ -103,8 +103,8 @@ Agent A ←→ MCP ←→ Ergatai ←→ ACP ←→ Agent B
 ```
 
 **实现**:
-- 查找目标 agent 的 ACP 连接
-- 通过 ACP 转发消息
+- 查找目标 agent 的 tmux 连接
+- 通过 tmux 转发消息
 - 等待响应并返回
 
 ### 2. `list_agents`
@@ -161,7 +161,7 @@ Agent A ←→ MCP ←→ Ergatai ←→ ACP ←→ Agent B
 - 解析 DAG markdown
 - 创建 TaskGraph
 - 通过 NATS 分发任务
-- 启动 task agents (ACP)
+- 启动 task agents (tmux 注入)
 
 ### 4. `check_dag_status`
 
@@ -210,12 +210,12 @@ Agent A ←→ MCP ←→ Ergatai ←→ ACP ←→ Agent B
 **目标**: 实现 `send_message` 和 `list_agents`
 
 **任务**:
-1. `send_message` - 通过 ACP 转发消息给目标 agent
+1. `send_message` - 通过 tmux 转发消息给目标 agent
 2. `list_agents` - 查询活跃 agents
-3. 集成 ACP client（Ergatai 连接 agent 的 ACP server）
+3. 集成 tmux client（Ergatai 连接 agent 的 tmux server）
 
 **依赖**:
-- `ergatai-acp` - ACP client 实现
+- `ergatai-tmux` - tmux client 实现
 
 ### Phase 3: DAG 编排 Tools
 
@@ -224,7 +224,7 @@ Agent A ←→ MCP ←→ Ergatai ←→ ACP ←→ Agent B
 **任务**:
 1. 集成 DAG 编排引擎
 2. 通过 NATS 分发任务
-3. 启动 task agents (ACP)
+3. 启动 task agents (tmux 注入)
 
 **依赖**:
 - `ergatai-dag` - DAG 编排
@@ -258,7 +258,7 @@ Agent A ←→ MCP ←→ Ergatai ←→ ACP ←→ Agent B
 ### 传输协议
 
 **MCP**: HTTP + WebSocket（支持本地和远程 agents）
-**ACP**: stdio（agents 作为子进程）或 HTTP（远程 agents）
+**tmux 注入**: stdio（agents 作为子进程）或 HTTP（远程 agents）
 
 ## 迁移策略
 
@@ -271,7 +271,7 @@ Agent A ←→ MCP ←→ Ergatai ←→ ACP ←→ Agent B
 ### 保留的内容
 
 - ✅ `ergatai-core` - 业务逻辑
-- ✅ `ergatai-acp` - ACP client（Ergatai 连接 agents）
+- ✅ `ergatai-tmux` - tmux client（Ergatai 连接 agents）
 - ✅ `ergatai-dag` - DAG 编排
 - ✅ `ergatai-lock` - 文件锁
 - ✅ `ergatai-nats` - 内部消息
@@ -284,8 +284,8 @@ Agent A ←→ MCP ←→ Ergatai ←→ ACP ←→ Agent B
 ## 风险与挑战
 
 1. **MCP 协议成熟度**: MCP 还在演进，需要跟进规范变化
-2. **Agent 兼容性**: 不同 agent 的 MCP/ACP 支持可能不同
-3. **性能**: 双层通信（MCP + ACP）可能增加延迟
+2. **Agent 兼容性**: 不同 agent 的 MCP/tmux 支持可能不同
+3. **性能**: 双层通信（MCP + tmux 注入）可能增加延迟
 4. **调试**: 多 agent 消息 relay 的调试复杂度
 
 ## 成功标准

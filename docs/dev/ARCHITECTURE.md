@@ -21,9 +21,9 @@ crates/
 
 ```
 ergatai-core/src/
-├── acp/                    # ACP 协议层
+├── tmux/                    # tmux 注入层
 │   ├── manager.rs          # 会话管理器
-│   ├── sdk_session.rs      # ACP SDK 会话
+│   ├── sdk_session.rs      # tmux 注入器 会话
 │   ├── sdk_pool.rs         # 会话池
 │   └── ...
 ├── nats/                   # NATS 消息系统
@@ -55,7 +55,7 @@ ergatai-core/src/
 
 | 层级 | 协议 | 方向 | 用途 |
 |------|------|------|------|
-| **Agent ↔ Ergatai** | ACP (JSON-RPC over stdio) | 双向 | 提示、响应、工具调用、权限 |
+| **Agent ↔ Ergatai** | tmux 注入 (JSON-RPC over stdio) | 双向 | 提示、响应、工具调用、权限 |
 | **Ergatai 内部** | NATS (JetStream) | 事件流 | 任务路由、完成事件、文件通知 |
 
 ### Agent 通信流程
@@ -65,7 +65,7 @@ ergatai-core/src/
     ↓
 CLI 生成 DAG 定义
     ↓
-DagScheduler 解析 → NATS 分发任务 → Sub-agents A/B/C (ACP 执行)
+DagScheduler 解析 → NATS 分发任务 → Sub-agents A/B/C (tmux 注入执行)
                    ↑ NATS 事件转发完成状态
 ```
 
@@ -219,7 +219,7 @@ cargo fmt --all
 | 组件 | 技术 |
 |------|------|
 | 语言 | Rust 100% |
-| Agent 协议 | ACP (agent-client-protocol v2) |
+| Agent 协议 | tmux 注入 (tmux-injection v2) |
 | 消息系统 | NATS (async-nats 0.38) + JetStream |
 | 数据库 | SQLite (rusqlite 0.31) |
 | CLI 框架 | clap + ratatui + crossterm |
@@ -232,7 +232,7 @@ cargo fmt --all
 
 **核心基础设施：**
 - NATS 消息系统 + JetStream 流
-- ACP 协议集成 + 会话池管理
+- tmux 注入协议集成 + 会话池管理
 - DAG 编排引擎 + 模板系统
 - 文件访问控制 + 令牌锁定
 - Agent 发现 + 配置管理

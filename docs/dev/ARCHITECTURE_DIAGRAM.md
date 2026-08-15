@@ -11,19 +11,19 @@
 │  │  - 接收工具返回值                                        │  │
 │  └──────────────────────────────────────────────────────────┘  │
 │  ┌──────────────────────────────────────────────────────────┐  │
-│  │  (可选) ACP Server                                       │  │
+│  │  (可选) tmux 注入 Server                                       │  │
 │  │  - 接收 Ergatai 推送的任务                               │  │
-│  │  - OpenCode TUI 没有这个，只有 opencode acp 才有        │  │
+│  │  - OpenCode TUI 没有这个，只有 opencode tmux 才有        │  │
 │  └──────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────┘
-         │ MCP (工具调用)                      ▲ ACP HTTP (可选)
-         │ POST /mcp                           │ POST /acp
+         │ MCP (工具调用)                      ▲ tmux 注入 (可选)
+         │ POST /mcp                           │ POST /tmux
          ▼                                     │
 ┌─────────────────────────────────────────────────────────────────┐
 │                        Ergatai (中间件)                          │
 │                                                                  │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐  │
-│  │  MCP Server  │  │  Agent       │  │  ACP HTTP Client     │  │
+│  │  MCP Server  │  │  Agent       │  │  tmux 注入 Client     │  │
 │  │  (rmcp SDK)  │  │  Registry    │  │  (推送任务给 agent)  │  │
 │  │  端口: 3000  │  │  (agent 列表)│  │                      │  │
 │  └──────────────┘  └──────────────┘  └──────────────────────┘  │
@@ -31,9 +31,9 @@
 │           ▼                    ▼                     ▼            │
 │  ┌──────────────────────────────────────────────────────────┐  │
 │  │  消息路由层 (message_relay)                               │  │
-│  │  - 检查目标 agent 是否有 ACP endpoint                    │  │
-│  │  - 有 ACP → HTTP 直接推送                                │  │
-│  │  - 无 ACP → NATS 消息队列                                │  │
+│  │  - 检查目标 agent 是否有 tmux pane                    │  │
+│  │  - 有 tmux 注入 → HTTP 直接推送                                │  │
+│  │  - 无 tmux 注入 → NATS 消息队列                                │  │
 │  └──────────────────────────────────────────────────────────┘  │
 │                          │                                       │
 │                          ▼                                       │
@@ -45,7 +45,7 @@
 │  └──────────────────────────────────────────────────────────┘  │
 │                                                                  │
 └─────────────────────────────────────────────────────────────────┘
-         ▲ MCP                                    │ ACP HTTP (可选)
+         ▲ MCP                                    │ tmux 注入 (可选)
          │                                        ▼
 ┌────────┴────────────────────────────────────────────────────────┐
 │                    Agent B (OpenCode TUI #2)                     │
@@ -54,7 +54,7 @@
 │  │  - 调用工具: list_agents, send_message, list_messages   │  │
 │  └──────────────────────────────────────────────────────────┘  │
 │  ┌──────────────────────────────────────────────────────────┐  │
-│  │  (可选) ACP Server                                       │  │
+│  │  (可选) tmux 注入 Server                                       │  │
 │  │  - OpenCode TUI 没有这个                                 │  │
 │  └──────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────┘
@@ -74,17 +74,17 @@ Agent A                    Ergatai                      Agent B
    │ ─────────────────────────►│                            │
    │   (MCP: POST /mcp)        │                            │
    │                           │                            │
-   │                           │ 2. 检查 Agent B 的 ACP     │
+   │                           │ 2. 检查 Agent B 的 tmux 注入     │
    │                           │    endpoint                │
    │                           │                            │
-   │                           │ 3a. 有 ACP?                │
+   │                           │ 3a. 有 tmux?                │
    │                           │ ┌─────────────────────────┐│
-   │                           │ │ HTTP POST B's /acp      ││
+   │                           │ │ HTTP POST B's tmux pane      ││
    │                           │ │ (直接推送)              ││
    │                           │ └─────────────────────────┘│
    │                           │         │                  │
    │                           │         │                  │
-   │                           │ 3b. 无 ACP?                │
+   │                           │ 3b. 无 tmux?                │
    │                           │ ┌─────────────────────────┐│
    │                           │ │ NATS publish            ││
    │                           │ │ ergatai.agent.message.B ││
@@ -112,19 +112,19 @@ Agent A                    Ergatai                      Agent B
 ### 修改前（有问题）
 
 ```rust
-// send_message 只能使用 ACP
+// send_message 只能使用 tmux 注入
 async fn send_message(...) {
-    // 1. 必须注册 ACP endpoint，否则报错
-    if !agent.has_acp_endpoint() {
-        return Error("Agent has no ACP endpoint");
+    // 1. 必须注册 tmux pane，否则报错
+    if !agent.has_tmux_pane() {
+        return Error("Agent has no tmux pane");
     }
     
-    // 2. HTTP 推送到 ACP endpoint
-    http_client.post(agent.acp_endpoint).send(message);
+    // 2. HTTP 推送到 tmux pane
+    http_client.post(agent.tmux_pane).send(message);
 }
 
-// set_acp_endpoint 没有验证
-async fn set_acp_endpoint(...) {
+// register_tmux_pane 没有验证
+async fn register_tmux_pane(...) {
     // 任何 agent 可以注册任何 endpoint
     // 甚至可以注册 Ergatai 自己的端口！
     registry.set_endpoint(agent_id, endpoint);
@@ -132,19 +132,19 @@ async fn set_acp_endpoint(...) {
 ```
 
 **问题：**
-- ❌ OpenCode TUI 没有 ACP，无法通信
+- ❌ OpenCode TUI 没有 tmux，无法通信
 - ❌ Agent 可以注册 `localhost:3000`（Ergatai 自己）
 - ❌ Agent 可以修改别人的 endpoint
 
 ### 修改后（支持混合模式）
 
 ```rust
-// send_message 支持 ACP + NATS 双模式
+// send_message 支持 tmux 注入 + NATS 双模式
 async fn send_message(...) {
-    if agent.has_acp_endpoint() {
-        // 模式 1: ACP HTTP 直接推送
-        http_client.post(agent.acp_endpoint).send(message);
-        return {delivery: "acp_http"};
+    if agent.has_tmux_pane() {
+        // 模式 1: tmux 注入 直接推送
+        http_client.post(agent.tmux_pane).send(message);
+        return {delivery: "tmux_http"};
     } else {
         // 模式 2: NATS 消息队列（新增！）
         nats.publish("ergatai.agent.message.{id}", message);
@@ -152,8 +152,8 @@ async fn send_message(...) {
     }
 }
 
-// set_acp_endpoint 添加验证
-async fn set_acp_endpoint(...) {
+// register_tmux_pane 添加验证
+async fn register_tmux_pane(...) {
     // 1. 验证不是 Ergatai 自己的端口
     if endpoint.contains("localhost:3000") {
         return Error("Cannot register Ergatai's own address");
@@ -169,27 +169,27 @@ async fn set_acp_endpoint(...) {
 - ✅ 防止注册 Ergatai 自己的端口
 - ⚠️ 权限验证待完善（目前任何 agent 可以设置任何 endpoint）
 
-## 4. OpenCode TUI vs OpenCode ACP
+## 4. OpenCode TUI vs OpenCode tmux
 
-| 特性 | OpenCode TUI (`opencode`) | OpenCode ACP (`opencode acp`) |
+| 特性 | OpenCode TUI (`opencode`) | OpenCode tmux 注入 (`opencode tmux`) |
 |------|---------------------------|-------------------------------|
 | 启动方式 | 交互式终端 | 无头 HTTP 服务 |
 | MCP Client | ✅ 有（调用 Ergatai 工具） | ✅ 有 |
-| ACP Server | ❌ 无 | ✅ 有（但会崩溃） |
+| tmux 注入 Server | ❌ 无 | ✅ 有（但会崩溃） |
 | 使用场景 | 人工交互 | 自动化调度 |
 | 你的脚本 | ✅ 用这个 | ❌ 不稳定 |
 
-**结论：** 你的 OpenCode 实例是 TUI 模式，没有 ACP endpoint，所以需要用 NATS 消息队列来通信。
+**结论：** 你的 OpenCode 实例是 TUI 模式，没有 tmux pane，所以需要用 NATS 消息队列来通信。
 
 ## 5. 当前支持的通信方式
 
 ```
-Agent A (有 ACP) ──ACP HTTP──→ Agent B (有 ACP)
+Agent A (有 tmux) ──tmux 注入──→ Agent B (有 tmux)
    ✓ 直接推送                      ✓ 实时接收
 
-Agent A (无 ACP) ──NATS──→ Ergatai ──NATS──→ Agent B (无 ACP)
+Agent A (无 tmux) ──NATS──→ Ergatai ──NATS──→ Agent B (无 tmux)
    ✓ 发送消息              队列存储           ✓ 轮询获取
 
-Agent A (任意) ──MCP──→ Ergatai ──ACP──→ Agent B (有 ACP)
+Agent A (任意) ──MCP──→ Ergatai ──tmux──→ Agent B (有 tmux)
    ✓ 调用 send_message    路由选择         ✓ 实时推送
 ```

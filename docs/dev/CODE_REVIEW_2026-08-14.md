@@ -11,13 +11,13 @@
 This review covers a major architectural shift from **agent hosting** to **middleware mode**, where agents now:
 1. Run independently and manage their own lifecycle
 2. Connect to Ergatai via MCP (Model Context Protocol)
-3. Expose ACP HTTP endpoints for Ergatai to push tasks
-4. Register their endpoints via `set_acp_endpoint` tool
+3. Expose tmux 注入 endpoints for Ergatai to push tasks
+4. Register their endpoints via `register_tmux_pane` tool
 
 **Key Changes**:
 - New MCP server using `rmcp` SDK with Streamable HTTP transport (protocol 2025-06-18)
-- HTTP ACP client for connecting to remote agents
-- NATS → ACP message forwarder for bidirectional communication
+- HTTP tmux 注入 client for connecting to remote agents
+- NATS → tmux 注入 message forwarder for bidirectional communication
 - Agent registry for tracking connected agents
 - Example agent demonstrating middleware usage
 - Integration tests for the new architecture
@@ -146,7 +146,7 @@ This review covers a major architectural shift from **agent hosting** to **middl
 1. **Clean separation of concerns**
    - Agent registry tracks state
    - HTTP client handles connections
-   - Message forwarder bridges NATS → ACP
+   - Message forwarder bridges NATS → tmux
    - MCP server handles protocol
 
 2. **Good use of Arc<RwLock<T>>** for shared state with async support
@@ -191,14 +191,14 @@ This review covers a major architectural shift from **agent hosting** to **middl
 
 1. **Auto-approval of permissions** (http_client.rs:98-99) - HIGH RISK
 2. **No authentication** between Ergatai and agents (relies on network isolation)
-3. **No encryption** for ACP endpoints (HTTP, not HTTPS)
+3. **No encryption** for tmux panes (HTTP, not HTTPS)
 4. **Hardcoded "mcp-client" sender** could enable spoofing
 
 ### 📋 Recommendations
 
 1. Implement proper approval flow for permission requests
 2. Add mTLS or API tokens for agent authentication
-3. Support HTTPS for ACP endpoints
+3. Support HTTPS for tmux panes
 4. Track actual sender identity in MCP session context
 
 ---
@@ -208,9 +208,9 @@ This review covers a major architectural shift from **agent hosting** to **middl
 ### ✅ Completed
 
 - [x] MCP server migration to rmcp SDK
-- [x] HTTP ACP client implementation
+- [x] HTTP tmux 注入 client implementation
 - [x] Agent registry
-- [x] NATS → ACP forwarder
+- [x] NATS → tmux 注入 forwarder
 - [x] Example agent
 - [x] Integration tests
 - [x] Basic error handling
@@ -226,8 +226,8 @@ This review covers a major architectural shift from **agent hosting** to **middl
 
 - [ ] Agent hosting logic (removed, not migrated)
 - [ ] Agent discovery (removed, not migrated)
-- [ ] ACP session pooling (commented out)
-- [ ] MCP servers in ergatai-acp (commented out)
+- [ ] agent session pooling (commented out)
+- [ ] MCP servers in ergatai-tmux (commented out)
 
 ---
 
@@ -236,7 +236,7 @@ This review covers a major architectural shift from **agent hosting** to **middl
 ### Unit Tests Needed
 
 ```rust
-// crates/ergatai-acp/src/http_client.rs
+// crates/ergatai-tmux/src/http_client.rs
 #[cfg(test)]
 mod tests {
     #[tokio::test]
@@ -299,9 +299,9 @@ The migration is functional and demonstrates the new architecture well via the e
 
 ### Modified Files (19)
 - `Cargo.toml`
-- `crates/ergatai-acp/Cargo.toml`
-- `crates/ergatai-acp/src/lib.rs`
-- `crates/ergatai-acp/src/sdk_pool_manager.rs`
+- `crates/ergatai-tmux/Cargo.toml`
+- `crates/ergatai-tmux/src/lib.rs`
+- `crates/ergatai-tmux/src/sdk_pool_manager.rs`
 - `crates/ergatai-agent/Cargo.toml`
 - `crates/ergatai-agent/src/lib.rs`
 - `crates/ergatai-api/Cargo.toml`
@@ -321,8 +321,8 @@ The migration is functional and demonstrates the new architecture well via the e
 - `crates/ergatai-nats/src/server.rs`
 
 ### New Files (6)
-- `crates/ergatai-acp/src/agent_registry.rs`
-- `crates/ergatai-acp/src/http_client.rs`
+- `crates/ergatai-tmux/src/agent_registry.rs`
+- `crates/ergatai-tmux/src/http_client.rs`
 - `crates/ergatai-api/src/mcp/message_forwarder.rs`
 - `examples/simple-agent/Cargo.toml`
 - `examples/simple-agent/src/main.rs`

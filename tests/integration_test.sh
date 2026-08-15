@@ -1,6 +1,6 @@
 #!/bin/bash
 # Integration test for middleware architecture
-# Tests: Agent connects via MCP → registers ACP endpoint → receives messages
+# Tests: Agent connects via MCP → registers → receives messages via tmux injection / MCP notification
 # Updated for MCP 2025-03-26 Streamable HTTP transport
 
 set -e
@@ -130,10 +130,6 @@ if echo "$TOOLS_RESPONSE" | grep -q '"send_message"'; then
     log "Tools list contains send_message ✓"
 fi
 
-if echo "$TOOLS_RESPONSE" | grep -q '"set_acp_endpoint"'; then
-    log "Tools list contains set_acp_endpoint ✓"
-fi
-
 # ── Test agent registration ──
 
 log "Testing list_agents tool (should show test-agent)..."
@@ -203,27 +199,12 @@ else
     warn "simple-agent not found (expected if it doesn't implement MCP client)"
 fi
 
-# ── Test ACP endpoint directly ──
-
-log "Testing ACP endpoint directly..."
-ACP_RESPONSE=$(curl -s -X POST http://localhost:8080/acp/session/new \
-    -H "Content-Type: application/json" \
-    -d '{"cwd":"/tmp"}')
-
-log "ACP session creation response: $ACP_RESPONSE"
-
-if echo "$ACP_RESPONSE" | grep -q "session_id"; then
-    log "ACP endpoint works! ✓"
-else
-    error "ACP endpoint failed"
-    exit 1
-fi
-
 log ""
 log "============================================"
 log "All integration tests PASSED!"
 log "============================================"
 log ""
 log "MCP Protocol: 2025-03-26 (Streamable HTTP + SSE)"
+log "Message delivery: tmux injection (preferred) + MCP notification (fallback)"
 log "API log: /tmp/ergatai-api.log"
 log "Agent log: /tmp/simple-agent.log"

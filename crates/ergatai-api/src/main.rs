@@ -31,18 +31,12 @@ use tower_governor::{
     governor::GovernorConfigBuilder,
     key_extractor::KeyExtractor,
 };
-use ergatai_core::acp::manager as acp_manager;
-// TODO(middleware): Re-enable after HTTP client migration
-// use ergatai_core::acp::sdk_session::spawn_session_task_with_kind;
-// use ergatai_core::agent::config::{get_agent_config, AgentConfig};
-// use ergatai_core::agent::discovery::discover_acp_runtimes;
-// use ergatai_core::agent::hosted_config::list_hosted_agents;
-use ergatai_core::cross_agent::{get_dag_scheduler, DagScheduler};
+use ergatai_core::cross_agent::{get_dag_scheduler, set_dag_scheduler, DagScheduler};
 use ergatai_core::nats;
 
 // MCP module
 mod mcp;
-use mcp::{create_mcp_service, start_nats_acp_forwarder, start_peer_reaper};
+use mcp::{create_mcp_service, start_peer_reaper};
 
 /// Shared application state available to all handlers.
 #[derive(Clone)]
@@ -136,13 +130,6 @@ struct Args {
     #[arg(long, env = "ERGATAI_TLS_KEY")]
     tls_key: Option<PathBuf>,
 
-    /// Automatically approve all agent permission requests.
-    /// WARNING: This bypasses security controls. Only use in trusted development environments.
-    /// Without this flag, all permission requests from agents will be denied.
-    /// Can also be set via ERGATAI_AUTO_APPROVE environment variable.
-    #[arg(long, env = "ERGATAI_AUTO_APPROVE")]
-    auto_approve: bool,
-
     /// SSE keep-alive interval in seconds. Lower values detect dead clients faster
     /// but increase network traffic. Default: 15.
     /// Can also be set via ERGATAI_SSE_KEEP_ALIVE environment variable.
@@ -186,7 +173,7 @@ async fn async_main(args: Args) -> Result<()> {
     tracing::info!("Prometheus metrics exporter initialized");
 
     // Install OS signal handlers (SIGINT/SIGTERM) so child processes
-    // (NATS, MCP, ACP sessions) are cleaned up gracefully on Ctrl+C.
+    // (NATS, tmux panes) are cleaned up gracefully on Ctrl+C.
     if let Err(e) = ergatai_core::setup_signal_handlers().await {
         eprintln!("Warning: failed to install signal handlers: {}", e);
     }
@@ -225,16 +212,19 @@ async fn async_main(args: Args) -> Result<()> {
         tracing::warn!("TLS disabled - using plaintext HTTP. Provide --tls-cert and --tls-key for HTTPS.");
     }
 
-    // Configure permission approval policy
-    ergatai_acp::permission::set_auto_approve(args.auto_approve);
-
     // Initialize MCP server with Streamable HTTP transport
     let mcp_registry = std::sync::Arc::new(mcp::AgentRegistry::new());
     let peer_registry = mcp::server::new_peer_registry();
+
+    // Initialize Tmux manager for agent message injection
+    let tmux_manager = std::sync::Arc::new(ergatai_core::tmux::TmuxManager::new("ergatai-opencode"));
+    tracing::info!("Tmux manager initialized (session: ergatai)");
+
     let mcp_cancellation_token = CancellationToken::new();
     let mcp_service = create_mcp_service(
         mcp_registry.clone(),
         peer_registry.clone(),
+        tmux_manager.clone(),
         mcp_cancellation_token.clone(),
         args.sse_keep_alive,
     );
@@ -242,7 +232,7 @@ async fn async_main(args: Args) -> Result<()> {
         "MCP server initialized (protocol 2025-06-18, Streamable HTTP, SSE keep-alive: {}s)",
         args.sse_keep_alive
     );
-    tracing::info!("Agent messaging: MCP notification (no ACP HTTP endpoint required)");
+    tracing::info!("Agent messaging: Tmux injection (preferred) + MCP notification (fallback)");
 
     // Start background peer reaper — detects abrupt disconnects (kill, network drop)
     // and cleans up stale agent registrations within 10 seconds.
@@ -265,10 +255,6 @@ async fn async_main(args: Args) -> Result<()> {
             return Err(anyhow::anyhow!("NATS initialization failed: {}", e));
         }
     }
-
-    // Start NATS → ACP message forwarder (legacy, kept for backward compatibility)
-    start_nats_acp_forwarder(mcp_registry.clone(), mcp_cancellation_token.clone());
-    tracing::info!("NATS → ACP message forwarder started (legacy)");
 
     // Build application router
     let state = app_state_with_token(args.api_token.clone()).clone();
@@ -456,15 +442,7 @@ struct AgentSummary {
 struct StatusResponse {
     nats_initialized: bool,
     nats_port: Option<u16>,
-    sessions: Vec<SessionInfo>,
-}
-
-#[derive(Debug, Serialize)]
-struct SessionInfo {
-    session_id: String,
-    agent_name: String,
-    cwd: String,
-    status: String,
+    active_agents: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -556,7 +534,7 @@ fn validate_cwd(cwd: &str) -> Result<PathBuf, String> {
 
 /// GET /api/v1/status — system status snapshot.
 ///
-/// Returns NATS connectivity status and the list of active ACP sessions.
+/// Returns NATS connectivity status and connected agent count.
 async fn get_status() -> impl IntoResponse {
     // Record status request metric
     metrics::counter!("api_requests_total", "endpoint" => "status").increment(1);
@@ -564,40 +542,72 @@ async fn get_status() -> impl IntoResponse {
     let nats_initialized = nats::is_nats_initialized().await;
     let nats_port = nats::get_nats_server_port().await;
 
-    let sessions: Vec<SessionInfo> = acp_manager::manager()
-        .list_sessions()
-        .await
-        .into_iter()
-        .map(|s| SessionInfo {
-            session_id: s.session_id,
-            agent_name: s.agent_name,
-            cwd: s.cwd,
-            status: s.status,
-        })
-        .collect();
+    let active_agents = ergatai_core::agent_registry::agent_registry().active_count().await;
 
-    // Record active sessions gauge
-    metrics::gauge!("active_sessions").set(sessions.len() as f64);
+    // Record active agents gauge
+    metrics::gauge!("active_agents").set(active_agents as f64);
 
     Json(StatusResponse {
         nats_initialized,
         nats_port,
-        sessions,
+        active_agents,
     })
 }
 
-/// POST /api/v1/dag — placeholder for DAG submission.
+/// POST /api/v1/dag — submit a DAG workflow for execution.
 ///
-/// A full implementation would parse the markdown body, build a `TaskGraph`,
-/// and set a `DagScheduler`. For now we return a 501 so clients can detect
-/// that the endpoint exists but is not yet wired up.
-async fn submit_dag() -> impl IntoResponse {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(ErrorResponse {
-            error: "DAG submission is not yet implemented".to_string(),
-        }),
-    )
+/// Accepts a markdown-formatted DAG definition as the request body.
+/// Parses it into a TaskGraph, creates a DagScheduler, and starts execution.
+async fn submit_dag(body: String) -> impl IntoResponse {
+    // Check if a DAG is already running
+    if let Some(existing) = get_dag_scheduler() {
+        if !existing.is_complete().await {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "A DAG is already running. Wait for completion or check status.",
+                })),
+            );
+        }
+    }
+
+    // Parse markdown → TaskGraph
+    let graph = match ergatai_core::orchestration::parse_dag_markdown(&body) {
+        Ok(g) => g,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": format!("Failed to parse DAG definition: {}", e),
+                })),
+            );
+        }
+    };
+
+    let state = APP_STATE.get().expect("AppState initialized");
+    let project_root = PathBuf::from(&state.default_cwd);
+    let scheduler = DagScheduler::new(project_root, graph);
+
+    // Register globally + start event listener
+    set_dag_scheduler(scheduler.clone());
+    scheduler.clone().start_event_listener();
+
+    // Submit the graph
+    match scheduler.submit_graph().await {
+        Ok(submitted) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "status": "submitted",
+                "submitted_nodes": submitted.len(),
+            })),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": format!("Failed to submit DAG: {}", e),
+            })),
+        ),
+    }
 }
 
 /// GET /api/v1/dag/status — DAG scheduler status.

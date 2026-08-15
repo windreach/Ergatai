@@ -88,84 +88,68 @@ cargo build --release -p ergatai-api
 
 **3. Start collaborating** — agents auto-register on connect and can immediately call `list_agents`, `send_message`, `submit_orchestration`, and `check_dag_status`.
 
-📖 See [MCP Configuration Guide](docs/MCP_CONFIG_GUIDE.md) and [ACP SDK Guide](docs/ACP_SDK_GUIDE.md) for full details.
+📖 See [MCP Configuration Guide](docs/MCP_CONFIG_GUIDE.md) for full details.
 
 <br/>
 
 # Architecture
 
-### System Overview
-
 ```
-                    ┌─────────────────────────────────────────────────┐
-                    │        Agents (run independently)                │
-                    │                                                  │
-  ┌──────────┐      │   ┌──────────┐  ┌──────────┐  ┌──────────┐    │
-  │  Claude   │      │   │  Cursor   │  │  Codex   │  │  Custom   │    │
-  │  Code     │      │   │  Agent   │  │  Agent   │  │  Agent    │    │
-  └────┬─────┘      │   └────┬─────┘  └────┬─────┘  └────┬─────┘    │
-       │             │        │              │              │          │
-       └───────┬─────┴────────┴──────┬───────┴──────┬───────┘          │
-               │                     │              │                  │
-    ┌──────────┴──────────┐          │              │                  │
-    │                     │          │              │                  │
-    ▼                     ▼          ▼              ▼                  │
- MCP (inbound)        ACP (outbound)               MCP notifications
- tools/call           HTTP push                    ergatai/message
-    │                     ▲                            ▲
-    │                     │                            │
-    ▼                     │                            │
-┌──────────────────────────────────────────────────────────────────────┐
-│                       Ergatai Middleware                             │
-│                                                                      │
-│  ┌───────────────────────────────────────────────────────────────┐  │
-│  │                    Protocol Layer                             │  │
-│  │  ┌──────────────┐  ┌──────────────┐  ┌────────────────────┐  │  │
-│  │  │MCP Server    │  │ACP HTTP      │  │Notification Router │  │  │
-│  │  │(JSON-RPC,    │  │Client        │  │(MCP custom         │  │  │
-│  │  │ SSE streams) │  │(push to      │  │ notifications)     │  │  │
-│  │  │              │  │ agents)      │  │                    │  │  │
-│  │  └──────────────┘  └──────────────┘  └────────────────────┘  │  │
-│  └───────────────────────────────────────────────────────────────┘  │
-│                               │                                      │
-│  ┌────────────────────────────┼────────────────────────────────┐    │
-│  │              Core Business Logic                             │    │
-│  │                     │                                        │    │
-│  │   ┌─────────────────┼────────────────────────────┐          │    │
-│  │   │                 │                            │          │    │
-│  │   ▼                 ▼                            ▼          │    │
-│  │ ┌──────────┐  ┌────────────┐              ┌──────────────┐  │    │
-│  │ │Agent     │  │DAG         │              │File Access   │  │    │
-│  │ │Registry  │  │Scheduler   │              │Control       │  │    │
-│  │ │          │  │            │              │              │  │    │
-│  │ │• Discover│  │• Parse DAG │              │• READ/WRITE/ │  │    │
-│  │ │• Track   │  │• Resolve   │              │  ADMIN locks │  │    │
-│  │ │• Heartbeat│ │  deps      │              │• Git snapshot│  │    │
-│  │ │• Reap    │  │• Schedule  │              │• Conflict    │  │    │
-│  │ │  stale   │  │• Template  │              │  arbitration │  │    │
-│  │ │  agents  │  │• Data flow │              │• Heartbeat   │  │    │
-│  │ └──────────┘  └────────────┘              └──────────────┘  │    │
-│  │                                                              │    │
-│  └────────────────────────────┬────────────────────────────────┘    │
-│                               │                                      │
-│  ┌────────────────────────────┼────────────────────────────────┐    │
-│  │              NATS Event Bus (JetStream)                     │    │
-│  │                     │                                        │    │
-│  │   ┌─────────────────┼────────────────────────────┐          │    │
-│  │   │                 │                            │          │    │
-│  │   ▼                 ▼                            ▼          │    │
-│  │ ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐    │    │
-│  │ │TASK_QUEUE    │  │FILE_ACCESS   │  │FILE_EVENTS       │    │    │
-│  │ │(WorkQueue)   │  │(JetStream)   │  │(ready/error)     │    │    │
-│  │ └──────────────┘  └──────────────┘  └──────────────────┘    │    │
-│  └──────────────────────────────────────────────────────────────┘    │
-└──────────────────────────────────────────────────────────────────────┘
-               │                             │
-               ▼                             ▼
-     ┌──────────────────┐          ┌──────────────────┐
-     │  Shared Codebase  │          │   SQLite DBs     │
-     │  (file locking)   │          │  .ergatai/*.db   │
-     └──────────────────┘          └──────────────────┘
+  ┌──────────────────────────────────────────────────────────────┐
+  │                       Agents                                 │
+  │                                                              │
+  │     Claude Code   │   Cursor   │   Codex   │    ...         │
+  └────────┬──────────────────┬─────────────┬───────────────────┘
+           │                  │             │
+           │ MCP              │ MCP         │ MCP
+           │ tools/call       │ tools/call  │ tools/call
+           ▼                  ▼             ▼
+  ┌──────────────────────────────────────────────────────────────┐
+  │                    Ergatai Middleware                        │
+  │                                                              │
+  │  ┌────────────────────────────────────────────────────────┐ │
+  │  │                 Protocol Layer                          │ │
+  │  │                                                         │ │
+  │  │    ┌───────────────┐                ┌───────────────┐  │ │
+  │  │    │  MCP Server   │                │   tmux        │  │ │
+  │  │    │               │   notify       │   injector    │  │ │
+  │  │    │  • JSON-RPC   │◄──────────────►│               │  │ │
+  │  │    │  • SSE stream │                │  • send-keys  │  │ │
+  │  │    │  • Tools API  │                │  • Pane write │  │ │
+  │  │    └───────┬───────┘                └───────┬───────┘  │ │
+  │  └────────────┼────────────────────────────────┼──────────┘ │
+  │               │                                │            │
+  │  ┌────────────┴────────────────────────────────┴──────────┐ │
+  │  │                 Application Layer                       │ │
+  │  │                                                         │ │
+  │  │    ┌──────────────┐ ┌──────────────┐ ┌──────────────┐  │ │
+  │  │    │Agent Registry│ │ DAG Scheduler│ │ File Access  │  │ │
+  │  │    │              │ │              │ │  Control     │  │ │
+  │  │    │ • Discover   │ │ • Parse DAG  │ │              │  │ │
+  │  │    │ • Heartbeat  │ │ • Resolve    │ │ • Locks      │  │ │
+  │  │    │ • Reap stale │ │ • Schedule   │ │ • Snapshot   │  │ │
+  │  │    │              │ │ • Template   │ │ • Conflict   │  │ │
+  │  │    └──────────────┘ └──────────────┘ └──────────────┘  │ │
+  │  └──────────────────────────┬─────────────────────────────┘ │
+  │                             │                               │
+  │  ┌──────────────────────────┴─────────────────────────────┐ │
+  │  │                  Event Bus Layer                        │ │
+  │  │                                                         │ │
+  │  │         ┌──────────────────────────────────┐           │ │
+  │  │         │      NATS  +  JetStream           │           │ │
+  │  │         │                                    │           │ │
+  │  │         │  TASK_QUEUE │ FILE_ACCESS          │           │ │
+  │  │         │  FILE_EVENTS│ LOCK_WAITERS         │           │ │
+  │  │         └──────────────────────────────────┘           │ │
+  │  └────────────────────────────────────────────────────────┘ │
+  └──────────────────────────┬──────────────────────────────────┘
+                             │
+               ┌─────────────┴─────────────┐
+               ▼                           ▼
+     ┌───────────────────┐      ┌─────────────────────┐
+     │  Shared Codebase  │      │  SQLite Database    │
+     │  (with file lock) │      │  .ergatai/*.db      │
+     └───────────────────┘      └─────────────────────┘
 ```
 
 ### Dual Protocol Stack
@@ -175,42 +159,61 @@ Ergatai uses two independent protocols for bidirectional communication:
 | Direction | Protocol | Purpose |
 |-----------|----------|---------|
 | **Agent → Ergatai** | MCP (Streamable HTTP) | Agents call tools: `list_agents`, `send_message`, `submit_orchestration`, `check_dag_status` |
-| **Ergatai → Agent** | ACP (HTTP client) | Ergatai pushes tasks and messages to agent's ACP HTTP endpoint |
+| **Ergatai → Agent** | tmux injection (preferred) + MCP notification (fallback) | Ergatai delivers tasks/messages by writing directly into the agent's tmux pane, falling back to MCP notifications when tmux is unavailable |
 
 **Agent registration flow:**
 1. Agent connects to Ergatai via MCP (as MCP client)
-2. Agent calls `set_acp_endpoint` to register its ACP HTTP endpoint
-3. Ergatai can now push messages/tasks to the agent via ACP HTTP
+2. Agent calls tools (e.g. `list_agents`, `send_message`) to interact with Ergatai
+3. Ergatai pushes tasks/messages back via tmux injection into the agent's pane (or MCP notification as fallback)
 
-**Key point**: Agents must expose an ACP HTTP endpoint to receive messages. Ergatai uses HTTP ACP client to push work — agents never need to open incoming ports manually, but they do need to run an ACP-compatible HTTP server.
+**Key point**: Agents do NOT need to expose any incoming endpoint. Ergatai delivers messages by injecting keystrokes into the agent's tmux pane (the preferred path), or by pushing MCP notifications over the existing SSE stream when tmux is not available.
 
 ### DAG Orchestration Flow
 
 The core value of Ergatai — parallel multi-agent workflows with dependencies:
 
 ```
-User submits DAG                    Ergatai schedules & executes
-─────────────────                   ─────────────────────────────
+  ① Submit                 ② Parse & Resolve           ③ Parallel Execution
+  ────────                 ─────────────────           ────────────────────
 
- ┌─────────────────┐
- │  Markdown DAG   │                ┌────────┐    ┌────────┐
- │  Definition     │───────────────▶│ Task A │───▶│ Task B │
- │                 │   parse &      │(Claude)│    │(Cursor)│
- │  ## Task A      │   validate     └────────┘    └───┬───┘
- │  ## Task B      │                                  │
- │  ## Task C      │                ┌────────┐        │
- │  depends_on: A  │───────────────▶│ Task C │◀───────┘
- └─────────────────┘   schedule     │(Codex) │
-                                    └────────┘
+  ┌──────────────┐         ┌──────────────┐
+  │  Markdown    │         │   DAG        │
+  │  Definition  │────────▶│   Engine     │
+  │              │         │              │
+  │  ## Task A   │         │  validate    │
+  │  ## Task B   │         │  resolve     │
+  │  ## Task C   │         │  deps        │
+  │  depends_on  │         └──────┬───────┘
+  └──────────────┘                │
+                                  ▼
+                         ┌────────────────┐
+                         │   Scheduler    │
+                         │                │
+                         │  A ──┬──▶ B    │
+                         │   └───▶ C      │
+                         └────────────────┘
 
-                                    Timeline ──────────────────▶
-                                    
-                                    Agent A: ████ complete
-                                    Agent B:     ██ depends on A
-                                    Agent C:     █████ depends on A
-                                    
-                                    Template vars: {{TaskA.output}}
-                                    flows into downstream tasks
+  ─────────────────────────────────────────────────────────────────────
+
+  Task Dependency Graph                    Execution Timeline
+  ─────────────────────                    ──────────────────
+
+       ┌──────────┐                        Time ──────────────────────▶
+       │  Task A  │
+       │ (Claude) │                        A: ████████  done
+       └────┬─────┘
+            │                               B: ·······██████  done
+       ┌────┴─────┐
+       │          │                         C: ·······██████████  done
+       ▼          ▼
+  ┌─────────┐ ┌─────────┐
+  │ Task B  │ │ Task C  │                  Template Data Flow
+  │(Cursor) │ │(Codex)  │                  ──────────────────
+  └─────────┘ └─────────┘
+                                        TaskA.output ──▶ TaskB.input
+                                        TaskA.output ──▶ TaskC.input
+                                        {{TaskA.review_result}} rendered
+                                        at schedule time
 ```
 
 <br/>
@@ -334,7 +337,6 @@ ergatai/
 ├── crates/
 │   ├── ergatai-core/      # Core library — business logic facade
 │   ├── ergatai-api/       # MCP server + REST API (main entry point)
-│   ├── ergatai-acp/       # ACP protocol layer
 │   ├── ergatai-collab/    # Multi-agent collaboration primitives
 │   ├── ergatai-dag/       # DAG parser, scheduler, dependency resolution
 │   ├── ergatai-nats/      # Embedded NATS server + JetStream streams
@@ -342,7 +344,7 @@ ergatai/
 │   ├── ergatai-agent/     # Agent config, discovery, hosted agents
 │   └── ergatai-error/     # Shared error types
 ├── docs/
-│   └── MCP_CONFIG_GUIDE.md, ACP_SDK_GUIDE.md, ...
+│   └── MCP_CONFIG_GUIDE.md, ...
 ├── examples/
 │   └── simple-agent/      # Minimal MCP agent example
 ├── Cargo.toml
