@@ -156,13 +156,30 @@ pub const MAX_RETRIES: u32 = 5;
 /// - Retry 2: 4000ms + jitter(0-2000ms)
 /// - Retry 3: 8000ms + jitter(0-4000ms)
 /// - Retry 4: 16000ms + jitter(0-8000ms)
+///
+/// The jitter uses a pseudo-random source seeded from system time to ensure
+/// different agents compute different delays even with the same retry_count,
+/// preventing thundering herd collisions.
 pub fn compute_backoff_ms(retry_count: u32) -> u64 {
     let base_ms: u64 = 1000;
     let delay = base_ms.saturating_mul(1u64 << retry_count.min(6));
-    // Deterministic jitter based on retry_count (no randomness needed at this layer —
-    // the caller can add jitter if desired, or we use a simple hash-based spread).
-    // For simplicity, add a fixed 25% spread based on retry_count to avoid thundering herd.
-    let jitter = delay / 4 * ((retry_count as u64 + 1) % 3);
+    // Pseudo-random jitter in [0, delay/2). Uses system time for non-determinism
+    // so different agents compute different delays on each retry, defeating the
+    // thundering herd problem that a deterministic formula would cause.
+    let max_jitter = delay / 2;
+    let jitter = if max_jitter == 0 {
+        0
+    } else {
+        // Mix nanosecond time with a hash of the current time for cheap,
+        // non-deterministic spread across concurrent callers.
+        let now_nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+        // XOR-fold to get decent spread from the lower bits
+        let seed = now_nanos ^ (now_nanos >> 17) ^ (now_nanos >> 34);
+        seed % max_jitter
+    };
     delay + jitter
 }
 

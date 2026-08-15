@@ -60,6 +60,7 @@ metrics-exporter-prometheus = "0.16"
 # Utilities
 uuid.workspace = true
 chrono.workspace = true
+url = "2.5"
 
 # HTTP client (for ACP forwarding) - uses rustls from workspace
 reqwest.workspace = true

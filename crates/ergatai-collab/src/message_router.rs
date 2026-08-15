@@ -17,17 +17,23 @@ use ergatai_error::ErgataiResult;
 use ergatai_nats::{get_nats_connection, is_nats_initialized, AgentMessagePayload, EventBus};
 
 // Compile regex once at startup.
+// Use look-behind to require @ appears at start of string or after whitespace,
+// preventing false positives on email addresses (user@example.com) and URLs.
 static MENTION_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"@([a-zA-Z0-9_-]+)").expect("valid regex"));
+    LazyLock::new(|| Regex::new(r"(?m)(?:^|(?<=\s))@([a-zA-Z0-9_-]+)").expect("valid regex"));
 
 /// Detect @agent mentions in text
 ///
-/// Returns a list of agent names mentioned (without the @ prefix).
+/// Returns a deduplicated list of agent names mentioned (without the @ prefix).
+/// Only matches @ at word boundaries (start of line or after whitespace) to
+/// avoid false positives on email addresses and URLs.
 /// Example: "@codex please review" → ["codex"]
 pub fn extract_mentions(text: &str) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
     MENTION_RE
         .captures_iter(text)
         .filter_map(|cap| cap.get(1).map(|m| m.as_str().to_string()))
+        .filter(|name| seen.insert(name.clone()))
         .collect()
 }
 
@@ -44,18 +50,10 @@ pub async fn route_agent_message(
     content: &str,
     thread_id: Option<String>,
 ) -> ErgataiResult<()> {
-    if !is_nats_initialized().await {
-        warn!("NATS not initialized, cannot route agent message");
-        return Ok(());
-    }
-
-    let conn = match get_nats_connection().await {
-        Some(c) => c,
-        None => {
-            warn!("NATS connection not available");
-            return Ok(());
-        }
-    };
+    let conn = get_nats_connection().await.ok_or_else(|| {
+        warn!("NATS connection not available, cannot route agent message");
+        ergatai_error::ErgataiError::internal("NATS connection not available")
+    })?;
 
     let bus = EventBus::new(conn);
 

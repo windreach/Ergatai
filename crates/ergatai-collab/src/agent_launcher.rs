@@ -576,7 +576,7 @@ Write your results in markdown:
         any
     }
 
-    /// Clean up agent resources (ACP session + worktree)
+    /// Clean up agent resources (ACP session + worktree + tokens)
     pub async fn cleanup_agent(&self, agent_id: &str) -> ErgataiResult<()> {
         if let Some(agent) = self.running_agents.lock().await.remove(agent_id) {
             // Close ACP session if still active
@@ -589,6 +589,30 @@ Write your results in markdown:
                 if let Ok(watchdog) = ergatai_lock::get_watchdog(&agent.task_id).await {
                     let watchdog = watchdog.write().await;
                     let _ = watchdog.clear_busy(session_id).await;
+                }
+            }
+
+            // SECURITY: Revoke file access tokens so completed/failed agents
+            // don't retain file write permissions beyond their lifetime.
+            if let Some(ref token_id) = agent.token_id {
+                match ergatai_lock::get_lock_manager(&agent.task_id).await {
+                    Ok(lock_manager) => {
+                        if let Err(e) = lock_manager.expire_token(token_id) {
+                            tracing::warn!(
+                                agent_id = %agent_id,
+                                token_id = %token_id,
+                                error = %e,
+                                "Failed to expire file access token during cleanup"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::debug!(
+                            agent_id = %agent_id,
+                            error = %e,
+                            "Lock manager not available for token revocation (may not be initialized)"
+                        );
+                    }
                 }
             }
         }
@@ -629,7 +653,7 @@ Write your results in markdown:
             // Lock released here
         };
 
-        // Now send Close commands without holding the lock
+        // Now send Close commands and revoke tokens without holding the lock
         for (agent_id, session_id) in &stale_sessions {
             if let Some(cmd_tx) = session_manager().get_cmd_tx(session_id).await {
                 if let Err(e) = cmd_tx.send(SessionCommand::Close) {

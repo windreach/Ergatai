@@ -63,8 +63,19 @@ pub async fn init_nats() -> ErgataiResult<NatsConnection> {
     if let Some(existing_conn) = &state.connection {
         if existing_conn.is_connected() {
             info!("NATS initialized by another task while we were connecting");
+            // Our newly-started server is redundant — drop triggers NatsServer::Drop
+            // which kills the child process cleanly.
             return Ok(existing_conn.clone());
         }
+    }
+
+    // Clean up stale state: if a prior connection existed but is now disconnected,
+    // explicitly drop it (and its server) before replacing. This prevents zombie
+    // NATS processes from accumulating across re-init cycles.
+    if state.server.is_some() || state.connection.is_some() {
+        info!("Replacing stale/disconnected NATS state");
+        state.connection = None; // drop old connection first (uses server)
+        state.server = None;     // drop old server (kills child process)
     }
 
     state.server = Some(server);

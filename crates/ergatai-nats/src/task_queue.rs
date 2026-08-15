@@ -172,8 +172,12 @@ impl<T: Serialize + for<'de> Deserialize<'de> + Send + Sync + 'static> NatsTaskQ
         match message {
             Ok(Some(Ok(msg))) => {
                 let payload: TaskMessage<T> = serde_json::from_slice(&msg.payload)?;
+                let message_id_for_log = payload.message_id.clone();
 
-                let ack = ConsumerAck { message: msg };
+                let ack = ConsumerAck {
+                    message: msg,
+                    message_id: message_id_for_log,
+                };
 
                 debug!(message_id = payload.message_id, "Task consumed");
                 Ok(Some((payload, ack)))
@@ -215,6 +219,8 @@ impl<T: Serialize + for<'de> Deserialize<'de> + Send + Sync + 'static> NatsTaskQ
 /// Acknowledgment handle for a consumed message
 pub struct ConsumerAck {
     message: async_nats::jetstream::Message,
+    /// Parsed message ID for logging (avoid re-parsing the payload at ack time)
+    message_id: String,
 }
 
 impl ConsumerAck {
@@ -227,17 +233,21 @@ impl ConsumerAck {
             .await
             .map_err(|e| ErgataiError::NatsError(format!("Failed to ack message: {}", e)))?;
 
-        debug!(message_id = "unknown", "Task acknowledged");
+        debug!(message_id = %self.message_id, "Task acknowledged");
         Ok(())
     }
 
-    /// Negative acknowledgment - request redelivery
+    /// Negative acknowledgment — request redelivery.
+    ///
+    /// For now, we do nothing and let the message sit unacknowledged. It will
+    /// be redelivered after the `ack_wait` timeout (5 minutes). A future
+    /// improvement would use NATS's immediate-redelivery signal, but the
+    /// async-nats 0.38 `jetstream::Message` API doesn't expose a straightforward
+    /// `nak()` method. The timeout-based approach is reliable, just slower.
     pub async fn nack(self) -> ErgataiResult<()> {
-        // For negative ack, we just don't acknowledge the message.
-        // It will timeout after ack_wait and be redelivered.
         debug!(
-            message_id = "unknown",
-            "Task nacked (will redeliver after timeout)"
+            message_id = %self.message_id,
+            "Task nacked (will redeliver after ack_wait timeout)"
         );
         Ok(())
     }

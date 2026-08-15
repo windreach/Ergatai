@@ -5,7 +5,6 @@
 //! via this module instead of spawning agent processes.
 
 use std::sync::{Arc, OnceLock};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use agent_client_protocol::{Client, ConnectionTo, Agent};
 use agent_client_protocol_http::HttpClient;
@@ -14,134 +13,6 @@ use tokio::sync::{mpsc, oneshot, RwLock};
 use tracing::{error, info, warn};
 
 use crate::manager::{SessionCommand, SessionKind};
-
-/// Circuit breaker states
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CircuitState {
-    /// Circuit is closed, requests flow normally
-    Closed,
-    /// Circuit is open, requests are rejected
-    Open,
-    /// Circuit is half-open, testing if service recovered
-    HalfOpen,
-}
-
-/// Circuit breaker for ACP HTTP connections.
-///
-/// Prevents cascading failures by stopping requests to unhealthy agents.
-/// After N consecutive failures, the circuit opens for M seconds.
-/// In half-open state, one successful request closes the circuit.
-pub struct CircuitBreaker {
-    /// Current state
-    state: Arc<RwLock<CircuitState>>,
-    /// Consecutive failure count
-    failures: Arc<AtomicU32>,
-    /// Failure threshold to open circuit
-    failure_threshold: u32,
-    /// Recovery timeout in seconds
-    recovery_timeout_secs: u64,
-    /// Timestamp when circuit was opened
-    opened_at: Arc<AtomicU64>,
-}
-
-impl CircuitBreaker {
-    /// Create a new circuit breaker with default settings.
-    ///
-    /// Default: 5 failures threshold, 30 seconds recovery timeout.
-    pub fn new() -> Self {
-        Self::with_config(5, 30)
-    }
-
-    /// Create a circuit breaker with custom configuration.
-    ///
-    /// # Arguments
-    /// * `failure_threshold` - Number of consecutive failures before opening
-    /// * `recovery_timeout_secs` - Seconds to wait before trying half-open
-    pub fn with_config(failure_threshold: u32, recovery_timeout_secs: u64) -> Self {
-        Self {
-            state: Arc::new(RwLock::new(CircuitState::Closed)),
-            failures: Arc::new(AtomicU32::new(0)),
-            failure_threshold,
-            recovery_timeout_secs,
-            opened_at: Arc::new(AtomicU64::new(0)),
-        }
-    }
-
-    /// Check if the circuit allows requests.
-    ///
-    /// Returns Ok(()) if requests are allowed, Err if circuit is open.
-    pub async fn check(&self) -> Result<()> {
-        let state = *self.state.read().await;
-        match state {
-            CircuitState::Closed => Ok(()),
-            CircuitState::Open => {
-                // Check if recovery timeout has elapsed
-                let opened_at = self.opened_at.load(Ordering::SeqCst);
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-
-                if now - opened_at >= self.recovery_timeout_secs {
-                    // Transition to half-open
-                    let mut state = self.state.write().await;
-                    *state = CircuitState::HalfOpen;
-                    info!("Circuit breaker transitioning to half-open state");
-                    Ok(())
-                } else {
-                    Err(anyhow::anyhow!(
-                        "Circuit breaker is open, rejecting request. Retry after {} seconds",
-                        self.recovery_timeout_secs - (now - opened_at)
-                    ))
-                }
-            }
-            CircuitState::HalfOpen => Ok(()), // Allow one test request
-        }
-    }
-
-    /// Record a successful request.
-    pub async fn record_success(&self) {
-        self.failures.store(0, Ordering::SeqCst);
-        let mut state = self.state.write().await;
-        if *state == CircuitState::HalfOpen {
-            *state = CircuitState::Closed;
-            info!("Circuit breaker closed after successful request");
-        }
-    }
-
-    /// Record a failed request.
-    pub async fn record_failure(&self) {
-        let failures = self.failures.fetch_add(1, Ordering::SeqCst) + 1;
-
-        if failures >= self.failure_threshold {
-            let mut state = self.state.write().await;
-            if *state != CircuitState::Open {
-                *state = CircuitState::Open;
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-                self.opened_at.store(now, Ordering::SeqCst);
-                warn!(
-                    "Circuit breaker opened after {} consecutive failures. \
-                     Will retry after {} seconds",
-                    failures, self.recovery_timeout_secs
-                );
-            }
-        }
-    }
-
-    /// Get current circuit state.
-    pub async fn state(&self) -> CircuitState {
-        *self.state.read().await
-    }
-}
-
-impl Default for CircuitBreaker {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 /// Connection to a remote agent via HTTP ACP.
 ///
@@ -163,8 +34,39 @@ impl HttpAcpClient {
     /// * `agent_id` - Identifier for the agent
     /// * `endpoint` - The agent's ACP HTTP endpoint URL (e.g., "http://localhost:8080")
     pub fn new(agent_id: &str, endpoint: &str) -> Result<Self> {
+        // Validate endpoint URL to prevent SSRF attacks
+        let parsed = url::Url::parse(endpoint)
+            .map_err(|e| anyhow::anyhow!("Invalid endpoint URL '{}': {}", endpoint, e))?;
+
+        let scheme = parsed.scheme();
+        if scheme != "http" && scheme != "https" {
+            anyhow::bail!(
+                "Invalid endpoint scheme '{}': only 'http' and 'https' are allowed (endpoint: {})",
+                scheme,
+                endpoint
+            );
+        }
+
+        // Reject URLs with credentials
+        if parsed.username() != "" || parsed.password().is_some() {
+            anyhow::bail!(
+                "Endpoint URL must not contain credentials (endpoint: {})",
+                endpoint
+            );
+        }
+
+        // Ensure there's a host
+        if parsed.host_str().is_none() {
+            anyhow::bail!(
+                "Endpoint URL must have a valid host (endpoint: {})",
+                endpoint
+            );
+        }
+
         let http_client = HttpClient::new(endpoint)
             .map_err(|e| anyhow::anyhow!("Failed to create HTTP client for {}: {}", endpoint, e))?;
+
+        info!("HTTP ACP client created for agent '{}' at {}", agent_id, endpoint);
 
         Ok(Self {
             endpoint: endpoint.to_string(),
@@ -294,8 +196,14 @@ impl HttpAcpClient {
                     let session_id = new_session.session_id.to_string();
                     info!("Created session {} with agent (V2)", session_id);
 
-                    // Send session ID directly to caller
-                    let _ = session_id_tx.send(Ok(session_id.clone()));
+                    // Send session ID to caller - log error if receiver dropped
+                    if session_id_tx.send(Ok(session_id.clone())).is_err() {
+                        warn!(
+                            "Session ID receiver dropped before session '{}' could be delivered",
+                            session_id
+                        );
+                        return Ok(());
+                    }
 
                     // Command loop - process commands from the session handle
                     let session_id_arc = SessionId::new(session_id);
@@ -400,9 +308,18 @@ impl HttpSessionHandle {
     /// Close the session.
     pub async fn close(self) -> Result<()> {
         let _ = self.cmd_tx.send(SessionCommand::Close);
-        // Wait for the connection task to finish
-        let _ = self.connection_handle.await;
-        Ok(())
+        // Wait for the connection task to finish and propagate any errors
+        match self.connection_handle.await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => {
+                warn!("Connection task for agent '{}' ended with error: {}", self.agent_id, e);
+                Err(e)
+            }
+            Err(e) => {
+                warn!("Connection task for agent '{}' panicked or was cancelled: {}", self.agent_id, e);
+                Err(anyhow::anyhow!("Connection task panicked: {}", e))
+            }
+        }
     }
 
     /// Get the command sender (for registering with SessionManager).
@@ -534,40 +451,5 @@ mod tests {
     async fn test_connection_manager_is_connected() {
         let manager = HttpConnectionManager::new();
         assert!(!manager.is_connected("nonexistent").await);
-    }
-
-    #[tokio::test]
-    async fn test_circuit_breaker_starts_closed() {
-        let cb = CircuitBreaker::new();
-        assert_eq!(cb.state().await, CircuitState::Closed);
-        assert!(cb.check().await.is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_circuit_breaker_opens_after_failures() {
-        let cb = CircuitBreaker::with_config(3, 30);
-
-        // Record 3 failures
-        cb.record_failure().await;
-        cb.record_failure().await;
-        cb.record_failure().await;
-
-        // Circuit should be open
-        assert_eq!(cb.state().await, CircuitState::Open);
-        assert!(cb.check().await.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_circuit_breaker_success_resets_failures() {
-        let cb = CircuitBreaker::with_config(3, 30);
-
-        cb.record_failure().await;
-        cb.record_failure().await;
-        cb.record_success().await; // Reset
-        cb.record_failure().await;
-        cb.record_failure().await;
-
-        // Still closed (only 2 failures after reset)
-        assert_eq!(cb.state().await, CircuitState::Closed);
     }
 }

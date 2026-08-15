@@ -87,12 +87,26 @@ fn find_mcp_configs() -> Vec<PathBuf> {
 fn parse_mcp_config(path: &Path) -> Vec<(String, McpServerEntry)> {
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
-        Err(_) => return Vec::new(),
+        Err(e) => {
+            tracing::warn!(
+                "Failed to read MCP config '{}': {}",
+                path.display(),
+                e
+            );
+            return Vec::new();
+        }
     };
 
     let config: McpConfig = match serde_json::from_str(&content) {
         Ok(c) => c,
-        Err(_) => return Vec::new(),
+        Err(e) => {
+            tracing::error!(
+                "Failed to parse MCP config '{}' — check JSON syntax: {}",
+                path.display(),
+                e
+            );
+            return Vec::new();
+        }
     };
 
     config.servers.into_iter().collect()
@@ -103,11 +117,17 @@ pub fn scan_mcp_servers() -> ErgataiResult<Vec<McpServerInfo>> {
     let mut servers = Vec::new();
     let mut seen: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
 
+    // Determine the canonical user config directory once
+    let user_config_dir: Option<PathBuf> = dirs::config_dir()
+        .map(|d| d.join("ergatai"));
+
     // Scan config files
     for config_path in find_mcp_configs() {
-        let is_user_config = config_path
-            .parent()
-            .map(|p| p.to_string_lossy().contains("ergatai"))
+        // Robust category detection: compare against canonical user config directory
+        // instead of substring matching on the path string
+        let is_user_config = user_config_dir
+            .as_ref()
+            .and_then(|user_dir| config_path.parent().map(|p| p == user_dir))
             .unwrap_or(false);
 
         for (name, entry) in parse_mcp_config(&config_path) {
@@ -191,7 +211,7 @@ pub fn check_builtin_services() -> ErgataiResult<Vec<BuiltinServiceInfo>> {
     let project_root = std::env::current_dir().unwrap_or(PathBuf::from("."));
     let resource_dir = project_root.join("resource");
 
-    // Check rtk
+    // Check rtk — report the first path that actually exists
     let rtk_paths = [
         resource_dir
             .join("rtk")
@@ -201,11 +221,14 @@ pub fn check_builtin_services() -> ErgataiResult<Vec<BuiltinServiceInfo>> {
         PathBuf::from("/usr/local/bin/rtk"),
         PathBuf::from("/usr/bin/rtk"),
     ];
-    let rtk_exists = rtk_paths.iter().any(|p| p.exists());
+    let rtk_found = rtk_paths.iter().find(|p| p.exists());
     services.push(BuiltinServiceInfo {
         name: "rtk".to_string(),
-        binary_path: rtk_paths[0].to_string_lossy().to_string(),
-        status: if rtk_exists {
+        binary_path: rtk_found
+            .unwrap_or(&rtk_paths[0])
+            .to_string_lossy()
+            .to_string(),
+        status: if rtk_found.is_some() {
             "available".to_string()
         } else {
             "missing".to_string()
@@ -213,17 +236,20 @@ pub fn check_builtin_services() -> ErgataiResult<Vec<BuiltinServiceInfo>> {
         version: None,
     });
 
-    // Check codebase-memory-mcp
+    // Check codebase-memory-mcp — report the first path that actually exists
     let cbm_paths = [
         resource_dir.join("codebase-memory-mcp").join("cbm"),
         PathBuf::from("/usr/local/bin/cbm"),
         PathBuf::from("/usr/bin/cbm"),
     ];
-    let cbm_exists = cbm_paths.iter().any(|p| p.exists());
+    let cbm_found = cbm_paths.iter().find(|p| p.exists());
     services.push(BuiltinServiceInfo {
         name: "codebase-memory-mcp".to_string(),
-        binary_path: cbm_paths[0].to_string_lossy().to_string(),
-        status: if cbm_exists {
+        binary_path: cbm_found
+            .unwrap_or(&cbm_paths[0])
+            .to_string_lossy()
+            .to_string(),
+        status: if cbm_found.is_some() {
             "available".to_string()
         } else {
             "missing".to_string()
@@ -305,6 +331,9 @@ fn is_server_running(name: &str) -> bool {
 ///
 /// Spawns the configured command and tracks the child process so it can be
 /// stopped later via [`stop_mcp_server`].
+///
+/// The check-then-act sequence (is_already_running → spawn → insert) is performed
+/// while holding the registry lock to prevent concurrent duplicate starts.
 pub async fn start_mcp_server(name: String) -> ErgataiResult<String> {
     let config = get_mcp_server_config(name.clone())?
         .ok_or_else(|| ErgataiError::internal(format!("MCP server not found: {}", name)))?;
@@ -312,11 +341,6 @@ pub async fn start_mcp_server(name: String) -> ErgataiResult<String> {
     let cmd = config
         .command
         .ok_or_else(|| ErgataiError::internal(format!("No command configured for {}", name)))?;
-
-    // Check if already running
-    if is_server_running(&name) {
-        return Ok(format!("MCP server '{}' is already running", name));
-    }
 
     let mut command = Command::new(&cmd);
     if let Some(args) = &config.args {
@@ -328,7 +352,42 @@ pub async fn start_mcp_server(name: String) -> ErgataiResult<String> {
         }
     }
 
-    // Spawn the child process
+    // Hold the registry lock across the check + spawn + insert sequence
+    // to prevent concurrent duplicate starts (check-then-act race).
+    let mut procs = mcp_registry()
+        .processes
+        .lock()
+        .map_err(|_| ErgataiError::internal("Failed to acquire MCP process registry lock".to_string()))?;
+
+    // Check if already running (under the lock)
+    if let Some(child_arc) = procs.get(&name) {
+        // Probe to see if the process is still alive
+        let mut child_guard = match child_arc.try_lock() {
+            Ok(g) => g,
+            Err(_) => {
+                // Another caller holds the tokio lock — treat as running
+                return Ok(format!("MCP server '{}' is already running", name));
+            }
+        };
+        match child_guard.try_wait() {
+            Ok(Some(_status)) => {
+                // Process exited — prune stale entry, fall through to respawn
+                drop(child_guard);
+                procs.remove(&name);
+            }
+            Ok(None) => {
+                // Still running
+                return Ok(format!("MCP server '{}' is already running", name));
+            }
+            Err(_) => {
+                // wait error — treat as dead, prune and respawn
+                drop(child_guard);
+                procs.remove(&name);
+            }
+        }
+    }
+
+    // Spawn the child process (still under registry lock)
     let child = command
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -340,14 +399,8 @@ pub async fn start_mcp_server(name: String) -> ErgataiResult<String> {
 
     let pid = child.id().unwrap_or(0);
 
-    // Track the process
-    if let Ok(mut procs) = mcp_registry().processes.lock() {
-        procs.insert(name.clone(), Arc::new(tokio::sync::Mutex::new(child)));
-    } else {
-        return Err(ErgataiError::internal(
-            "Failed to track MCP server process".to_string(),
-        ));
-    }
+    // Insert into registry (under the same lock acquisition)
+    procs.insert(name.clone(), Arc::new(tokio::sync::Mutex::new(child)));
 
     tracing::info!(server = %name, pid, "MCP server started");
     Ok(format!("MCP server '{}' started (pid: {})", name, pid))

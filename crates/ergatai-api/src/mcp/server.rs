@@ -276,16 +276,43 @@ impl ErgataiMcpServer {
 
         info!("🔧 set_acp_endpoint called with endpoint: {}", endpoint);
 
-        // Validate endpoint URL
-        if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
+        // Validate endpoint URL by parsing — reject malformed URLs and non-HTTP schemes.
+        let parsed = match url::Url::parse(endpoint) {
+            Ok(u) => u,
+            Err(_) => {
+                return Ok(CallToolResult::error(vec![ContentBlock::text(
+                    "Invalid endpoint URL. Must be a valid absolute URL (e.g. http://localhost:8080)",
+                )]));
+            }
+        };
+        match parsed.scheme() {
+            "http" | "https" => {}
+            other => {
+                return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                    "Invalid endpoint scheme '{}'. Only http and https are allowed.",
+                    other
+                ))]));
+            }
+        }
+        if parsed.host_str().is_none() {
             return Ok(CallToolResult::error(vec![ContentBlock::text(
-                "Invalid endpoint URL. Must start with http:// or https://",
+                "Invalid endpoint URL: missing host.",
             )]));
         }
 
-        // CRITICAL: Prevent agents from registering Ergatai's own endpoints
-        // This would create a message loop where Ergatai sends messages to itself
-        if endpoint.contains(self.ergatai_own_address.as_str()) {
+        // SECURITY: Prevent agents from registering Ergatai's own endpoints
+        // (would create a message loop where Ergatai sends messages to itself).
+        // Compare by (scheme, host, port) — not substring — to avoid bypasses like
+        // `http://localhost:3000.evil.com` matching the substring "localhost:3000".
+        let own_parsed = url::Url::parse(&format!("http://{}", self.ergatai_own_address.as_str()));
+        let same_origin = own_parsed.as_ref().ok().is_some_and(|own| {
+            let own_host = own.host_str().unwrap_or("");
+            let ep_host = parsed.host_str().unwrap_or("");
+            let own_port = own.port_or_known_default().unwrap_or(80);
+            let ep_port = parsed.port_or_known_default().unwrap_or(80);
+            own_host == ep_host && own_port == ep_port
+        });
+        if same_origin {
             return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
                 "Invalid endpoint: Cannot register Ergatai's own address ({}) as ACP endpoint. \
                  Agents must run their own ACP server on a different port.",
@@ -293,37 +320,54 @@ impl ErgataiMcpServer {
             ))]));
         }
 
-        // Get agent_id: use provided one, or fall back to session's registered agent_id
-        let provided_agent_id = match &params.0.agent_id {
-            Some(id) => id.clone(),
+        // SECURITY (IDOR fix): Always bind endpoint update to this session's
+        // authenticated agent_id. Never trust a caller-supplied agent_id to
+        // modify a different agent's registration — that would let any MCP
+        // client hijack another agent's ACP endpoint and intercept its messages.
+        let session_agent_id = match self.session_agent_id.read().await.clone() {
+            Some(id) => id,
             None => {
-                // Try to get from session
-                match self.session_agent_id.read().await.clone() {
-                    Some(id) => {
-                        info!("No agent_id provided, using session agent_id: {}", id);
-                        id
-                    }
-                    None => {
-                        return Ok(CallToolResult::error(vec![ContentBlock::text(
-                            "Missing agent_id parameter and no session agent_id available. \
-                             Please provide your agent's ID.",
-                        )]));
-                    }
-                }
+                tracing::warn!("set_acp_endpoint called before initialize (no session agent_id)");
+                return Ok(CallToolResult::error(vec![ContentBlock::text(
+                    "Session not initialized. Call initialize first.",
+                )]));
             }
         };
 
-        // Find the matching agent - support both exact ID and name prefix
-        // (agents may not know their unique ID assigned during initialize)
+        // If the client supplied an agent_id, it MUST match this session's agent.
+        // Reject mismatches — they indicate either a confused client or an IDOR attempt.
+        if let Some(provided_id) = &params.0.agent_id {
+            let matches_exact = provided_id == &session_agent_id;
+            // Prefix match: session id is "simple-agent@ead00fad", client may pass "simple-agent"
+            let matches_prefix = session_agent_id
+                .strip_suffix(&format!("@{}", &session_agent_id[session_agent_id.find('@').map(|i| i + 1).unwrap_or(session_agent_id.len())..]))
+                .is_some_and(|base| base == provided_id);
+            let matches_short = session_agent_id
+                .find('@')
+                .is_some_and(|i| &session_agent_id[..i] == provided_id);
+
+            if !matches_exact && !matches_prefix && !matches_short {
+                tracing::warn!(
+                    provided = %provided_id,
+                    session = %session_agent_id,
+                    "Agent attempted to set endpoint for a different agent ID (possible IDOR); rejecting"
+                );
+                return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                    "agent_id '{}' does not match this session's agent '{}'. \
+                     Omit the agent_id parameter to use the session's authenticated ID.",
+                    provided_id, session_agent_id
+                ))]));
+            }
+        }
+
+        // Always use the session's authenticated agent_id — never the caller-supplied one
+        let agent_id = session_agent_id;
+
+        // Find the matching agent in the registry (session agent_id is authoritative)
         let agents = self.registry.list_agents().await;
         let matching_agent = agents
             .iter()
-            .find(|a| {
-                // Exact match
-                a.agent_id == provided_agent_id
-                // Or prefix match (e.g., "simple-agent" matches "simple-agent@ead00fad")
-                || a.agent_id.starts_with(&format!("{}@", provided_agent_id))
-            })
+            .find(|a| a.agent_id == agent_id)
             .map(|a| a.agent_id.clone());
 
         let agent_id = match matching_agent {
@@ -331,14 +375,11 @@ impl ErgataiMcpServer {
             None => {
                 return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
                     "Agent {} is not registered. Connect via MCP first.",
-                    provided_agent_id
+                    agent_id
                 ))]));
             }
         };
 
-        // SECURITY: Track which agent is setting the endpoint
-        // For now, we trust the agent_id parameter, but in production
-        // we should validate against the MCP session's authenticated agent
         info!("✅ Agent {} registering ACP endpoint: {}", agent_id, endpoint);
         if let Err(e) = self.registry
             .set_acp_endpoint(&agent_id, endpoint.to_string())
@@ -401,17 +442,15 @@ impl ErgataiMcpServer {
 
         info!("Checking DAG status for {}", dag_id);
 
-        // TODO: Query actual DAG scheduler
+        // TODO: Query actual DAG scheduler. Until then, return an honest
+        // "unknown" status rather than fabricating progress numbers — callers
+        // should not be misled into believing work is happening.
         let result = serde_json::json!({
             "dag_id": dag_id,
-            "status": "running",
-            "progress": {
-                "total_nodes": 3,
-                "completed_nodes": 1,
-                "failed_nodes": 0
-            },
-            "results": {},
-            "note": "Status query integration pending"
+            "status": "unknown",
+            "progress": null,
+            "results": null,
+            "note": "DAG scheduler integration pending. Submit via submit_orchestration and monitor via agent completion events."
         });
 
         Ok(CallToolResult::success(vec![ContentBlock::text(

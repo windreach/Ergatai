@@ -14,8 +14,8 @@
  * - 100px transparent padding on all sides
  */
 
-import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync } from 'fs';
-import { join, dirname } from 'path';
+import { mkdirSync, rmSync, existsSync } from 'fs';
+import { join, dirname, basename } from 'path';
 import { fileURLToPath } from 'url';
 import { execSync } from 'child_process';
 import sharp from 'sharp';
@@ -142,7 +142,7 @@ async function main() {
 
   // Create iconset directory
   if (existsSync(ICONSET_DIR)) {
-    rmSync(ICONSET_DIR, { recursive: true });
+    rmSync(ICONSET_DIR, { recursive: true, force: true });
   }
   mkdirSync(ICONSET_DIR, { recursive: true });
 
@@ -169,19 +169,27 @@ async function main() {
 
   // Clean up temp file
   if (existsSync(roundedSource)) {
-    rmSync(roundedSource);
+    rmSync(roundedSource, { force: true });
   }
 
   // Step 3: Create .icns file
   console.log('\n3️⃣  Creating .icns file...');
 
+  // Check platform - iconutil is macOS-only
+  if (process.platform !== 'darwin') {
+    console.error('\n❌ Error: iconutil is only available on macOS.');
+    console.error('   The iconset directory has been created at:', ICONSET_DIR);
+    console.error('   You can manually convert it on a Mac using: iconutil -c icns icon.iconset');
+    process.exit(1);
+  }
+
   try {
     execSync(`iconutil -c icns "${ICONSET_DIR}" -o "${OUTPUT_ICON}"`, { stdio: 'pipe' });
 
-    console.log(`   ✓ Created ${OUTPUT_ICON.split('/').pop()}`);
+    console.log(`   ✓ Created ${basename(OUTPUT_ICON)}`);
 
     // Clean up iconset directory
-    rmSync(ICONSET_DIR, { recursive: true });
+    rmSync(ICONSET_DIR, { recursive: true, force: true });
 
     console.log('\n✅ Success! Icon generated with proper macOS rounded corners');
     console.log(`   File: ${OUTPUT_ICON}`);
@@ -195,6 +203,9 @@ async function main() {
 
   } catch (error) {
     console.error('\n❌ Error creating .icns file:', error.message);
+    if (error.stderr) {
+      console.error('   stderr:', error.stderr.toString());
+    }
     console.error('   Make sure you\'re running on macOS with iconutil available');
     process.exit(1);
   }

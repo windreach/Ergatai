@@ -82,20 +82,27 @@ impl KeyExtractor for AgentKeyExtractor {
     type Key = String;
 
     fn extract<B>(&self, req: &Request<B>) -> Result<Self::Key, tower_governor::errors::GovernorError> {
-        // Try to extract agent ID from Mcp-Session-Id header
+        // Prefer per-session key for MCP traffic — each MCP session gets its own bucket.
         if let Some(session_id) = req.headers().get("mcp-session-id") {
             if let Ok(session_str) = session_id.to_str() {
                 return Ok(format!("agent:{}", session_str));
             }
         }
 
-        // Fall back to IP address for non-MCP requests
-        if let Some(peer_addr) = req.extensions().get::<std::net::SocketAddr>() {
+        // Fall back to peer IP for non-MCP requests. axum only populates
+        // `ConnectInfo<SocketAddr>` when the server is built with
+        // `into_make_service_with_connect_info::<SocketAddr>()` — see router
+        // setup below. If the extension is missing, bucket under a shared key
+        // so all anonymous traffic is collectively rate-limited (not exempt).
+        if let Some(connect_info) = req.extensions().get::<axum::extract::ConnectInfo<SocketAddr>>() {
+            return Ok(format!("ip:{}", connect_info.0.ip()));
+        }
+        if let Some(peer_addr) = req.extensions().get::<SocketAddr>() {
             return Ok(format!("ip:{}", peer_addr.ip()));
         }
 
-        // Last resort: use a default key
-        Ok("unknown".to_string())
+        // Last resort: shared bucket for anonymous / unidentifiable requests.
+        Ok("anonymous".to_string())
     }
 }
 
@@ -286,6 +293,13 @@ async fn async_main(args: Args) -> Result<()> {
     tracing::info!("API server listening on {}", addr);
 
     // Start server with or without TLS
+    //
+    // IMPORTANT: use `into_make_service_with_connect_info::<SocketAddr>()` so
+    // the peer address is inserted into request extensions. Without this, the
+    // `AgentKeyExtractor` IP fallback never fires and all non-MCP traffic
+    // shares a single rate-limit bucket.
+    let app_with_connect_info = app.into_make_service_with_connect_info::<SocketAddr>();
+
     if let (Some(cert_path), Some(key_path)) = (&args.tls_cert, &args.tls_key) {
         // TLS mode: use axum-server with rustls
         tracing::info!("Starting HTTPS server on {}", addr);
@@ -294,14 +308,18 @@ async fn async_main(args: Args) -> Result<()> {
             .map_err(|e| anyhow::anyhow!("Failed to load TLS certificate: {}", e))?;
         tracing::info!("TLS certificate loaded successfully");
         axum_server::bind_rustls(addr, tls_config)
-            .serve(app.into_make_service())
+            .serve(app_with_connect_info)
             .await?;
     } else {
         // Plain HTTP mode
         tracing::info!("Starting HTTP server on {}", addr);
         let listener = tokio::net::TcpListener::bind(addr).await?;
-        axum::serve(listener, app).await?;
+        axum::serve(listener, app_with_connect_info).await?;
     }
+
+    // Server has shut down — cleanly cancel the MCP service and NATS forwarder.
+    // They may already be stopped by the signal handler, but this is idempotent.
+    mcp_cancellation_token.cancel();
 
     Ok(())
 }

@@ -64,10 +64,18 @@ pub struct NapiSessionEvent {
 
 impl From<SessionEvent> for NapiSessionEvent {
     fn from(e: SessionEvent) -> Self {
+        let session_id_for_log = e.session_id.clone();
         Self {
             session_id: e.session_id,
             event_type: e.event_type,
-            data: serde_json::to_string(&e.data).unwrap_or_else(|_| "null".to_string()),
+            data: serde_json::to_string(&e.data).unwrap_or_else(|err| {
+                tracing::warn!(
+                    "Failed to serialize session event data for session '{}': {}",
+                    session_id_for_log,
+                    err
+                );
+                "null".to_string()
+            }),
         }
     }
 }
@@ -121,19 +129,22 @@ impl SessionManager {
     }
 
     pub async fn register(&self, handle: SessionHandle) {
-        self.sessions
-            .write()
-            .await
-            .insert(handle.session_id.clone(), handle);
-        // Update watch channel with new count
-        let count = self.sessions.read().await.len();
+        // Compute count while holding the write lock to avoid TOCTOU race
+        let count = {
+            let mut sessions = self.sessions.write().await;
+            sessions.insert(handle.session_id.clone(), handle);
+            sessions.len()
+        };
         let _ = self.session_count_watch.0.send(count);
     }
 
     pub async fn unregister(&self, session_id: &str) {
-        self.sessions.write().await.remove(session_id);
-        // Update watch channel with new count
-        let count = self.sessions.read().await.len();
+        // Compute count while holding the write lock to avoid TOCTOU race
+        let count = {
+            let mut sessions = self.sessions.write().await;
+            sessions.remove(session_id);
+            sessions.len()
+        };
         let _ = self.session_count_watch.0.send(count);
     }
 
@@ -206,42 +217,52 @@ impl SessionManager {
             }
             Err(_) => {
                 // Timeout — abort remaining session tasks to prevent orphan leaks,
-                // then force-unregister from the map.
-                let remaining = self.sessions.read().await.len();
-                tracing::warn!(
-                    "Timeout waiting for sessions to close, {} still active — aborting tasks",
-                    remaining
-                );
-                let remaining_ids: Vec<String> =
-                    self.sessions.read().await.keys().cloned().collect();
-                // First pass: abort all remaining tasks (cancels inner tokio::spawn)
-                {
+                // then force-unregister from the map in a single write-lock scope.
+                let remaining_ids: Vec<String> = {
                     let sessions = self.sessions.read().await;
-                    for id in &remaining_ids {
-                        if let Some(handle) = sessions.get(id) {
-                            if let Some(ref abort_handle) = handle.abort_handle {
-                                abort_handle.abort();
-                            }
+                    tracing::warn!(
+                        "Timeout waiting for sessions to close, {} still active — aborting tasks",
+                        sessions.len()
+                    );
+                    // First: abort all remaining tasks (cancels inner tokio::spawn)
+                    for handle in sessions.values() {
+                        if let Some(ref abort_handle) = handle.abort_handle {
+                            abort_handle.abort();
                         }
                     }
-                }
-                // Second pass: remove from HashMap
-                for id in remaining_ids {
-                    self.unregister(&id).await;
-                }
+                    sessions.keys().cloned().collect()
+                };
+                // Second: batch-remove in a single write-lock scope to keep count consistent
+                let final_count = {
+                    let mut sessions = self.sessions.write().await;
+                    for id in &remaining_ids {
+                        sessions.remove(id);
+                    }
+                    sessions.len()
+                };
+                let _ = self.session_count_watch.0.send(final_count);
             }
         }
     }
     /// 关闭所有 Chat 类型会话（不影响 DAG 会话）
     /// UI 关闭面板/切换项目时调用，避免误关 DAG 编排会话。
+    ///
+    /// Note: This method sends Close commands and waits up to 5 seconds for
+    /// sessions to close. If DAG sessions are concurrently added/removed, the
+    /// target count may be slightly off — this is acceptable for shutdown use cases.
     pub async fn close_chat_sessions(&self) {
-        let chat_ids: Vec<String> = {
+        let (chat_ids, dag_count): (Vec<String>, usize) = {
             let sessions = self.sessions.read().await;
-            sessions
-                .values()
-                .filter(|h| h.kind == SessionKind::Chat)
-                .map(|h| h.session_id.clone())
-                .collect()
+            let mut chat_ids = Vec::new();
+            let mut dag_count = 0;
+            for h in sessions.values() {
+                if h.kind == SessionKind::Chat {
+                    chat_ids.push(h.session_id.clone());
+                } else {
+                    dag_count += 1;
+                }
+            }
+            (chat_ids, dag_count)
         };
 
         for session_id in &chat_ids {
@@ -253,17 +274,11 @@ impl SessionManager {
         // Wait for chat sessions to close (reuse watch channel)
         let timeout_duration = std::time::Duration::from_secs(5);
         let mut rx = self.session_count_watch.1.clone();
-        let target = {
-            let sessions = self.sessions.read().await;
-            sessions
-                .values()
-                .filter(|h| h.kind == SessionKind::Dag)
-                .count()
-        };
 
         let _ = tokio::time::timeout(timeout_duration, async {
             loop {
-                if *rx.borrow_and_update() <= target {
+                // Target: only DAG sessions remain
+                if *rx.borrow_and_update() <= dag_count {
                     break;
                 }
                 if rx.changed().await.is_err() {
@@ -274,15 +289,20 @@ impl SessionManager {
         .await;
     }
 
-    /// Close only sessions of a specific kind
+    /// Close only sessions of a specific kind and wait for them to close.
     pub async fn close_by_kind(&self, kind: SessionKind) {
-        let ids: Vec<String> = {
+        let (ids, other_count): (Vec<String>, usize) = {
             let sessions = self.sessions.read().await;
-            sessions
-                .values()
-                .filter(|h| h.kind == kind)
-                .map(|h| h.session_id.clone())
-                .collect()
+            let mut ids = Vec::new();
+            let mut other_count = 0;
+            for h in sessions.values() {
+                if h.kind == kind {
+                    ids.push(h.session_id.clone());
+                } else {
+                    other_count += 1;
+                }
+            }
+            (ids, other_count)
         };
 
         for session_id in &ids {
@@ -290,9 +310,27 @@ impl SessionManager {
                 let _ = cmd_tx.send(SessionCommand::Close);
             }
         }
+
+        // Wait for targeted sessions to close
+        let timeout_duration = std::time::Duration::from_secs(5);
+        let mut rx = self.session_count_watch.1.clone();
+
+        let _ = tokio::time::timeout(timeout_duration, async {
+            loop {
+                // Target: only sessions of other kinds remain
+                if *rx.borrow_and_update() <= other_count {
+                    break;
+                }
+                if rx.changed().await.is_err() {
+                    break;
+                }
+            }
+        })
+        .await;
     }
 }
 
+#[derive(Debug, Clone, Serialize)]
 pub struct NapiSessionInfo {
     pub session_id: String,
     pub agent_name: String,
@@ -336,7 +374,10 @@ pub fn poll_events() -> Vec<NapiSessionEvent> {
     let mut rx = match state().event_rx.lock() {
         Ok(guard) => guard,
         Err(poisoned) => {
-            tracing::error!("event_rx mutex poisoned, recovering");
+            tracing::error!(
+                "event_rx mutex poisoned (likely a panic while holding the lock). \
+                 Recovering — any in-flight events not yet drained may be lost."
+            );
             poisoned.into_inner()
         }
     };

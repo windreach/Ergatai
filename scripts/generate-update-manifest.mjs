@@ -17,8 +17,8 @@
  */
 
 import { createHash } from "crypto"
-import { readFileSync, writeFileSync, existsSync, readdirSync, statSync } from "fs"
-import { join, dirname } from "path"
+import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, createReadStream } from "fs"
+import { join, dirname, basename } from "path"
 import { fileURLToPath } from "url"
 
 const __filename = fileURLToPath(import.meta.url)
@@ -44,11 +44,16 @@ const version = process.env.VERSION || packageJson.version
 const releaseDir = join(__dirname, "../release")
 
 /**
- * Calculate SHA512 hash of a file and return base64 encoded string
+ * Calculate SHA512 hash of a file using streaming to avoid memory exhaustion on large files
  */
 function calculateSha512(filePath) {
-  const content = readFileSync(filePath)
-  return createHash("sha512").update(content).digest("base64")
+  return new Promise((resolve, reject) => {
+    const hash = createHash("sha512")
+    const stream = createReadStream(filePath)
+    stream.on("data", (chunk) => hash.update(chunk))
+    stream.on("end", () => resolve(hash.digest("base64")))
+    stream.on("error", (err) => reject(err))
+  })
 }
 
 /**
@@ -68,14 +73,14 @@ function findReleaseFile(pattern, ext = ".zip") {
   }
 
   const files = readdirSync(releaseDir)
-  const match = files.find((f) => f.includes(pattern) && f.endsWith(ext))
+  const match = files.find((f) => basename(f).includes(pattern) && f.endsWith(ext))
   return match ? join(releaseDir, match) : null
 }
 
 /**
  * Generate manifest for a specific architecture
  */
-function generateManifest(arch) {
+async function generateManifest(arch) {
   // electron-builder names files differently:
   // arm64: Agents-{version}-arm64-mac.zip
   // x64: Agents-{version}-mac.zip
@@ -88,8 +93,8 @@ function generateManifest(arch) {
     return null
   }
 
-  const zipName = zipPath.split("/").pop()
-  const sha512 = calculateSha512(zipPath)
+  const zipName = basename(zipPath)
+  const sha512 = await calculateSha512(zipPath)
   const size = getFileSize(zipPath)
 
   // electron-updater manifest format
@@ -177,7 +182,7 @@ function formatBytes(bytes) {
 /**
  * Generate manifest for Linux AppImage
  */
-function generateLinuxManifest() {
+async function generateLinuxManifest() {
   const appImagePath = findReleaseFile(`${version}`, ".AppImage")
 
   if (!appImagePath) {
@@ -186,8 +191,8 @@ function generateLinuxManifest() {
     return null
   }
 
-  const appImageName = appImagePath.split("/").pop()
-  const sha512 = calculateSha512(appImagePath)
+  const appImageName = basename(appImagePath)
+  const sha512 = await calculateSha512(appImagePath)
   const size = getFileSize(appImagePath)
 
   const manifest = {
@@ -222,39 +227,46 @@ function generateLinuxManifest() {
 }
 
 // Main execution
-console.log("=".repeat(50))
-console.log("Generating electron-updater manifests")
-console.log("=".repeat(50))
-console.log(`Version: ${version}`)
-console.log(`Channel: ${channel}`)
-console.log(`Release dir: ${releaseDir}`)
-console.log()
+async function main() {
+  console.log("=".repeat(50))
+  console.log("Generating electron-updater manifests")
+  console.log("=".repeat(50))
+  console.log(`Version: ${version}`)
+  console.log(`Channel: ${channel}`)
+  console.log(`Release dir: ${releaseDir}`)
+  console.log()
 
-const arm64Manifest = generateManifest("arm64")
-const x64Manifest = generateManifest("x64")
-const linuxManifest = generateLinuxManifest()
+  const arm64Manifest = await generateManifest("arm64")
+  const x64Manifest = await generateManifest("x64")
+  const linuxManifest = await generateLinuxManifest()
 
-if (!arm64Manifest && !x64Manifest && !linuxManifest) {
-  console.error("No manifest files were generated!")
-  console.error("Make sure you have built the app with: npm run dist")
+  if (!arm64Manifest && !x64Manifest && !linuxManifest) {
+    console.error("No manifest files were generated!")
+    console.error("Make sure you have built the app with: npm run dist")
+    process.exit(1)
+  }
+
+  console.log("=".repeat(50))
+  console.log("Manifest generation complete!")
+  console.log()
+  const prefix = channel === "beta" ? "beta" : "latest"
+  console.log("Next steps:")
+  console.log("1. Upload the following files to cdn.21st.dev/releases/desktop/:")
+  if (arm64Manifest) {
+    console.log(`   - ${prefix}-mac.yml`)
+    console.log(`   - Agents-${version}-arm64-mac.zip`)
+    console.log(`   - Agents-${version}-arm64.dmg (for manual download)`)
+  }
+  if (x64Manifest) {
+    console.log(`   - ${prefix}-mac-x64.yml`)
+    console.log(`   - Agents-${version}-mac.zip`)
+    console.log(`   - Agents-${version}.dmg (for manual download)`)
+  }
+  console.log("2. Create a release entry in the admin dashboard")
+  console.log("=".repeat(50))
+}
+
+main().catch((error) => {
+  console.error("Fatal error:", error)
   process.exit(1)
-}
-
-console.log("=".repeat(50))
-console.log("Manifest generation complete!")
-console.log()
-const prefix = channel === "beta" ? "beta" : "latest"
-console.log("Next steps:")
-console.log("1. Upload the following files to cdn.21st.dev/releases/desktop/:")
-if (arm64Manifest) {
-  console.log(`   - ${prefix}-mac.yml`)
-  console.log(`   - Agents-${version}-arm64-mac.zip`)
-  console.log(`   - Agents-${version}-arm64.dmg (for manual download)`)
-}
-if (x64Manifest) {
-  console.log(`   - ${prefix}-mac-x64.yml`)
-  console.log(`   - Agents-${version}-mac.zip`)
-  console.log(`   - Agents-${version}.dmg (for manual download)`)
-}
-console.log("2. Create a release entry in the admin dashboard")
-console.log("=".repeat(50))
+})

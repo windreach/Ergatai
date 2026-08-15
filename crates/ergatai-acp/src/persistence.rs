@@ -20,14 +20,19 @@ fn sessions_dir() -> ErgataiResult<PathBuf> {
     Ok(config_dir.join("ergatai").join("sessions"))
 }
 
-/// 保存会话元数据到磁盘
+/// 保存会话元数据到磁盘（使用原子写入：先写临时文件，再重命名）
 pub fn save_session(session: &PersistedSession) -> ErgataiResult<()> {
     let dir = sessions_dir()?;
     std::fs::create_dir_all(&dir)?;
 
     let path = session_path(&session.session_id)?;
     let content = serde_json::to_string_pretty(session)?;
-    std::fs::write(&path, content)?;
+
+    // Atomic write: write to a temp file first, then rename over the target.
+    // This prevents partial writes from corrupting existing session files.
+    let temp_path = path.with_extension("json.tmp");
+    std::fs::write(&temp_path, &content)?;
+    std::fs::rename(&temp_path, &path)?;
     Ok(())
 }
 
@@ -81,18 +86,29 @@ pub fn delete_session(session_id: &str) -> ErgataiResult<()> {
     Ok(())
 }
 
-/// 更新会话标题
+/// 更新会话标题。
+/// Returns an error if the session does not exist (previously silently returned Ok).
 pub fn update_session_title(session_id: &str, title: &str) -> ErgataiResult<()> {
-    if let Some(mut session) = load_session(session_id)? {
-        session.title = Some(title.to_string());
-        session.updated_at = chrono::Utc::now().to_rfc3339();
-        save_session(&session)?;
-    }
+    let mut session = load_session(session_id)?
+        .ok_or_else(|| ConfigError::FileNotFound {
+            path: session_path(session_id).unwrap_or_else(|_| PathBuf::from(session_id)),
+        })?;
+    session.title = Some(title.to_string());
+    session.updated_at = chrono::Utc::now().to_rfc3339();
+    save_session(&session)?;
     Ok(())
 }
 
 fn session_path(session_id: &str) -> ErgataiResult<PathBuf> {
-    // 用 session_id 的安全版本做文件名
+    // Use a short hash prefix + sanitized name to prevent collisions between
+    // distinct session IDs that map to the same sanitized form
+    // (e.g., "session/123" vs "session.123" vs "session_123").
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    session_id.hash(&mut hasher);
+    let hash = hasher.finish();
+    let hash_prefix = format!("{:016x}", hash);
+
     let safe_name: String = session_id
         .chars()
         .map(|c| {
@@ -103,5 +119,5 @@ fn session_path(session_id: &str) -> ErgataiResult<PathBuf> {
             }
         })
         .collect();
-    Ok(sessions_dir()?.join(format!("{}.json", safe_name)))
+    Ok(sessions_dir()?.join(format!("{}_{}.json", hash_prefix, safe_name)))
 }

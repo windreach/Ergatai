@@ -210,29 +210,39 @@ impl ConfigManager {
             ErgataiError::internal(format!("Failed to get modification time: {}", e))
         })?;
 
-        // Compare with last known modification time (SystemTime vs SystemTime)
-        let last_modified = self.last_modified.read().map_err(|e| {
-            ErgataiError::internal(format!("Config last_modified lock poisoned: {}", e))
-        })?;
+        // Fast path: check under read lock first (no reload needed)
+        {
+            let last_modified = self.last_modified.read().map_err(|e| {
+                ErgataiError::internal(format!("Config last_modified lock poisoned: {}", e))
+            })?;
+            if let Some(last) = *last_modified {
+                if modified <= last {
+                    return Ok(false);
+                }
+            }
+        }
 
+        // Slow path: file appears to have changed. Reload config (I/O), then
+        // re-check under write lock to avoid TOCTOU races with concurrent reloads.
+        let new_config = Self::load_config(&config_path)?;
+
+        // Re-acquire write lock and re-check mtime — another thread may have
+        // already reloaded this change (or a newer one) while we were loading.
+        let mut last_modified = self.last_modified.write().map_err(|e| {
+            ErgataiError::internal(format!("Config last_modified write lock poisoned: {}", e))
+        })?;
         if let Some(last) = *last_modified {
-            // Only reload if file mtime is actually newer than what we have
             if modified <= last {
+                // Another thread already reloaded this (or newer) change.
                 return Ok(false);
             }
         }
-        drop(last_modified);
 
-        // File has changed, reload
-        let new_config = Self::load_config(&config_path)?;
         let mut config = self
             .config
             .write()
             .map_err(|e| ErgataiError::internal(format!("Config lock poisoned: {}", e)))?;
         *config = new_config;
-        let mut last_modified = self.last_modified.write().map_err(|e| {
-            ErgataiError::internal(format!("Config last_modified write lock poisoned: {}", e))
-        })?;
         *last_modified = Some(modified);
 
         info!("Configuration reloaded");
@@ -249,14 +259,26 @@ impl ConfigManager {
         // Check project-level sensitive paths
         let config = self.get_config();
         for pattern_str in &config.sensitive_paths {
-            if let Ok(pattern) = glob::Pattern::new(pattern_str) {
-                if pattern.matches(file_path) {
-                    debug!(
-                        file_path = file_path,
+            match glob::Pattern::new(pattern_str) {
+                Ok(pattern) => {
+                    if pattern.matches(file_path) {
+                        debug!(
+                            file_path = file_path,
+                            pattern = pattern_str,
+                            "Sensitive path detected (project config)"
+                        );
+                        return true;
+                    }
+                }
+                Err(e) => {
+                    // SECURITY: Don't silently skip invalid patterns — a typo in a
+                    // sensitive_paths config gives operators a false sense of security.
+                    tracing::warn!(
                         pattern = pattern_str,
-                        "Sensitive path detected (project config)"
+                        error = %e,
+                        "Invalid glob pattern in sensitive_paths config — skipping. \
+                         This path will NOT be protected."
                     );
-                    return true;
                 }
             }
         }
@@ -268,14 +290,26 @@ impl ConfigManager {
     pub fn is_forbidden_path(&self, file_path: &str) -> bool {
         let config = self.get_config();
         for pattern_str in &config.forbidden_paths {
-            if let Ok(pattern) = glob::Pattern::new(pattern_str) {
-                if pattern.matches(file_path) {
-                    warn!(
-                        file_path = file_path,
+            match glob::Pattern::new(pattern_str) {
+                Ok(pattern) => {
+                    if pattern.matches(file_path) {
+                        warn!(
+                            file_path = file_path,
+                            pattern = pattern_str,
+                            "Forbidden path access attempt"
+                        );
+                        return true;
+                    }
+                }
+                Err(e) => {
+                    // SECURITY: Don't silently skip invalid patterns — a typo in a
+                    // forbidden_paths config gives operators a false sense of security.
+                    tracing::warn!(
                         pattern = pattern_str,
-                        "Forbidden path access attempt"
+                        error = %e,
+                        "Invalid glob pattern in forbidden_paths config — skipping. \
+                         This path will NOT be blocked."
                     );
-                    return true;
                 }
             }
         }
