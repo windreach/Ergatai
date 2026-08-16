@@ -840,4 +840,95 @@ mod tests {
         let results = cache.batch_contains(&["expired.rs".into()]);
         assert_eq!(results.get("expired.rs"), Some(&false));
     }
+
+    // ─── Additional tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_lock_cache_remove_and_get() {
+        let cache = LockCache::new(60, 1000);
+        cache.insert("file.rs".into(), "W".into(), "t".into(), "ag".into());
+        assert!(cache.get("file.rs").is_some());
+
+        cache.remove("file.rs");
+        assert!(cache.get("file.rs").is_none());
+    }
+
+    #[test]
+    fn test_lock_cache_clear_v2() {
+        let cache = LockCache::new(60, 1000);
+        for i in 0..10 {
+            cache.insert(format!("file_{i}.rs"), "W".into(), "t".into(), "ag".into());
+        }
+
+        cache.clear();
+        for i in 0..10 {
+            assert!(cache.get(&format!("file_{i}.rs")).is_none());
+        }
+    }
+
+    #[test]
+    fn test_async_lock_queue_size_and_clear() {
+        let queue = AsyncLockQueue::new(100);
+        assert_eq!(queue.size(), 0);
+
+        for i in 0..5 {
+            queue
+                .enqueue(AsyncLockRequest {
+                    token_id: format!("t{i}"),
+                    file_path: "f".into(),
+                    mode: "W".into(),
+                    priority: 5,
+                    requested_at_ms: i as u64,
+                })
+                .unwrap();
+        }
+        assert_eq!(queue.size(), 5);
+
+        queue.clear();
+        assert_eq!(queue.size(), 0);
+    }
+
+    #[test]
+    fn test_async_lock_queue_max_size() {
+        let queue = AsyncLockQueue::new(2);
+        queue
+            .enqueue(AsyncLockRequest {
+                token_id: "a".into(),
+                file_path: "f".into(),
+                mode: "W".into(),
+                priority: 1,
+                requested_at_ms: 1,
+            })
+            .unwrap();
+        queue
+            .enqueue(AsyncLockRequest {
+                token_id: "b".into(),
+                file_path: "f".into(),
+                mode: "W".into(),
+                priority: 1,
+                requested_at_ms: 2,
+            })
+            .unwrap();
+
+        // Third enqueue should fail (queue full)
+        let result = queue.enqueue(AsyncLockRequest {
+            token_id: "c".into(),
+            file_path: "f".into(),
+            mode: "W".into(),
+            priority: 1,
+            requested_at_ms: 3,
+        });
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_lock_cache_get_stats() {
+        let cache = LockCache::new(60, 1000);
+        cache.insert("a.rs".into(), "W".into(), "t".into(), "ag".into());
+        cache.insert("b.rs".into(), "R".into(), "t".into(), "ag".into());
+
+        let stats = cache.get_stats();
+        // After 2 inserts, stats.inserts should be >= 2
+        assert!(stats.inserts >= 2);
+    }
 }

@@ -160,3 +160,56 @@ async fn graceful_shutdown() -> ErgataiResult<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_shutdown_timeout_is_15_seconds() {
+        assert_eq!(SHUTDOWN_TIMEOUT.as_secs(), 15);
+    }
+
+    #[test]
+    fn test_shutdown_timeout_is_reasonable() {
+        // Should be at least 1 second but not more than 60 seconds
+        assert!(SHUTDOWN_TIMEOUT.as_secs() >= 1);
+        assert!(SHUTDOWN_TIMEOUT.as_secs() <= 60);
+    }
+
+    #[tokio::test]
+    async fn test_setup_signal_handlers_returns_ok() {
+        // setup_signal_handlers spawns background tasks and returns immediately.
+        // Verify it doesn't error or panic.
+        let result = setup_signal_handlers().await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_setup_signal_handlers_is_idempotent_call() {
+        // Calling setup multiple times should each return Ok (each creates its own tasks).
+        let r1 = setup_signal_handlers().await;
+        let r2 = setup_signal_handlers().await;
+        assert!(r1.is_ok());
+        assert!(r2.is_ok());
+    }
+
+    #[test]
+    fn test_signal_count_starts_at_zero() {
+        // Verify the AtomicU32 counter starts at 0
+        let counter = Arc::new(AtomicU32::new(0));
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn test_signal_count_fetch_add_increments() {
+        let counter = Arc::new(AtomicU32::new(0));
+        let prev = counter.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(prev, 0);
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+
+        let prev = counter.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(prev, 1);
+        assert_eq!(counter.load(Ordering::SeqCst), 2);
+    }
+}

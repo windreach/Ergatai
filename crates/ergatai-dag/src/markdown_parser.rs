@@ -9,7 +9,7 @@
 //! ### Agent - Sub-sub-task
 
 use ergatai_error::{ErgataiError, ErgataiResult};
-use crate::{TaskNode, TaskStatus, TaskTree};
+use crate::tree_topology::{TaskNode, TaskStatus, TaskTree};
 
 /// Parse a Markdown outline into a TaskTree
 ///
@@ -222,5 +222,109 @@ mod tests {
         let id = generate_id("Dev-1", "Implement login");
         assert!(id.contains("dev-1"));
         assert!(id.contains("implement-login"));
+    }
+
+    // ── Additional tests ──
+
+    #[test]
+    fn test_empty_markdown_returns_error() {
+        let result = parse_markdown_tree("");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_heading_with_no_agent_separator() {
+        let markdown = "# Just a task description\n";
+        let tree = parse_markdown_tree(markdown).unwrap();
+        assert_eq!(tree.root.agent, "agent"); // default agent
+        assert_eq!(tree.root.task, "Just a task description");
+    }
+
+    #[test]
+    fn test_complex_markdown_with_code_blocks_ignored() {
+        // Non-heading lines (like code blocks) should be skipped
+        let markdown = r#"
+# PM - Plan
+Some description text
+## Dev - Implement
+More text
+"#;
+        let tree = parse_markdown_tree(markdown).unwrap();
+        assert_eq!(tree.root.agent, "PM");
+        assert_eq!(tree.root.children.len(), 1);
+    }
+
+    #[test]
+    fn test_markdown_with_colon_separator() {
+        let markdown = "# PM: Plan the work\n## Dev: Write code\n";
+        let tree = parse_markdown_tree(markdown).unwrap();
+        assert_eq!(tree.root.agent, "PM");
+        assert_eq!(tree.root.task, "Plan the work");
+        assert_eq!(tree.root.children[0].agent, "Dev");
+    }
+
+    #[test]
+    fn test_deep_nested_tree() {
+        let markdown = r#"
+# L1 - Level 1
+## L2 - Level 2
+### L3 - Level 3
+#### L4 - Level 4
+##### L5 - Level 5
+"#;
+        let tree = parse_markdown_tree(markdown).unwrap();
+        assert_eq!(tree.root.agent, "L1");
+        assert_eq!(tree.root.children[0].agent, "L2");
+        assert_eq!(tree.root.children[0].children[0].agent, "L3");
+    }
+
+    #[test]
+    fn test_multiple_root_level_tasks() {
+        let markdown = r#"
+# Agent-A - First task
+# Agent-B - Second task
+# Agent-C - Third task
+"#;
+        let tree = parse_markdown_tree(markdown).unwrap();
+        // Virtual root is created for multiple top-level tasks
+        assert_eq!(tree.root.agent, "system");
+        assert_eq!(tree.root.children.len(), 3);
+    }
+
+    #[test]
+    fn test_empty_heading_returns_error() {
+        let markdown = "# \n";
+        let result = parse_markdown_tree(markdown);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_heading_levels() {
+        let (level, text) = parse_heading("# Task").unwrap();
+        assert_eq!(level, 1);
+        assert_eq!(text, "Task");
+
+        let (level, text) = parse_heading("### Task").unwrap();
+        assert_eq!(level, 3);
+        assert_eq!(text, "Task");
+    }
+
+    #[test]
+    fn test_generate_id_empty_task() {
+        let id = generate_id("Agent", "");
+        assert_eq!(id, "agent");
+    }
+
+    #[test]
+    fn test_task_format_with_multiple_dashes() {
+        let (agent, task) = parse_task_format("Agent - Task - with - dashes").unwrap();
+        assert_eq!(agent, "Agent");
+        assert_eq!(task, "Task - with - dashes");
+    }
+
+    #[test]
+    fn test_id_generation_special_chars() {
+        let id = generate_id("Agent A", "Fix bug #123");
+        assert!(id.contains("agent-a"));
     }
 }

@@ -614,4 +614,205 @@ mod tests {
         assert_eq!(restored.thread_id, None);
         assert!(restored.metadata.is_empty());
     }
+
+    // ── FileAccessRequestPayload ──
+
+    #[test]
+    fn test_file_access_request_roundtrip() {
+        let payload = FileAccessRequestPayload {
+            request_id: "req-123".to_string(),
+            agent_id: "agent-a".to_string(),
+            session_id: "sess-456".to_string(),
+            file_path: "src/main.rs".to_string(),
+            mode: "WRITE".to_string(),
+            reason: Some("Need to update code".to_string()),
+            node_id: Some("node-1".to_string()),
+            expected_duration_secs: Some(60),
+            timestamp: 1234567890,
+        };
+
+        let json = serde_json::to_string(&payload).unwrap();
+        let restored: FileAccessRequestPayload = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(restored.request_id, "req-123");
+        assert_eq!(restored.agent_id, "agent-a");
+        assert_eq!(restored.file_path, "src/main.rs");
+        assert_eq!(restored.mode, "WRITE");
+        assert_eq!(restored.reason, Some("Need to update code".to_string()));
+        assert_eq!(restored.timestamp, 1234567890);
+    }
+
+    // ── FileAccessGrantPayload ──
+
+    #[test]
+    fn test_file_access_grant_roundtrip() {
+        let payload = FileAccessGrantPayload {
+            request_id: "req-123".to_string(),
+            token_id: "token-789".to_string(),
+            agent_id: "agent-b".to_string(),
+            file_path: "src/lib.rs".to_string(),
+            mode: "READ".to_string(),
+            approved_by: "system".to_string(),
+            expires_at: 1234567999,
+            timestamp: 1234567890,
+        };
+
+        let json = serde_json::to_string(&payload).unwrap();
+        let restored: FileAccessGrantPayload = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(restored.token_id, "token-789");
+        assert_eq!(restored.approved_by, "system");
+        assert_eq!(restored.expires_at, 1234567999);
+    }
+
+    // ── FileReadyPayload ──
+
+    #[test]
+    fn test_file_ready_roundtrip() {
+        let payload = FileReadyPayload {
+            file_path: "output.txt".to_string(),
+            agent_id: "writer-agent".to_string(),
+            token_id: "tok-123".to_string(),
+            timestamp: 1234567890,
+        };
+
+        let json = serde_json::to_string(&payload).unwrap();
+        let restored: FileReadyPayload = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(restored.file_path, "output.txt");
+        assert_eq!(restored.agent_id, "writer-agent");
+    }
+
+    // ── SystemTokenPayload ──
+
+    #[test]
+    fn test_system_token_roundtrip() {
+        let payload = SystemTokenPayload {
+            token_id: "sys-tok-1".to_string(),
+            agent_id: "agent-x".to_string(),
+            session_id: "sess-999".to_string(),
+            project_root: "/home/user/project".to_string(),
+            expires_at: 1234569999,
+            heartbeat_interval_secs: 30,
+            timestamp: 1234567890,
+        };
+
+        let json = serde_json::to_string(&payload).unwrap();
+        let restored: SystemTokenPayload = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(restored.token_id, "sys-tok-1");
+        assert_eq!(restored.heartbeat_interval_secs, 30);
+        assert_eq!(restored.project_root, "/home/user/project");
+    }
+
+    // ── Edge cases ──
+
+    #[test]
+    fn test_agent_message_empty_content() {
+        let payload = AgentMessagePayload {
+            from_agent: "a".to_string(),
+            to_agent: "b".to_string(),
+            content: "".to_string(),
+            thread_id: None,
+            timestamp: 0,
+            metadata: HashMap::new(),
+        };
+
+        let json = serde_json::to_string(&payload).unwrap();
+        let restored: AgentMessagePayload = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.content, "");
+    }
+
+    #[test]
+    fn test_agent_message_long_content() {
+        let long_content = "x".repeat(10000);
+        let payload = AgentMessagePayload {
+            from_agent: "a".to_string(),
+            to_agent: "b".to_string(),
+            content: long_content.clone(),
+            thread_id: None,
+            timestamp: 0,
+            metadata: HashMap::new(),
+        };
+
+        let json = serde_json::to_string(&payload).unwrap();
+        let restored: AgentMessagePayload = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.content.len(), 10000);
+        assert_eq!(restored.content, long_content);
+    }
+
+    #[test]
+    fn test_agent_message_special_chars() {
+        let payload = AgentMessagePayload {
+            from_agent: "agent-1".to_string(),
+            to_agent: "agent-2".to_string(),
+            content: "Hello\nWorld\t\"quotes\" and \\slashes\\".to_string(),
+            thread_id: None,
+            timestamp: 0,
+            metadata: HashMap::new(),
+        };
+
+        let json = serde_json::to_string(&payload).unwrap();
+        let restored: AgentMessagePayload = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.content, "Hello\nWorld\t\"quotes\" and \\slashes\\");
+    }
+
+    #[test]
+    fn test_dag_event_file_access_variants() {
+        let events = vec![
+            DagEvent::FileAccessRequest(FileAccessRequestPayload {
+                request_id: "r1".to_string(),
+                agent_id: "a1".to_string(),
+                session_id: "s1".to_string(),
+                file_path: "f1".to_string(),
+                mode: "READ".to_string(),
+                reason: None,
+                node_id: None,
+                expected_duration_secs: None,
+                timestamp: 100,
+            }),
+            DagEvent::FileReady(FileReadyPayload {
+                file_path: "f1".to_string(),
+                agent_id: "a1".to_string(),
+                token_id: "t1".to_string(),
+                timestamp: 200,
+            }),
+            DagEvent::SystemToken(SystemTokenPayload {
+                token_id: "t1".to_string(),
+                agent_id: "a1".to_string(),
+                session_id: "s1".to_string(),
+                project_root: "/p".to_string(),
+                expires_at: 300,
+                heartbeat_interval_secs: 30,
+                timestamp: 100,
+            }),
+        ];
+
+        for event in &events {
+            let json = serde_json::to_string(event).unwrap();
+            let _: DagEvent = serde_json::from_str(&json).unwrap();
+        }
+    }
+
+    #[test]
+    fn test_file_access_optional_fields() {
+        let payload = FileAccessRequestPayload {
+            request_id: "req-1".to_string(),
+            agent_id: "agent-1".to_string(),
+            session_id: "sess-1".to_string(),
+            file_path: "file.txt".to_string(),
+            mode: "READ".to_string(),
+            reason: None,
+            node_id: None,
+            expected_duration_secs: None,
+            timestamp: 100,
+        };
+
+        let json = serde_json::to_string(&payload).unwrap();
+        let restored: FileAccessRequestPayload = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(restored.reason, None);
+        assert_eq!(restored.node_id, None);
+        assert_eq!(restored.expected_duration_secs, None);
+    }
 }

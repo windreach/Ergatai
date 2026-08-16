@@ -480,4 +480,64 @@ mod tests {
             assert_eq!(deserialized, decision);
         }
     }
+
+    // ─── Additional tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_equal_priority_current_holder_keeps() {
+        let conflict = create_test_conflict(Some("medium"), Some("medium"));
+        // When both have equal priority, the current holder should keep
+        let decision = arbitrate_conflict(&conflict);
+        assert!(matches!(
+            decision,
+            ArbitrationDecision::KeepWithCurrentHolder
+        ));
+    }
+
+    #[test]
+    fn test_both_none_priority_keeps_current() {
+        // Both None → both treated as medium → equal → current wins
+        let conflict = create_test_conflict(None, None);
+        let decision = arbitrate_conflict(&conflict);
+        assert!(matches!(
+            decision,
+            ArbitrationDecision::KeepWithCurrentHolder
+        ));
+    }
+
+    #[test]
+    fn test_generate_conflict_report_contains_decision() {
+        let conflict = create_test_conflict(Some("low"), Some("high"));
+        let decision = arbitrate_conflict(&conflict);
+        assert_eq!(
+            decision,
+            ArbitrationDecision::GrantToNewRequester
+        );
+        let report = generate_conflict_report(&conflict, decision);
+        assert!(report.contains("GrantToNewRequester"));
+    }
+
+    #[test]
+    fn test_lock_holder_info_default_values() {
+        let info = LockHolderInfo {
+            agent_id: "ag".to_string(),
+            session_id: "ss".to_string(),
+            token_id: "tk".to_string(),
+            priority: None,
+            reason: None,
+        };
+        assert_eq!(info.agent_id, "ag");
+        assert!(info.priority.is_none());
+        assert!(info.reason.is_none());
+    }
+
+    #[test]
+    fn test_priority_to_number_case_insensitive() {
+        // Test various case combinations
+        assert_eq!(priority_to_number(&Some("HIGH".to_string())), Some(3));
+        assert_eq!(priority_to_number(&Some("High".to_string())), Some(3));
+        assert_eq!(priority_to_number(&Some("MEDIUM".to_string())), Some(2));
+        assert_eq!(priority_to_number(&Some("Low".to_string())), Some(1));
+        assert_eq!(priority_to_number(&Some("LOW".to_string())), Some(1));
+    }
 }

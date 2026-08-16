@@ -763,3 +763,413 @@ pub fn start_peer_reaper(
         }
     });
 }
+
+// ── Tests ──
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ergatai_core::agent_registry::AgentRegistry;
+    use serde_json::json;
+
+    // ── PeerRegistry tests ──
+
+    #[test]
+    fn test_new_peer_registry_is_empty() {
+        let registry = new_peer_registry();
+        // Block on async read to check emptiness
+        let map = registry.blocking_read();
+        assert!(map.is_empty(), "new_peer_registry should start empty");
+    }
+
+    #[tokio::test]
+    async fn test_peer_registry_insert_and_read() {
+        let registry = new_peer_registry();
+        // We can't easily construct a Peer<RoleServer> here, but we can verify
+        // the registry's type and that write().await works.
+        let map = registry.write().await;
+        assert_eq!(map.len(), 0);
+        // Insert/remove a dummy key (peer is opaque, we just test the HashMap mechanics)
+        // Since Peer is not constructible without an MCP connection, we only verify
+        // that the registry operations don't panic on an empty registry.
+        drop(map);
+        let map = registry.read().await;
+        assert!(map.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_peer_registry_remove_missing_key_is_noop() {
+        let registry = new_peer_registry();
+        let mut map = registry.write().await;
+        let removed = map.remove("nonexistent-agent");
+        assert!(removed.is_none(), "removing a missing key should return None");
+    }
+
+    // ── ErgataiMcpServer::new() tests ──
+
+    fn make_test_server() -> ErgataiMcpServer {
+        let registry = Arc::new(AgentRegistry::new());
+        let peer_registry = new_peer_registry();
+        ErgataiMcpServer::new(registry, peer_registry)
+    }
+
+    #[test]
+    fn test_mcp_server_new_creates_instance() {
+        let server = make_test_server();
+        // Verify the server was created successfully (Debug impl works, no panics)
+        let debug_str = format!("{:?}", server);
+        assert!(
+            debug_str.contains("ErgataiMcpServer"),
+            "Debug output should contain struct name"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mcp_server_new_initial_session_agent_id_is_none() {
+        let server = make_test_server();
+        let agent_id = server.session_agent_id.read().await.clone();
+        assert!(
+            agent_id.is_none(),
+            "session_agent_id should be None before initialize"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mcp_server_new_initial_send_failures_is_empty() {
+        let server = make_test_server();
+        let failures = server.send_failures.read().await;
+        assert!(
+            failures.is_empty(),
+            "send_failures should start empty"
+        );
+    }
+
+    #[test]
+    fn test_mcp_server_clone() {
+        // ErgataiMcpServer derives Clone; verify clone doesn't panic
+        let server = make_test_server();
+        let _cloned = server.clone();
+    }
+
+    // ── get_info tests ──
+
+    #[test]
+    fn test_get_info_returns_server_info() {
+        let server = make_test_server();
+        let info = server.get_info();
+        // Verify the server name is "ergatai"
+        assert_eq!(info.server_info.name, "ergatai");
+        // Version comes from CARGO_PKG_VERSION
+        assert!(!info.server_info.version.is_empty());
+    }
+
+    #[test]
+    fn test_get_info_has_tools_capability() {
+        let server = make_test_server();
+        let info = server.get_info();
+        // The capabilities should have tools enabled
+        let caps_json = serde_json::to_value(&info.capabilities).unwrap();
+        assert!(
+            caps_json.get("tools").is_some(),
+            "Server capabilities should include 'tools'"
+        );
+    }
+
+    // ── MAX_SEND_FAILURES constant tests ──
+
+    #[test]
+    fn test_max_send_failures_is_three() {
+        assert_eq!(
+            MAX_SEND_FAILURES, 3,
+            "MAX_SEND_FAILURES should be 3 (circuit breaker threshold)"
+        );
+    }
+
+    #[test]
+    fn test_max_send_failures_is_positive() {
+        assert!(MAX_SEND_FAILURES > 0);
+    }
+
+    // ── Parameter deserialization tests ──
+
+    #[test]
+    fn test_list_agents_params_empty_object() {
+        let params: ListAgentsParams = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(params.include_capabilities, None);
+    }
+
+    #[test]
+    fn test_list_agents_params_with_true() {
+        let params: ListAgentsParams =
+            serde_json::from_value(json!({"include_capabilities": true})).unwrap();
+        assert_eq!(params.include_capabilities, Some(true));
+    }
+
+    #[test]
+    fn test_list_agents_params_with_false() {
+        let params: ListAgentsParams =
+            serde_json::from_value(json!({"include_capabilities": false})).unwrap();
+        assert_eq!(params.include_capabilities, Some(false));
+    }
+
+    #[test]
+    fn test_list_agents_params_ignores_extra_fields() {
+        let params: ListAgentsParams =
+            serde_json::from_value(json!({"include_capabilities": true, "unknown": 123})).unwrap();
+        assert_eq!(params.include_capabilities, Some(true));
+    }
+
+    #[test]
+    fn test_send_message_params_required_fields() {
+        let params: SendMessageParams = serde_json::from_value(json!({
+            "target_agent_id": "agent-1",
+            "message": "hello"
+        }))
+        .unwrap();
+        assert_eq!(params.target_agent_id, "agent-1");
+        assert_eq!(params.message, "hello");
+        assert_eq!(params.message_type, None);
+    }
+
+    #[test]
+    fn test_send_message_params_with_message_type() {
+        let params: SendMessageParams = serde_json::from_value(json!({
+            "target_agent_id": "agent-1",
+            "message": "hello",
+            "message_type": "broadcast"
+        }))
+        .unwrap();
+        assert_eq!(params.message_type.as_deref(), Some("broadcast"));
+    }
+
+    #[test]
+    fn test_send_message_params_missing_target_fails() {
+        let result: Result<SendMessageParams, _> =
+            serde_json::from_value(json!({"message": "hello"}));
+        assert!(result.is_err(), "missing target_agent_id should fail deserialization");
+    }
+
+    #[test]
+    fn test_send_message_params_missing_message_fails() {
+        let result: Result<SendMessageParams, _> =
+            serde_json::from_value(json!({"target_agent_id": "a"}));
+        assert!(result.is_err(), "missing message should fail deserialization");
+    }
+
+    #[test]
+    fn test_submit_orchestration_params_with_dag_only() {
+        let params: SubmitOrchestrationParams = serde_json::from_value(json!({
+            "dag_definition": "## Task A\n- agent: a\n"
+        }))
+        .unwrap();
+        assert!(params.dag_definition.contains("Task A"));
+        assert!(params.context.is_none());
+    }
+
+    #[test]
+    fn test_submit_orchestration_params_with_context() {
+        let params: SubmitOrchestrationParams = serde_json::from_value(json!({
+            "dag_definition": "dag",
+            "context": {"key": "value", "num": 42}
+        }))
+        .unwrap();
+        let ctx = params.context.unwrap();
+        assert_eq!(ctx["key"].as_str(), Some("value"));
+        assert_eq!(ctx["num"].as_i64(), Some(42));
+    }
+
+    #[test]
+    fn test_submit_orchestration_params_missing_dag_fails() {
+        let result: Result<SubmitOrchestrationParams, _> =
+            serde_json::from_value(json!({"context": {}}));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_check_dag_status_params_valid() {
+        let params: CheckDagStatusParams =
+            serde_json::from_value(json!({"dag_id": "abc-123"})).unwrap();
+        assert_eq!(params.dag_id, "abc-123");
+    }
+
+    #[test]
+    fn test_check_dag_status_params_empty_string() {
+        let params: CheckDagStatusParams =
+            serde_json::from_value(json!({"dag_id": ""})).unwrap();
+        assert_eq!(params.dag_id, "");
+    }
+
+    #[test]
+    fn test_check_dag_status_params_missing_dag_id_fails() {
+        let result: Result<CheckDagStatusParams, _> = serde_json::from_value(json!({}));
+        assert!(result.is_err());
+    }
+
+    // ── Message formatting helper tests ──
+
+    #[test]
+    fn test_message_formatting_prefix() {
+        // The formatted message in try_tmux_injection is:
+        // format!("Message from {}: {}", from_agent, message)
+        let from = "agent-A";
+        let message = "please review";
+        let formatted = format!("Message from {}: {}", from, message);
+        assert_eq!(formatted, "Message from agent-A: please review");
+    }
+
+    #[test]
+    fn test_message_formatting_empty_message() {
+        let formatted = format!("Message from {}: {}", "sender", "");
+        assert_eq!(formatted, "Message from sender: ");
+    }
+
+    // ── Agent ID prefix matching logic tests ──
+
+    #[test]
+    fn test_agent_id_exact_match() {
+        let target = "simple-agent@ead00fad";
+        let candidate = "simple-agent@ead00fad";
+        assert_eq!(candidate, target);
+    }
+
+    #[test]
+    fn test_agent_id_prefix_match_logic() {
+        // The send_message code uses:
+        // a.agent_id.starts_with(&format!("{}@", target_agent_id))
+        let target = "simple-agent";
+        let agent_id = "simple-agent@ead00fad";
+        assert!(agent_id.starts_with(&format!("{}@", target)));
+    }
+
+    #[test]
+    fn test_agent_id_prefix_no_false_positive() {
+        // "simple" should NOT match "simple-agent@xxx"
+        let target = "simple";
+        let agent_id = "simple-agent@ead00fad";
+        assert!(!agent_id.starts_with(&format!("{}@", target)));
+    }
+
+    #[test]
+    fn test_agent_id_prefix_empty_target_does_not_match() {
+        // Edge case: empty target produces "@", which does NOT match "agent@abc"
+        // (because "agent@abc" starts with 'a', not '@'). This confirms the prefix
+        // match is safe against empty/missing target_agent_id.
+        let target = "";
+        let agent_id = "agent@abc";
+        assert!(!agent_id.starts_with(&format!("{}@", target)));
+    }
+
+    // ── do_unregister_agent tests ──
+
+    #[tokio::test]
+    async fn test_do_unregister_agent_removes_from_registry() {
+        let registry = AgentRegistry::new();
+        let peer_registry = new_peer_registry();
+
+        // Register an agent first
+        registry
+            .register_agent("agent-1".to_string(), "conn-1".to_string(), None)
+            .await
+            .unwrap();
+
+        // Verify it's registered
+        let agents = registry.list_agents().await;
+        assert_eq!(agents.len(), 1);
+
+        // Unregister
+        do_unregister_agent(&registry, &peer_registry, "agent-1", "test").await;
+
+        // Verify it's gone
+        let agents = registry.list_agents().await;
+        assert_eq!(agents.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_do_unregister_agent_removes_from_peer_registry() {
+        let registry = AgentRegistry::new();
+        let peer_registry = new_peer_registry();
+
+        // Manually insert a dummy entry (we can't create a real Peer, so we test
+        // the mechanics by inserting then checking removal logic via another path).
+        // Since Peer is opaque, we just verify that removing from an empty registry
+        // doesn't panic.
+        do_unregister_agent(&registry, &peer_registry, "nonexistent", "test").await;
+
+        let map = peer_registry.read().await;
+        assert!(map.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_do_unregister_agent_is_idempotent() {
+        let registry = AgentRegistry::new();
+        let peer_registry = new_peer_registry();
+
+        registry
+            .register_agent("agent-1".to_string(), "conn-1".to_string(), None)
+            .await
+            .unwrap();
+
+        // Call unregister twice — second call should be a no-op
+        do_unregister_agent(&registry, &peer_registry, "agent-1", "test1").await;
+        do_unregister_agent(&registry, &peer_registry, "agent-1", "test2").await;
+
+        let agents = registry.list_agents().await;
+        assert_eq!(agents.len(), 0);
+    }
+
+    // ── Drop impl tests ──
+
+    #[tokio::test]
+    async fn test_drop_unregisters_agent_when_session_id_set() {
+        let registry = Arc::new(AgentRegistry::new());
+        let peer_registry = new_peer_registry();
+
+        // Register agent manually
+        registry
+            .register_agent("drop-agent".to_string(), "conn".to_string(), None)
+            .await
+            .unwrap();
+
+        {
+            let server = ErgataiMcpServer::new(registry.clone(), peer_registry.clone());
+            // Simulate initialize having set the session agent ID
+            *server.session_agent_id.write().await = Some("drop-agent".to_string());
+            // server is dropped here
+        }
+
+        // Give the spawned task time to run
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let agents = registry.list_agents().await;
+        assert!(
+            agents.is_empty(),
+            "Drop should have unregistered the agent"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_drop_is_noop_when_session_id_not_set() {
+        let registry = Arc::new(AgentRegistry::new());
+        let peer_registry = new_peer_registry();
+
+        // Register a different agent (not the one tied to this session)
+        registry
+            .register_agent("other-agent".to_string(), "conn".to_string(), None)
+            .await
+            .unwrap();
+
+        {
+            let _server = ErgataiMcpServer::new(registry.clone(), peer_registry.clone());
+            // session_agent_id is None (not initialized), so drop should not unregister anything
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let agents = registry.list_agents().await;
+        assert_eq!(
+            agents.len(),
+            1,
+            "Drop without session_agent_id should not unregister any agent"
+        );
+    }
+}

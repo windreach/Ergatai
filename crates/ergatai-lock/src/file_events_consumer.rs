@@ -549,4 +549,79 @@ mod tests {
         assert!(debug_str.contains("Error"));
         assert!(debug_str.contains("boom"));
     }
+
+    // ─── Additional tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_parse_file_event_unknown_subject_returns_none_v2() {
+        let payload = FileReadyPayload {
+            file_path: "x.rs".to_string(),
+            agent_id: "a".to_string(),
+            token_id: "t".to_string(),
+            timestamp: 0,
+        };
+        let bytes = serde_json::to_vec(&payload).unwrap();
+        let result = parse_file_event("ergatai.unknown.subject", &bytes).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_file_event_error_subject() {
+        let payload = FileErrorPayload {
+            file_path: "broken.rs".to_string(),
+            agent_id: "agent-x".to_string(),
+            reason: "disk full".to_string(),
+            timestamp: 99,
+        };
+        let bytes = serde_json::to_vec(&payload).unwrap();
+        let result = parse_file_event("ergatai.file.error.hash", &bytes).unwrap();
+        match result {
+            Some(FileEvent::Error(p)) => {
+                assert_eq!(p.file_path, "broken.rs");
+                assert_eq!(p.reason, "disk full");
+                assert_eq!(p.timestamp, 99);
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_file_event_partial_invalid_json() {
+        // Missing required fields
+        let bytes = br#"{"file_path":"x.rs"}"#;
+        let result = parse_file_event("ergatai.file.ready.hash", bytes);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_file_ready_payload_clone_and_debug() {
+        let payload = FileReadyPayload {
+            file_path: "file.rs".to_string(),
+            agent_id: "agent".to_string(),
+            token_id: "token".to_string(),
+            timestamp: 42,
+        };
+        let cloned = payload.clone();
+        assert_eq!(cloned.file_path, payload.file_path);
+        assert_eq!(cloned.timestamp, payload.timestamp);
+
+        let debug = format!("{:?}", payload);
+        assert!(debug.contains("file.rs"));
+        assert!(debug.contains("42"));
+    }
+
+    #[test]
+    fn test_file_error_payload_clone_and_debug() {
+        let payload = FileErrorPayload {
+            file_path: "file.rs".to_string(),
+            agent_id: "agent".to_string(),
+            reason: "something broke".to_string(),
+            timestamp: 77,
+        };
+        let cloned = payload.clone();
+        assert_eq!(cloned.reason, "something broke");
+
+        let debug = format!("{:?}", payload);
+        assert!(debug.contains("something broke"));
+    }
 }

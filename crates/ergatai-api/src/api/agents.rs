@@ -128,3 +128,131 @@ pub async fn send_message(
             .into_response(),
     }
 }
+
+// ── Tests ──
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // ── SpawnAgentRequest deserialization ──
+
+    #[test]
+    fn test_spawn_agent_request_required_fields() {
+        let req: SpawnAgentRequest = serde_json::from_value(json!({
+            "workspace_id": "ws-1",
+            "command": "claude"
+        }))
+        .unwrap();
+        assert_eq!(req.workspace_id, "ws-1");
+        assert_eq!(req.command, "claude");
+        assert!(req.instruction.is_none());
+        assert!(req.work_dir.is_none());
+        assert!(req.env.is_none());
+    }
+
+    #[test]
+    fn test_spawn_agent_request_all_fields() {
+        let req: SpawnAgentRequest = serde_json::from_value(json!({
+            "workspace_id": "ws-1",
+            "command": "claude",
+            "instruction": "do a task",
+            "work_dir": "/tmp/work",
+            "env": {"FOO": "bar", "BAZ": "qux"}
+        }))
+        .unwrap();
+        assert_eq!(req.instruction.as_deref(), Some("do a task"));
+        assert_eq!(req.work_dir.as_deref(), Some("/tmp/work"));
+        let env = req.env.unwrap();
+        assert_eq!(env.get("FOO").unwrap(), "bar");
+        assert_eq!(env.get("BAZ").unwrap(), "qux");
+    }
+
+    #[test]
+    fn test_spawn_agent_request_missing_workspace_id_fails() {
+        let result: Result<SpawnAgentRequest, _> =
+            serde_json::from_value(json!({"command": "claude"}));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_spawn_agent_request_missing_command_fails() {
+        let result: Result<SpawnAgentRequest, _> =
+            serde_json::from_value(json!({"workspace_id": "ws-1"}));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_spawn_agent_request_null_optional_fields() {
+        let req: SpawnAgentRequest = serde_json::from_value(json!({
+            "workspace_id": "ws-1",
+            "command": "claude",
+            "instruction": null,
+            "work_dir": null,
+            "env": null
+        }))
+        .unwrap();
+        assert!(req.instruction.is_none());
+        assert!(req.work_dir.is_none());
+        assert!(req.env.is_none());
+    }
+
+    // ── SendMessageRequest deserialization ──
+
+    #[test]
+    fn test_send_message_request_valid() {
+        let req: SendMessageRequest =
+            serde_json::from_value(json!({"message": "hello world"})).unwrap();
+        assert_eq!(req.message, "hello world");
+    }
+
+    #[test]
+    fn test_send_message_request_empty_string() {
+        let req: SendMessageRequest = serde_json::from_value(json!({"message": ""})).unwrap();
+        assert_eq!(req.message, "");
+    }
+
+    #[test]
+    fn test_send_message_request_missing_message_fails() {
+        let result: Result<SendMessageRequest, _> = serde_json::from_value(json!({}));
+        assert!(result.is_err());
+    }
+
+    // ── Response struct serialization ──
+
+    #[test]
+    fn test_spawn_agent_response_serialization() {
+        let resp = SpawnAgentResponse {
+            agent_id: "agent-42".to_string(),
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["agent_id"], "agent-42");
+    }
+
+    #[test]
+    fn test_agent_info_response_serialization() {
+        let resp = AgentInfoResponse {
+            agent_id: "a-1".to_string(),
+            workspace_id: "ws-1".to_string(),
+            state: "Running".to_string(),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["agent_id"], "a-1");
+        assert_eq!(json["workspace_id"], "ws-1");
+        assert_eq!(json["state"], "Running");
+        assert_eq!(json["created_at"], "2026-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn test_error_response_serialization() {
+        let resp = ErrorResponse {
+            error: "something went wrong".to_string(),
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["error"], "something went wrong");
+        // Only one field
+        assert_eq!(json.as_object().unwrap().len(), 1);
+    }
+}

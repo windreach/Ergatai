@@ -133,4 +133,29 @@ mod tests {
         assert_eq!(configs.len(), 1);
         assert_eq!(configs[0].name, DAG_EVENTS_STREAM);
     }
+
+    #[test]
+    fn test_dag_events_stream_constants() {
+        assert_eq!(DAG_EVENTS_STREAM, "DAG_EVENTS");
+        assert_eq!(TASK_SUBMISSIONS_CONSUMER, "task_submissions");
+        assert_eq!(DAG_EVENTS_CONSUMER, "dag_events");
+    }
+
+    #[test]
+    fn test_dag_events_stream_storage_and_replicas() {
+        let config = dag_events_stream_config();
+        assert_eq!(config.storage, StorageType::File);
+        assert_eq!(config.num_replicas, 1);
+    }
+
+    #[test]
+    fn test_dag_events_stream_subjects() {
+        let config = dag_events_stream_config();
+        // Should have exactly 2 subjects: task submit and dag events
+        assert_eq!(config.subjects.len(), 2);
+        // First subject uses single-level wildcard
+        assert!(config.subjects[0].ends_with("*"));
+        // Second subject uses multi-level wildcard
+        assert!(config.subjects[1].ends_with(">"));
+    }
 }

@@ -347,4 +347,168 @@ mod tests {
         assert!(tree.find_node("test-2").is_some());
         assert!(tree.find_node("nonexistent").is_none());
     }
+
+    // ── Additional topology tests ──
+
+    #[test]
+    fn test_single_node_tree() {
+        let tree = TaskTree::new(TaskNode::new("root", "agent", "Only task"));
+        assert_eq!(tree.root.children.len(), 0);
+        let ready = tree.ready_tasks();
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].id, "root");
+        assert_eq!(tree.progress(), 0.0);
+        assert!(!tree.is_complete());
+    }
+
+    #[test]
+    fn test_deep_tree() {
+        // Build a 10-level deep tree
+        let mut root = TaskNode::new("l0", "agent", "Level 0");
+        let mut current = &mut root;
+        for i in 1..=10 {
+            let child = TaskNode::new(format!("l{}", i), "agent", format!("Level {}", i));
+            current.children.push(child);
+            current = current.children.last_mut().unwrap();
+        }
+        let tree = TaskTree::new(root);
+        // Only root is ready initially
+        assert_eq!(tree.ready_tasks().len(), 1);
+        assert_eq!(tree.progress(), 0.0);
+        // Total 11 nodes
+        let total_nodes = tree.count_nodes();
+        assert_eq!(total_nodes, 11);
+    }
+
+    #[test]
+    fn test_unbalanced_tree() {
+        let root = TaskNode::new("root", "agent", "Root")
+            .with_child(
+                TaskNode::new("heavy", "agent", "Heavy branch")
+                    .with_child(TaskNode::new("h1", "agent", "H1"))
+                    .with_child(TaskNode::new("h2", "agent", "H2"))
+                    .with_child(TaskNode::new("h3", "agent", "H3")),
+            )
+            .with_child(TaskNode::new("light", "agent", "Light branch"));
+
+        let tree = TaskTree::new(root);
+        assert_eq!(tree.count_nodes(), 6); // root + heavy + h1 + h2 + h3 + light
+    }
+
+    #[test]
+    fn test_wide_tree() {
+        let mut root = TaskNode::new("root", "agent", "Root");
+        for i in 0..20 {
+            root.children.push(TaskNode::new(
+                format!("child-{}", i),
+                "agent",
+                format!("Child {}", i),
+            ));
+        }
+        let tree = TaskTree::new(root);
+        assert_eq!(tree.count_nodes(), 21);
+        // Complete root, then all children should be ready
+        let mut tree = tree;
+        tree.update_status("root", TaskStatus::Completed).unwrap();
+        let ready = tree.ready_tasks();
+        assert_eq!(ready.len(), 20);
+    }
+
+    #[test]
+    fn test_tree_with_no_leaves() {
+        // All nodes have children (except the deepest level)
+        // But the "no leaves" scenario is really about internal nodes being complete
+        // Here: just test a tree where only the root is pending and no children exist at leaf level
+        let root = TaskNode::new("root", "agent", "Root")
+            .with_child(TaskNode::new("mid", "agent", "Mid")
+                .with_child(TaskNode::new("leaf", "agent", "Leaf")));
+        let tree = TaskTree::new(root);
+        // Root is the only ready task
+        let ready = tree.ready_tasks();
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].id, "root");
+    }
+
+    #[test]
+    fn test_update_status_missing_node() {
+        let mut tree = sample_tree();
+        let result = tree.update_status("nonexistent", TaskStatus::Completed);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_set_result_sets_completed() {
+        let mut tree = sample_tree();
+        tree.set_result("pm", "/path/to/result".to_string()).unwrap();
+        let node = tree.find_node("pm").unwrap();
+        assert_eq!(node.status, TaskStatus::Completed);
+        assert_eq!(node.result_path, Some("/path/to/result".to_string()));
+    }
+
+    #[test]
+    fn test_is_complete_all_completed() {
+        let mut tree = sample_tree();
+        tree.update_status("pm", TaskStatus::Completed).unwrap();
+        tree.update_status("dev-1", TaskStatus::Completed).unwrap();
+        tree.update_status("dev-2", TaskStatus::Completed).unwrap();
+        tree.update_status("test-1", TaskStatus::Completed).unwrap();
+        tree.update_status("test-2", TaskStatus::Completed).unwrap();
+        assert!(tree.is_complete());
+        assert_eq!(tree.progress(), 1.0);
+    }
+
+    #[test]
+    fn test_sibling_links() {
+        let root = TaskNode::new("pm", "agent", "PM")
+            .with_child(
+                TaskNode::new("dev-1", "agent", "Dev 1")
+                    .with_sibling_link("dev-2"),
+            )
+            .with_child(
+                TaskNode::new("dev-2", "agent", "Dev 2")
+                    .with_sibling_link("dev-1"),
+            );
+        let tree = TaskTree::new(root);
+        let dev1 = tree.find_node("dev-1").unwrap();
+        assert_eq!(dev1.sibling_links, vec!["dev-2"]);
+        let dev2 = tree.find_node("dev-2").unwrap();
+        assert_eq!(dev2.sibling_links, vec!["dev-1"]);
+    }
+
+    #[test]
+    fn test_find_node_mut() {
+        let mut tree = sample_tree();
+        let node = tree.find_node_mut("dev-1").unwrap();
+        node.status = TaskStatus::Running;
+        assert_eq!(tree.find_node("dev-1").unwrap().status, TaskStatus::Running);
+    }
+
+    #[test]
+    fn test_metadata_stored() {
+        let mut root = TaskNode::new("root", "agent", "Root");
+        root.metadata.insert("key".to_string(), "value".to_string());
+        let tree = TaskTree::new(root);
+        assert_eq!(
+            tree.find_node("root").unwrap().metadata.get("key"),
+            Some(&"value".to_string())
+        );
+    }
+
+    #[test]
+    fn test_progress_zero_nodes_after_construction() {
+        let tree = sample_tree();
+        assert_eq!(tree.progress(), 0.0);
+    }
+
+    #[test]
+    fn test_ready_tasks_after_partial_completion() {
+        let mut tree = sample_tree();
+        tree.update_status("pm", TaskStatus::Completed).unwrap();
+        tree.update_status("dev-1", TaskStatus::Completed).unwrap();
+        // test-1 should be ready now (its parent dev-1 is completed)
+        let ready = tree.ready_tasks();
+        let ids: Vec<_> = ready.iter().map(|n| n.id.as_str()).collect();
+        assert!(ids.contains(&"test-1"));
+        assert!(ids.contains(&"dev-2"));
+    }
 }

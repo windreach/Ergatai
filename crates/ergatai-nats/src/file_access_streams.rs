@@ -202,4 +202,42 @@ mod tests {
         assert_eq!(config.max_age, Duration::from_secs(7200)); // 2 hours
         assert_eq!(config.storage, StorageType::File);
     }
+
+    #[test]
+    fn test_stream_name_constants() {
+        assert_eq!(FILE_ACCESS_REQUEST_STREAM, "FILE_ACCESS_REQUESTS");
+        assert_eq!(FILE_ACCESS_GRANT_STREAM, "FILE_ACCESS_GRANTS");
+        assert_eq!(FILE_ACCESS_ESCALATE_STREAM, "FILE_ACCESS_ESCALATIONS");
+        assert_eq!(FILE_EVENTS_STREAM, "FILE_EVENTS");
+        assert_eq!(LOCK_WAITERS_STREAM, "LOCK_WAITERS");
+    }
+
+    #[test]
+    fn test_request_stream_retention_policy() {
+        let config = file_access_request_stream_config();
+        assert_eq!(config.retention, RetentionPolicy::WorkQueue);
+        assert_eq!(config.storage, StorageType::File);
+        assert_eq!(config.num_replicas, 1);
+    }
+
+    #[test]
+    fn test_grant_stream_max_age() {
+        let config = file_access_grant_stream_config();
+        assert_eq!(config.max_age, Duration::from_secs(3600));
+    }
+
+    #[test]
+    fn test_escalate_stream_max_age() {
+        let config = file_access_escalate_stream_config();
+        assert_eq!(config.max_age, Duration::from_secs(1800)); // 30 minutes
+    }
+
+    #[test]
+    fn test_all_configs_have_file_storage() {
+        let configs = all_file_access_stream_configs();
+        for config in &configs {
+            assert_eq!(config.storage, StorageType::File,
+                "Stream {} should use file storage", config.name);
+        }
+    }
 }

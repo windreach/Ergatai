@@ -168,3 +168,323 @@ pub struct AgentInfo {
     /// When this agent was created
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_spec() -> WorkspaceSpec {
+        WorkspaceSpec {
+            id: "ws-1".to_string(),
+            work_dir: PathBuf::from("/tmp/ws-1"),
+            env: HashMap::new(),
+            resources: ResourceLimits::default(),
+            backend_config: serde_json::json!({}),
+        }
+    }
+
+    #[test]
+    fn test_workspace_spec_construction() {
+        let spec = sample_spec();
+        assert_eq!(spec.id, "ws-1");
+        assert_eq!(spec.work_dir, PathBuf::from("/tmp/ws-1"));
+        assert!(spec.env.is_empty());
+        assert!(spec.resources.cpu_cores.is_none());
+        assert!(spec.resources.memory_mb.is_none());
+        assert!(spec.resources.disk_mb.is_none());
+    }
+
+    #[test]
+    fn test_workspace_spec_with_env() {
+        let mut env = HashMap::new();
+        env.insert("KEY".to_string(), "VALUE".to_string());
+        let spec = WorkspaceSpec {
+            id: "ws-2".to_string(),
+            work_dir: PathBuf::from("/tmp"),
+            env,
+            resources: ResourceLimits::default(),
+            backend_config: serde_json::json!({}),
+        };
+        assert_eq!(spec.env.get("KEY"), Some(&"VALUE".to_string()));
+    }
+
+    #[test]
+    fn test_workspace_spec_with_resources() {
+        let spec = WorkspaceSpec {
+            id: "ws-3".to_string(),
+            work_dir: PathBuf::from("/tmp"),
+            env: HashMap::new(),
+            resources: ResourceLimits {
+                cpu_cores: Some(2.5),
+                memory_mb: Some(512),
+                disk_mb: Some(1024),
+            },
+            backend_config: serde_json::json!({}),
+        };
+        assert_eq!(spec.resources.cpu_cores, Some(2.5));
+        assert_eq!(spec.resources.memory_mb, Some(512));
+        assert_eq!(spec.resources.disk_mb, Some(1024));
+    }
+
+    #[test]
+    fn test_workspace_spec_with_backend_config() {
+        let spec = WorkspaceSpec {
+            id: "ws-4".to_string(),
+            work_dir: PathBuf::from("/tmp"),
+            env: HashMap::new(),
+            resources: ResourceLimits::default(),
+            backend_config: serde_json::json!({"image": "alpine", "network": "host"}),
+        };
+        assert_eq!(spec.backend_config["image"], "alpine");
+        assert_eq!(spec.backend_config["network"], "host");
+    }
+
+    #[test]
+    fn test_workspace_spec_clone() {
+        let spec = sample_spec();
+        let cloned = spec.clone();
+        assert_eq!(cloned.id, spec.id);
+        assert_eq!(cloned.work_dir, spec.work_dir);
+    }
+
+    #[test]
+    fn test_workspace_spec_debug() {
+        let spec = sample_spec();
+        let debug_str = format!("{:?}", spec);
+        assert!(debug_str.contains("ws-1"));
+        assert!(debug_str.contains("WorkspaceSpec"));
+    }
+
+    #[test]
+    fn test_workspace_spec_serialize_roundtrip() {
+        let spec = sample_spec();
+        let json = serde_json::to_string(&spec).unwrap();
+        let decoded: WorkspaceSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.id, spec.id);
+        assert_eq!(decoded.work_dir, spec.work_dir);
+    }
+
+    #[test]
+    fn test_resource_limits_default() {
+        let limits = ResourceLimits::default();
+        assert!(limits.cpu_cores.is_none());
+        assert!(limits.memory_mb.is_none());
+        assert!(limits.disk_mb.is_none());
+    }
+
+    #[test]
+    fn test_workspace_handle_eq() {
+        let h1 = WorkspaceHandle {
+            id: "ws-1".to_string(),
+            backend: "local-pty".to_string(),
+            metadata: HashMap::new(),
+        };
+        let h2 = h1.clone();
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn test_workspace_handle_metadata() {
+        let mut metadata = HashMap::new();
+        metadata.insert("session".to_string(), "ergatai-abc".to_string());
+        let handle = WorkspaceHandle {
+            id: "ws-1".to_string(),
+            backend: "local-pty".to_string(),
+            metadata,
+        };
+        assert_eq!(handle.metadata.get("session"), Some(&"ergatai-abc".to_string()));
+    }
+
+    #[test]
+    fn test_workspace_handle_serialize_roundtrip() {
+        let handle = WorkspaceHandle {
+            id: "ws-1".to_string(),
+            backend: "direct-process".to_string(),
+            metadata: HashMap::new(),
+        };
+        let json = serde_json::to_string(&handle).unwrap();
+        let decoded: WorkspaceHandle = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, handle);
+    }
+
+    #[test]
+    fn test_agent_handle_fields() {
+        let handle = AgentHandle {
+            workspace: WorkspaceHandle {
+                id: "ws-1".to_string(),
+                backend: "local-pty".to_string(),
+                metadata: HashMap::new(),
+            },
+            agent_id: "agent-1".to_string(),
+            process_id: Some("1234".to_string()),
+            metadata: HashMap::new(),
+        };
+        assert_eq!(handle.agent_id, "agent-1");
+        assert_eq!(handle.process_id, Some("1234".to_string()));
+        assert_eq!(handle.workspace.id, "ws-1");
+    }
+
+    #[test]
+    fn test_agent_handle_no_process_id() {
+        let handle = AgentHandle {
+            workspace: WorkspaceHandle {
+                id: "ws-1".to_string(),
+                backend: "local-pty".to_string(),
+                metadata: HashMap::new(),
+            },
+            agent_id: "agent-1".to_string(),
+            process_id: None,
+            metadata: HashMap::new(),
+        };
+        assert!(handle.process_id.is_none());
+    }
+
+    #[test]
+    fn test_agent_state_variants() {
+        let states = vec![
+            AgentState::Starting,
+            AgentState::Running,
+            AgentState::Stopping,
+            AgentState::Stopped,
+            AgentState::Failed("oops".to_string()),
+        ];
+        assert_eq!(states.len(), 5);
+        assert_eq!(states[0], AgentState::Starting);
+        assert_eq!(states[4], AgentState::Failed("oops".to_string()));
+    }
+
+    #[test]
+    fn test_agent_state_failed_message() {
+        let state = AgentState::Failed("segfault".to_string());
+        if let AgentState::Failed(msg) = state {
+            assert_eq!(msg, "segfault");
+        } else {
+            panic!("Expected Failed variant");
+        }
+    }
+
+    #[test]
+    fn test_wait_result_variants() {
+        let exited = WaitResult::Exited { code: 0 };
+        let signaled = WaitResult::Signaled { signal: 9 };
+        let timeout = WaitResult::Timeout;
+        let error = WaitResult::Error("boom".to_string());
+
+        // Just verify construction and debug formatting
+        assert!(format!("{:?}", exited).contains("Exited"));
+        assert!(format!("{:?}", signaled).contains("Signaled"));
+        assert!(format!("{:?}", timeout).contains("Timeout"));
+        assert!(format!("{:?}", error).contains("boom"));
+    }
+
+    #[test]
+    fn test_wait_result_serialize_roundtrip() {
+        let results = vec![
+            WaitResult::Exited { code: 0 },
+            WaitResult::Exited { code: 1 },
+            WaitResult::Signaled { signal: 15 },
+            WaitResult::Timeout,
+            WaitResult::Error("err".to_string()),
+        ];
+        for r in results {
+            let json = serde_json::to_string(&r).unwrap();
+            let decoded: WaitResult = serde_json::from_str(&json).unwrap();
+            assert!(format!("{:?}", decoded) == format!("{:?}", r));
+        }
+    }
+
+    #[test]
+    fn test_backend_capabilities_default() {
+        let caps = BackendCapabilities::default();
+        assert!(!caps.supports_message_injection);
+        assert!(!caps.supports_output_capture);
+        assert!(!caps.supports_resource_limits);
+        assert!(!caps.supports_workspace_reuse);
+        assert!(!caps.supports_network_isolation);
+        assert!(caps.max_concurrent_agents.is_none());
+    }
+
+    #[test]
+    fn test_backend_capabilities_custom() {
+        let caps = BackendCapabilities {
+            supports_message_injection: true,
+            supports_output_capture: true,
+            supports_resource_limits: false,
+            supports_workspace_reuse: true,
+            supports_network_isolation: false,
+            max_concurrent_agents: Some(10),
+        };
+        assert!(caps.supports_message_injection);
+        assert!(caps.supports_output_capture);
+        assert!(!caps.supports_resource_limits);
+        assert!(caps.supports_workspace_reuse);
+        assert_eq!(caps.max_concurrent_agents, Some(10));
+    }
+
+    #[test]
+    fn test_backend_capabilities_serialize() {
+        let caps = BackendCapabilities {
+            supports_message_injection: true,
+            supports_output_capture: false,
+            supports_resource_limits: false,
+            supports_workspace_reuse: false,
+            supports_network_isolation: false,
+            max_concurrent_agents: Some(5),
+        };
+        let json = serde_json::to_string(&caps).unwrap();
+        let decoded: BackendCapabilities = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.supports_message_injection, true);
+        assert_eq!(decoded.max_concurrent_agents, Some(5));
+    }
+
+    #[test]
+    fn test_agent_info_construction() {
+        let info = AgentInfo {
+            agent_id: "agent-1".to_string(),
+            workspace_id: "ws-1".to_string(),
+            handle: AgentHandle {
+                workspace: WorkspaceHandle {
+                    id: "ws-1".to_string(),
+                    backend: "local-pty".to_string(),
+                    metadata: HashMap::new(),
+                },
+                agent_id: "agent-1".to_string(),
+                process_id: None,
+                metadata: HashMap::new(),
+            },
+            state: AgentState::Running,
+            task_id: None,
+            mcp_agent_id: None,
+            created_at: chrono::Utc::now(),
+        };
+        assert_eq!(info.agent_id, "agent-1");
+        assert_eq!(info.workspace_id, "ws-1");
+        assert_eq!(info.state, AgentState::Running);
+        assert!(info.task_id.is_none());
+        assert!(info.mcp_agent_id.is_none());
+    }
+
+    #[test]
+    fn test_agent_info_with_task_and_mcp() {
+        let info = AgentInfo {
+            agent_id: "agent-1".to_string(),
+            workspace_id: "ws-1".to_string(),
+            handle: AgentHandle {
+                workspace: WorkspaceHandle {
+                    id: "ws-1".to_string(),
+                    backend: "local-pty".to_string(),
+                    metadata: HashMap::new(),
+                },
+                agent_id: "agent-1".to_string(),
+                process_id: None,
+                metadata: HashMap::new(),
+            },
+            state: AgentState::Starting,
+            task_id: Some("task-42".to_string()),
+            mcp_agent_id: Some("mcp-agent-7".to_string()),
+            created_at: chrono::Utc::now(),
+        };
+        assert_eq!(info.task_id, Some("task-42".to_string()));
+        assert_eq!(info.mcp_agent_id, Some("mcp-agent-7".to_string()));
+    }
+}

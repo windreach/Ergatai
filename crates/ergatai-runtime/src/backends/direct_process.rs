@@ -397,3 +397,423 @@ impl AgentRuntimeBackend for DirectProcessBackend {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::AgentRuntimeBackend;
+    use crate::types::{ResourceLimits, WorkspaceSpec};
+    use std::collections::HashMap;
+    use tempfile::TempDir;
+
+    fn make_backend() -> (DirectProcessBackend, TempDir) {
+        let tmp = TempDir::new().unwrap();
+        let backend = DirectProcessBackend::new(tmp.path().to_path_buf());
+        (backend, tmp)
+    }
+
+    fn make_spec(id: &str) -> WorkspaceSpec {
+        WorkspaceSpec {
+            id: id.to_string(),
+            work_dir: std::path::PathBuf::from("/tmp"),
+            env: HashMap::new(),
+            resources: ResourceLimits::default(),
+            backend_config: serde_json::json!({}),
+        }
+    }
+
+    #[test]
+    fn test_direct_process_backend_new() {
+        let tmp = TempDir::new().unwrap();
+        let backend = DirectProcessBackend::new(tmp.path().to_path_buf());
+        assert_eq!(backend.work_dir_base, tmp.path());
+    }
+
+    #[test]
+    fn test_backend_name() {
+        let (backend, _tmp) = make_backend();
+        assert_eq!(backend.name(), "direct-process");
+    }
+
+    #[test]
+    fn test_backend_capabilities() {
+        let (backend, _tmp) = make_backend();
+        let caps = backend.capabilities();
+        assert!(!caps.supports_message_injection);
+        assert!(caps.supports_output_capture);
+        assert!(!caps.supports_resource_limits);
+        assert!(!caps.supports_workspace_reuse);
+        assert!(!caps.supports_network_isolation);
+        assert!(caps.max_concurrent_agents.is_none());
+    }
+
+    #[test]
+    fn test_as_any_downcast() {
+        let (backend, _tmp) = make_backend();
+        let trait_obj: &dyn AgentRuntimeBackend = &backend;
+        let downcast = trait_obj
+            .as_any()
+            .downcast_ref::<DirectProcessBackend>();
+        assert!(downcast.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_initialize_creates_dir() {
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path().join("nested").join("dir");
+        let backend = DirectProcessBackend::new(base.clone());
+        assert!(!base.exists());
+        backend.initialize().await.unwrap();
+        assert!(base.exists());
+    }
+
+    #[tokio::test]
+    async fn test_initialize_idempotent() {
+        let (backend, _tmp) = make_backend();
+        backend.initialize().await.unwrap();
+        // Second call should also succeed
+        backend.initialize().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_create_workspace() {
+        let (backend, _tmp) = make_backend();
+        backend.initialize().await.unwrap();
+        let spec = make_spec("ws-1");
+        let handle = backend.create_workspace(spec).await.unwrap();
+        assert_eq!(handle.id, "ws-1");
+        assert_eq!(handle.backend, "direct-process");
+        assert!(handle.metadata.get("work_dir").is_some());
+        let work_dir = handle.metadata.get("work_dir").unwrap();
+        assert!(work_dir.ends_with("ws-1"));
+    }
+
+    #[tokio::test]
+    async fn test_create_workspace_creates_directory() {
+        let (backend, tmp) = make_backend();
+        backend.initialize().await.unwrap();
+        let spec = make_spec("ws-test");
+        let handle = backend.create_workspace(spec).await.unwrap();
+        let work_dir = handle.metadata.get("work_dir").unwrap();
+        assert!(std::path::Path::new(work_dir).exists());
+        // Also under the base
+        assert!(tmp.path().join("ws-test").exists());
+    }
+
+    #[tokio::test]
+    async fn test_start_agent_empty_command_error() {
+        let (backend, _tmp) = make_backend();
+        backend.initialize().await.unwrap();
+        let spec = make_spec("ws-1");
+        let handle = backend.create_workspace(spec).await.unwrap();
+        let result = backend.start_agent(&handle, "", None).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Empty command"));
+    }
+
+    #[tokio::test]
+    async fn test_start_agent_missing_binary() {
+        let (backend, _tmp) = make_backend();
+        backend.initialize().await.unwrap();
+        let spec = make_spec("ws-1");
+        let handle = backend.create_workspace(spec).await.unwrap();
+        let result = backend
+            .start_agent(&handle, "nonexistent_binary_xyz_123", None)
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_start_agent_missing_work_dir() {
+        let (backend, _tmp) = make_backend();
+        let handle = WorkspaceHandle {
+            id: "ws-1".to_string(),
+            backend: "direct-process".to_string(),
+            metadata: HashMap::new(), // no work_dir
+        };
+        let result = backend.start_agent(&handle, "echo hi", None).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("work_dir"));
+    }
+
+    #[tokio::test]
+    async fn test_start_agent_true_succeeds() {
+        let (backend, _tmp) = make_backend();
+        backend.initialize().await.unwrap();
+        let spec = make_spec("ws-1");
+        let handle = backend.create_workspace(spec).await.unwrap();
+        // Use "true" — a real binary that exits immediately with 0
+        let agent = backend.start_agent(&handle, "true", None).await.unwrap();
+        assert!(agent.process_id.is_some());
+        assert!(!agent.agent_id.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_inject_message_unsupported() {
+        let (backend, _tmp) = make_backend();
+        let agent = AgentHandle {
+            workspace: WorkspaceHandle {
+                id: "ws-1".to_string(),
+                backend: "direct-process".to_string(),
+                metadata: HashMap::new(),
+            },
+            agent_id: "agent-1".to_string(),
+            process_id: Some("999".to_string()),
+            metadata: HashMap::new(),
+        };
+        let result = backend.inject_message(&agent, "hello").await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("does not support message injection"));
+    }
+
+    #[tokio::test]
+    async fn test_capture_output_returns_none() {
+        let (backend, _tmp) = make_backend();
+        let agent = AgentHandle {
+            workspace: WorkspaceHandle {
+                id: "ws-1".to_string(),
+                backend: "direct-process".to_string(),
+                metadata: HashMap::new(),
+            },
+            agent_id: "agent-1".to_string(),
+            process_id: Some("999".to_string()),
+            metadata: HashMap::new(),
+        };
+        let result = backend.capture_output(&agent).await.unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_is_alive_missing_pid() {
+        let (backend, _tmp) = make_backend();
+        let agent = AgentHandle {
+            workspace: WorkspaceHandle {
+                id: "ws-1".to_string(),
+                backend: "direct-process".to_string(),
+                metadata: HashMap::new(),
+            },
+            agent_id: "agent-1".to_string(),
+            process_id: None,
+            metadata: HashMap::new(),
+        };
+        let result = backend.is_alive(&agent).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_is_alive_nonexistent_pid() {
+        let (backend, _tmp) = make_backend();
+        let agent = AgentHandle {
+            workspace: WorkspaceHandle {
+                id: "ws-1".to_string(),
+                backend: "direct-process".to_string(),
+                metadata: HashMap::new(),
+            },
+            agent_id: "agent-1".to_string(),
+            process_id: Some("999999".to_string()), // very unlikely to exist
+            metadata: HashMap::new(),
+        };
+        let alive = backend.is_alive(&agent).await.unwrap();
+        assert!(!alive);
+    }
+
+    #[tokio::test]
+    async fn test_is_alive_real_process() {
+        let (backend, _tmp) = make_backend();
+        let spec = make_spec("ws-1");
+        backend.initialize().await.unwrap();
+        let handle = backend.create_workspace(spec).await.unwrap();
+        // Use "sleep 60" so the process stays alive
+        let agent = backend
+            .start_agent(&handle, "sleep 60", None)
+            .await
+            .unwrap();
+        let alive = backend.is_alive(&agent).await.unwrap();
+        assert!(alive);
+        // Cleanup
+        backend.kill_agent(&agent).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_stop_agent_missing_pid() {
+        let (backend, _tmp) = make_backend();
+        let agent = AgentHandle {
+            workspace: WorkspaceHandle {
+                id: "ws-1".to_string(),
+                backend: "direct-process".to_string(),
+                metadata: HashMap::new(),
+            },
+            agent_id: "agent-1".to_string(),
+            process_id: None,
+            metadata: HashMap::new(),
+        };
+        let result = backend.stop_agent(&agent).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_kill_agent_missing_pid() {
+        let (backend, _tmp) = make_backend();
+        let agent = AgentHandle {
+            workspace: WorkspaceHandle {
+                id: "ws-1".to_string(),
+                backend: "direct-process".to_string(),
+                metadata: HashMap::new(),
+            },
+            agent_id: "agent-1".to_string(),
+            process_id: None,
+            metadata: HashMap::new(),
+        };
+        let result = backend.kill_agent(&agent).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_exit_completed_process() {
+        let (backend, _tmp) = make_backend();
+        backend.initialize().await.unwrap();
+        let spec = make_spec("ws-1");
+        let handle = backend.create_workspace(spec).await.unwrap();
+        // "true" exits immediately
+        let agent = backend.start_agent(&handle, "true", None).await.unwrap();
+        let result = backend
+            .wait_for_exit(&agent, Some(Duration::from_secs(5)))
+            .await
+            .unwrap();
+        match result {
+            WaitResult::Exited { code } => assert_eq!(code, 0),
+            other => panic!("Expected Exited, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_exit_timeout() {
+        let (backend, _tmp) = make_backend();
+        backend.initialize().await.unwrap();
+        let spec = make_spec("ws-1");
+        let handle = backend.create_workspace(spec).await.unwrap();
+        // "sleep 60" runs for a long time
+        let agent = backend
+            .start_agent(&handle, "sleep 60", None)
+            .await
+            .unwrap();
+        let result = backend
+            .wait_for_exit(&agent, Some(Duration::from_millis(500)))
+            .await
+            .unwrap();
+        match result {
+            WaitResult::Timeout => {}
+            other => panic!("Expected Timeout, got {:?}", other),
+        }
+        // Cleanup
+        backend.kill_agent(&agent).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_list_workspaces_empty() {
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path().join("nonexistent");
+        let backend = DirectProcessBackend::new(base);
+        let workspaces = backend.list_workspaces().await.unwrap();
+        assert!(workspaces.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_list_workspaces_after_create() {
+        let (backend, _tmp) = make_backend();
+        backend.initialize().await.unwrap();
+        backend
+            .create_workspace(make_spec("ws-a"))
+            .await
+            .unwrap();
+        backend
+            .create_workspace(make_spec("ws-b"))
+            .await
+            .unwrap();
+        let mut workspaces = backend.list_workspaces().await.unwrap();
+        workspaces.sort_by(|a, b| a.id.cmp(&b.id));
+        assert_eq!(workspaces.len(), 2);
+        assert_eq!(workspaces[0].id, "ws-a");
+        assert_eq!(workspaces[1].id, "ws-b");
+        assert_eq!(workspaces[0].backend, "direct-process");
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_workspace() {
+        let (backend, _tmp) = make_backend();
+        backend.initialize().await.unwrap();
+        let spec = make_spec("ws-cleanup");
+        let handle = backend.create_workspace(spec).await.unwrap();
+        let work_dir = handle.metadata.get("work_dir").unwrap().clone();
+        assert!(std::path::Path::new(&work_dir).exists());
+        backend.cleanup_workspace(&handle).await.unwrap();
+        assert!(!std::path::Path::new(&work_dir).exists());
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_workspace_missing_dir() {
+        let (backend, _tmp) = make_backend();
+        let handle = WorkspaceHandle {
+            id: "ws-missing".to_string(),
+            backend: "direct-process".to_string(),
+            metadata: {
+                let mut m = HashMap::new();
+                m.insert("work_dir".to_string(), "/nonexistent/path/xyz".to_string());
+                m
+            },
+        };
+        let result = backend.cleanup_workspace(&handle).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_workspace_missing_metadata() {
+        let (backend, _tmp) = make_backend();
+        let handle = WorkspaceHandle {
+            id: "ws-missing".to_string(),
+            backend: "direct-process".to_string(),
+            metadata: HashMap::new(),
+        };
+        let result = backend.cleanup_workspace(&handle).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("work_dir"));
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_cleans_all() {
+        let (backend, _tmp) = make_backend();
+        backend.initialize().await.unwrap();
+        backend
+            .create_workspace(make_spec("ws-1"))
+            .await
+            .unwrap();
+        backend
+            .create_workspace(make_spec("ws-2"))
+            .await
+            .unwrap();
+        backend.shutdown().await.unwrap();
+        let workspaces = backend.list_workspaces().await.unwrap();
+        assert!(workspaces.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_start_agent_with_args() {
+        let (backend, _tmp) = make_backend();
+        backend.initialize().await.unwrap();
+        let spec = make_spec("ws-1");
+        let handle = backend.create_workspace(spec).await.unwrap();
+        // "echo hello world" has program + args
+        let agent = backend
+            .start_agent(&handle, "echo hello world", None)
+            .await
+            .unwrap();
+        assert!(agent.process_id.is_some());
+        // Wait for it to exit
+        let _ = backend
+            .wait_for_exit(&agent, Some(Duration::from_secs(5)))
+            .await;
+    }
+}

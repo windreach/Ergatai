@@ -239,4 +239,136 @@ mod tests {
             Some(&"v".to_string())
         );
     }
+
+    // ── Additional tests ──
+
+    #[test]
+    fn test_overwrite_global() {
+        let mut ctx = DagContext::empty();
+        ctx.set_global("key", "value1");
+        assert_eq!(ctx.get_global("key"), Some("value1"));
+        ctx.set_global("key", "value2");
+        assert_eq!(ctx.get_global("key"), Some("value2"));
+    }
+
+    #[test]
+    fn test_empty_context() {
+        let ctx = DagContext::empty();
+        assert!(ctx.global_vars.is_empty());
+        assert!(ctx.node_outputs.is_empty());
+        assert_eq!(ctx.render_template("{{unknown}}"), "{{unknown}}");
+    }
+
+    #[test]
+    fn test_record_output_overwrites() {
+        let mut ctx = DagContext::empty();
+        let mut outputs1 = HashMap::new();
+        outputs1.insert("k".to_string(), "v1".to_string());
+        ctx.record_output("node", outputs1);
+
+        let mut outputs2 = HashMap::new();
+        outputs2.insert("k".to_string(), "v2".to_string());
+        ctx.record_output("node", outputs2);
+
+        let got = ctx.get_node_outputs("node").unwrap();
+        assert_eq!(got.get("k"), Some(&"v2".to_string()));
+    }
+
+    #[test]
+    fn test_nested_key_patterns_in_template() {
+        let mut ctx = DagContext::empty();
+        ctx.set_global("project.name", "ergatai");
+        let mut outputs = HashMap::new();
+        outputs.insert("result.status".to_string(), "ok".to_string());
+        ctx.record_output("node.1", outputs);
+
+        // Global with dot in key name
+        assert_eq!(ctx.get_global("project.name"), Some("ergatai"));
+    }
+
+    #[test]
+    fn test_context_clone() {
+        let mut ctx = DagContext::new(globals(&[("q", "original")]));
+        let mut outputs = HashMap::new();
+        outputs.insert("k".to_string(), "v".to_string());
+        ctx.record_output("n1", outputs);
+
+        let cloned = ctx.clone();
+        assert_eq!(cloned.get_global("q"), Some("original"));
+        assert_eq!(
+            cloned.get_node_outputs("n1").unwrap().get("k"),
+            Some(&"v".to_string())
+        );
+    }
+
+    #[test]
+    fn test_render_template_with_empty_global_vars() {
+        let ctx = DagContext::empty();
+        assert_eq!(ctx.render_template("{{global.missing}}"), "{{global.missing}}");
+    }
+
+    #[test]
+    fn test_has_node_outputs_false_when_missing() {
+        let ctx = DagContext::empty();
+        assert!(!ctx.has_node_outputs("nonexistent"));
+    }
+
+    #[test]
+    fn test_render_template_multiple_node_outputs() {
+        let mut ctx = DagContext::empty();
+        let mut o1 = HashMap::new();
+        o1.insert("result".to_string(), "A done".to_string());
+        ctx.record_output("TaskA", o1);
+        let mut o2 = HashMap::new();
+        o2.insert("result".to_string(), "B done".to_string());
+        ctx.record_output("TaskB", o2);
+
+        let rendered = ctx.render_template("{{TaskA.result}} then {{TaskB.result}}");
+        assert_eq!(rendered, "A done then B done");
+    }
+
+    #[test]
+    fn test_build_context_map_keys() {
+        let mut ctx = DagContext::new(globals(&[("q", "query")]));
+        let mut outputs = HashMap::new();
+        outputs.insert("k".to_string(), "v".to_string());
+        ctx.record_output("n1", outputs);
+
+        let map = ctx.build_context_map();
+        assert_eq!(map.get("global.q"), Some(&"query".to_string()));
+        assert_eq!(map.get("n1.k"), Some(&"v".to_string()));
+    }
+
+    #[test]
+    fn test_record_output_empty_outputs() {
+        let mut ctx = DagContext::empty();
+        ctx.record_output("node", HashMap::new());
+        assert!(ctx.has_node_outputs("node"));
+        let got = ctx.get_node_outputs("node").unwrap();
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn test_multiple_globals_in_render() {
+        let ctx = DagContext::new(globals(&[
+            ("a", "alpha"),
+            ("b", "beta"),
+            ("c", "gamma"),
+        ]));
+        let rendered = ctx.render_template("{{global.a}} {{global.b}} {{global.c}}");
+        assert_eq!(rendered, "alpha beta gamma");
+    }
+
+    #[test]
+    fn test_get_node_outputs_returns_none_when_missing() {
+        let ctx = DagContext::empty();
+        assert!(ctx.get_node_outputs("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_render_template_preserves_literal_text() {
+        let ctx = DagContext::new(globals(&[("x", "value")]));
+        let rendered = ctx.render_template("before {{global.x}} after");
+        assert_eq!(rendered, "before value after");
+    }
 }

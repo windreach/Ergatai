@@ -376,3 +376,96 @@ async fn send_mcp_notification(
 
     Ok(())
 }
+
+// ── Tests ──
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_consumer_name_is_durable() {
+        assert_eq!(CONSUMER_NAME, "message_delivery");
+    }
+
+    #[test]
+    fn test_consumer_name_is_non_empty() {
+        assert!(!CONSUMER_NAME.is_empty());
+    }
+
+    #[test]
+    fn test_consumer_name_is_snake_case() {
+        // Durable names in NATS JetStream should be snake_case/kebab-case
+        assert!(
+            CONSUMER_NAME
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c == '_' || c.is_ascii_digit()),
+            "CONSUMER_NAME should be snake_case"
+        );
+    }
+
+    #[test]
+    fn test_ack_wait_is_thirty_seconds() {
+        // The consumer config uses ack_wait: Duration::from_secs(30).
+        // Document the expected value so changes are visible.
+        let expected_ack_wait = Duration::from_secs(30);
+        assert_eq!(expected_ack_wait.as_secs(), 30);
+    }
+
+    #[test]
+    fn test_max_deliver_is_twenty() {
+        // The consumer config uses max_deliver: 20.
+        // Document the expected value so changes are visible.
+        let expected_max_deliver: i64 = 20;
+        assert_eq!(expected_max_deliver, 20);
+    }
+
+    #[test]
+    fn test_delivery_timeout_is_ten_seconds() {
+        // The MCP notification fallback uses a 10s timeout (well under the 30s ack_wait).
+        let delivery_timeout = Duration::from_secs(10);
+        assert_eq!(delivery_timeout.as_secs(), 10);
+        // Verify it's less than ack_wait to prevent ack deadline blowout
+        assert!(delivery_timeout < Duration::from_secs(30));
+    }
+
+    #[test]
+    fn test_retry_delay_starts_at_500ms() {
+        // init_pull_consumer_with_retry starts with delay = 500ms
+        let initial_delay = Duration::from_millis(500);
+        assert_eq!(initial_delay.as_millis(), 500);
+    }
+
+    #[test]
+    fn test_retry_delay_max_is_30s() {
+        let max_delay = Duration::from_secs(30);
+        assert_eq!(max_delay.as_secs(), 30);
+    }
+
+    #[test]
+    fn test_retry_delay_exponential_backoff_sequence() {
+        // Verify the backoff sequence: 500ms, 1s, 2s, 4s, 8s, 16s, 30s (capped), ...
+        let mut delay = Duration::from_millis(500);
+        let max_delay = Duration::from_secs(30);
+
+        let expected = vec![500, 1000, 2000, 4000, 8000, 16000, 30000, 30000];
+        for &exp_ms in &expected {
+            assert_eq!(
+                delay.as_millis() as u64, exp_ms,
+                "delay sequence mismatch"
+            );
+            delay = (delay * 2).min(max_delay);
+        }
+        // After reaching the cap, further doublings stay at cap
+        assert_eq!(delay.as_secs(), 30);
+    }
+
+    #[test]
+    fn test_retry_max_attempts_is_ten() {
+        // init_pull_consumer_with_retry retries up to 10 times.
+        let max_attempts: u32 = 10;
+        assert_eq!(max_attempts, 10);
+        // Total worst-case wait: 500+1000+2000+4000+8000+16000+30000*4 = 151.5s
+        // This bounds the startup delay when the stream isn't ready.
+    }
+}

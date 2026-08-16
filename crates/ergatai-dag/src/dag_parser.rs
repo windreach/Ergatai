@@ -552,4 +552,247 @@ mod tests {
         assert!(validate_scope_pattern("/absolute/path").is_err());
         assert!(validate_scope_pattern("[invalid").is_err());
     }
+
+    // ── Edge case tests ──
+
+    #[test]
+    fn test_empty_markdown() {
+        let markdown = "";
+        let result = parse_dag_markdown(markdown);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("No tasks found"));
+    }
+
+    #[test]
+    fn test_empty_markdown_whitespace_only() {
+        let markdown = "\n\n   \n\n\t\n";
+        let result = parse_dag_markdown(markdown);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_malformed_header_missing_content() {
+        let markdown = "## \n- **agent**: agent-a\n";
+        let result = parse_dag_markdown(markdown);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_malformed_property_missing_colon() {
+        let markdown = r#"
+## Task A
+- **agent** value_without_colon
+"#;
+        let result = parse_dag_markdown(markdown);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_missing_agent_uses_default() {
+        let markdown = r#"
+## Task A
+- **task**: tasks/a.md
+"#;
+        let graph = parse_dag_markdown(markdown).unwrap();
+        assert_eq!(graph.nodes[0].agent, "agent");
+    }
+
+    #[test]
+    fn test_duplicate_task_names() {
+        let markdown = r#"
+## Task A
+- **agent**: agent-a
+- **task**: tasks/a.md
+
+## Task A
+- **agent**: agent-b
+- **task**: tasks/b.md
+"#;
+        let result = parse_dag_markdown(markdown);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Duplicate task name"));
+    }
+
+    #[test]
+    fn test_special_characters_in_task_name() {
+        let markdown = r#"
+## Task with special chars: @#$%
+- **agent**: agent-a
+- **task**: tasks/a.md
+"#;
+        let graph = parse_dag_markdown(markdown).unwrap();
+        assert_eq!(graph.nodes[0].task, "Task with special chars: @#$%");
+    }
+
+    #[test]
+    fn test_very_long_task_name() {
+        let long_name = "A".repeat(500);
+        let markdown = format!(
+            "## {}\n- **agent**: agent-a\n- **task**: tasks/a.md\n",
+            long_name
+        );
+        let graph = parse_dag_markdown(&markdown).unwrap();
+        assert_eq!(graph.nodes[0].task, long_name);
+    }
+
+    #[test]
+    fn test_node_with_all_optional_fields() {
+        let markdown = r#"
+## Full Task
+- **agent**: agent-a
+- **task**: tasks/a.md
+- **depends_on**: []
+- **input**: some input
+- **output**: some output
+- **priority**: high
+- **timeout**: 300
+- **retry**: 3
+- **scope**: src/**/*.rs
+"#;
+        let graph = parse_dag_markdown(markdown).unwrap();
+        let node = &graph.nodes[0];
+        assert_eq!(node.agent, "agent-a");
+        assert_eq!(node.input, Some("some input".to_string()));
+        assert_eq!(node.output, Some("some output".to_string()));
+        assert_eq!(node.priority, Some("high".to_string()));
+        assert_eq!(node.timeout, Some(300));
+        assert_eq!(node.max_retries, 3);
+        assert_eq!(node.scope, Some("src/**/*.rs".to_string()));
+    }
+
+    #[test]
+    fn test_minimal_node() {
+        let markdown = "## Minimal\n";
+        let graph = parse_dag_markdown(markdown).unwrap();
+        let node = &graph.nodes[0];
+        assert_eq!(node.task, "Minimal");
+        assert_eq!(node.agent, "agent");
+        assert!(node.depends_on.is_empty());
+        assert!(node.input.is_none());
+        assert!(node.output.is_none());
+        assert_eq!(node.max_retries, 0);
+        assert!(node.timeout.is_none());
+        assert!(node.scope.is_none());
+    }
+
+    #[test]
+    fn test_h3_header_node() {
+        let markdown = r#"
+### H3 Task
+- **agent**: agent-a
+- **task**: tasks/a.md
+"#;
+        let graph = parse_dag_markdown(markdown).unwrap();
+        assert_eq!(graph.nodes[0].task, "H3 Task");
+    }
+
+    #[test]
+    fn test_multiple_depends_on() {
+        let markdown = r#"
+## Task A
+## Task B
+## Task C
+## Task D
+- **depends_on**: [Task A, Task B, Task C]
+"#;
+        let graph = parse_dag_markdown(markdown).unwrap();
+        let node_d = &graph.nodes[3];
+        assert_eq!(node_d.depends_on.len(), 3);
+    }
+
+    #[test]
+    fn test_parent_merged_into_depends_on() {
+        let markdown = r#"
+## Root Task
+## Child Task
+- **parent**: Root Task
+- **depends_on**: [Root Task]
+"#;
+        let graph = parse_dag_markdown(markdown).unwrap();
+        let child = &graph.nodes[1];
+        // parent should be merged, so only one unique dependency
+        assert_eq!(child.depends_on.len(), 1);
+    }
+
+    #[test]
+    fn test_invalid_timeout_ignored() {
+        let markdown = r#"
+## Task A
+- **timeout**: not_a_number
+"#;
+        let graph = parse_dag_markdown(markdown).unwrap();
+        assert!(graph.nodes[0].timeout.is_none());
+    }
+
+    #[test]
+    fn test_invalid_retry_ignored() {
+        let markdown = r#"
+## Task A
+- **retry**: not_a_number
+"#;
+        let graph = parse_dag_markdown(markdown).unwrap();
+        assert_eq!(graph.nodes[0].max_retries, 0);
+    }
+
+    #[test]
+    fn test_unknown_property_stored_in_metadata() {
+        let markdown = r#"
+## Task A
+- **custom_key**: custom_value
+- **another**: data
+"#;
+        let graph = parse_dag_markdown(markdown).unwrap();
+        let node = &graph.nodes[0];
+        assert_eq!(node.metadata.get("custom_key"), Some(&"custom_value".to_string()));
+        assert_eq!(node.metadata.get("another"), Some(&"data".to_string()));
+    }
+
+    #[test]
+    fn test_parse_array_without_brackets() {
+        let arr = parse_array("n1, n2").unwrap();
+        assert_eq!(arr, vec!["n1", "n2"]);
+    }
+
+    #[test]
+    fn test_parse_array_with_extra_whitespace() {
+        let arr = parse_array("[  n1  ,  n2  ,  n3  ]").unwrap();
+        assert_eq!(arr, vec!["n1", "n2", "n3"]);
+    }
+
+    #[test]
+    fn test_graph_title_ignored() {
+        let markdown = r#"
+# My DAG Title
+## Task A
+- **agent**: agent-a
+"#;
+        let graph = parse_dag_markdown(markdown).unwrap();
+        assert_eq!(graph.nodes.len(), 1);
+        assert_eq!(graph.nodes[0].task, "Task A");
+    }
+
+    #[test]
+    fn test_uuid_format_generated() {
+        let markdown = "## Task A\n";
+        let graph = parse_dag_markdown(markdown).unwrap();
+        let id = &graph.nodes[0].id;
+        assert!(Uuid::parse_str(id).is_ok(), "ID should be a valid UUID: {}", id);
+    }
+
+    #[test]
+    fn test_depends_on_references_resolved_to_uuids() {
+        let markdown = r#"
+## Task A
+## Task B
+- **depends_on**: [Task A]
+"#;
+        let graph = parse_dag_markdown(markdown).unwrap();
+        let node_a = &graph.nodes[0];
+        let node_b = &graph.nodes[1];
+        assert_eq!(node_b.depends_on.len(), 1);
+        assert_eq!(node_b.depends_on[0], node_a.id);
+        assert!(Uuid::parse_str(&node_b.depends_on[0]).is_ok());
+    }
 }

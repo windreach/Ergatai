@@ -1128,4 +1128,107 @@ mod tests {
         assert_eq!(entries[0].agent_id, "agent-x");
         assert_eq!(entries[0].file_path, Some("target.rs".to_string()));
     }
+
+    // ─── Additional tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_query_audit_log_empty_database() {
+        let (_temp_dir, manager) = setup_test_db();
+        let entries = manager.query_audit_log(None, None, None, None, None, 100).unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn test_query_audit_log_limit_respected() {
+        let (_temp_dir, manager) = setup_test_db();
+
+        {
+            let conn = manager.conn.lock().unwrap();
+            for i in 0..20 {
+                conn.execute(
+                    "INSERT INTO audit_log (timestamp, agent_id, session_id, action, file_path, mode)
+                     VALUES (datetime('now'), ?, 's1', 'LOCK_ACQUIRED', 'f.rs', 'WRITE')",
+                    [format!("agent-{i}")],
+                )
+                .unwrap();
+            }
+        }
+
+        let entries = manager.query_audit_log(None, None, None, None, None, 5).unwrap();
+        assert_eq!(entries.len(), 5);
+    }
+
+    #[test]
+    fn test_query_audit_log_filter_by_session() {
+        let (_temp_dir, manager) = setup_test_db();
+
+        {
+            let conn = manager.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO audit_log (timestamp, agent_id, session_id, action, file_path, mode)
+                 VALUES (datetime('now'), 'a1', 'sess-A', 'LOCK_ACQUIRED', 'x.rs', 'WRITE')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO audit_log (timestamp, agent_id, session_id, action, file_path, mode)
+                 VALUES (datetime('now'), 'a1', 'sess-B', 'LOCK_ACQUIRED', 'x.rs', 'WRITE')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let entries = manager.query_audit_log(None, None, None, None, None, 100).unwrap();
+        assert_eq!(entries.len(), 2);
+
+        // Filter by agent
+        let entries = manager.query_audit_log(Some("a1"), None, None, None, None, 100).unwrap();
+        assert_eq!(entries.len(), 2);
+
+        let entries = manager.query_audit_log(Some("nonexistent"), None, None, None, None, 100).unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn test_audit_entry_with_special_characters() {
+        let (_temp_dir, manager) = setup_test_db();
+
+        {
+            let conn = manager.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO audit_log (timestamp, agent_id, session_id, action, file_path, mode, reason)
+                 VALUES (datetime('now'), 'agent', 'session', 'LOCK_ACQUIRED', 'path/with spaces/file.rs', 'WRITE', 'reason with \"quotes\"')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let entries = manager.query_audit_log(None, None, None, None, None, 100).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].file_path,
+            Some("path/with spaces/file.rs".to_string())
+        );
+        assert_eq!(
+            entries[0].reason,
+            Some("reason with \"quotes\"".to_string())
+        );
+    }
+
+    #[test]
+    fn test_audit_entry_default_display() {
+        let entry = AuditEntry {
+            timestamp: "2026-08-11T12:00:00Z".to_string(),
+            agent_id: "agent".to_string(),
+            session_id: "session".to_string(),
+            action: "LOCK_ACQUIRED".to_string(),
+            file_path: Some("test.rs".to_string()),
+            mode: Some("WRITE".to_string()),
+            reason: None,
+        };
+        // AuditEntry should implement Debug
+        let debug_str = format!("{:?}", entry);
+        assert!(debug_str.contains("agent"));
+        assert!(debug_str.contains("LOCK_ACQUIRED"));
+    }
 }

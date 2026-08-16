@@ -506,4 +506,192 @@ mod tests {
         // Should be complete (Completed + Skipped = all done)
         assert!(graph.is_complete());
     }
+
+    // ── Complex topology tests ──
+
+    #[test]
+    fn test_single_node_graph() {
+        let graph = TaskGraph::new(vec![TaskNode::new("solo", "agent", "Solo task")]);
+        assert!(graph.validate().is_ok());
+        let ready = graph.ready_tasks();
+        assert_eq!(ready.len(), 1);
+        assert_eq!(graph.progress(), 0.0);
+    }
+
+    #[test]
+    fn test_diamond_pattern() {
+        // A → B, A → C, B → D, C → D
+        let graph = TaskGraph::new(vec![
+            TaskNode::new("a", "agent", "A"),
+            TaskNode::new("b", "agent", "B")
+                .with_dependencies(vec!["a".into()]),
+            TaskNode::new("c", "agent", "C")
+                .with_dependencies(vec!["a".into()]),
+            TaskNode::new("d", "agent", "D")
+                .with_dependencies(vec!["b".into(), "c".into()]),
+        ]);
+        assert!(graph.validate().is_ok());
+        assert_eq!(graph.ready_tasks().len(), 1); // only "a" is ready
+    }
+
+    #[test]
+    fn test_cycle_detection_simple() {
+        // A → B, B → A
+        let graph = TaskGraph::new(vec![
+            TaskNode::new("a", "agent", "A")
+                .with_dependencies(vec!["b".into()]),
+            TaskNode::new("b", "agent", "B")
+                .with_dependencies(vec!["a".into()]),
+        ]);
+        assert!(graph.validate().is_err());
+    }
+
+    #[test]
+    fn test_cycle_detection_self_loop() {
+        let graph = TaskGraph::new(vec![
+            TaskNode::new("a", "agent", "A")
+                .with_dependencies(vec!["a".into()]),
+        ]);
+        assert!(graph.validate().is_err());
+    }
+
+    #[test]
+    fn test_deep_chain() {
+        // A → B → C → D → E
+        let graph = TaskGraph::new(vec![
+            TaskNode::new("a", "agent", "A"),
+            TaskNode::new("b", "agent", "B").with_dependencies(vec!["a".into()]),
+            TaskNode::new("c", "agent", "C").with_dependencies(vec!["b".into()]),
+            TaskNode::new("d", "agent", "D").with_dependencies(vec!["c".into()]),
+            TaskNode::new("e", "agent", "E").with_dependencies(vec!["d".into()]),
+        ]);
+        assert!(graph.validate().is_ok());
+        assert_eq!(graph.ready_tasks().len(), 1);
+        assert_eq!(graph.ready_tasks()[0].id, "a");
+    }
+
+    #[test]
+    fn test_wide_parallel_graph() {
+        let nodes: Vec<TaskNode> = (0..10)
+            .map(|i| TaskNode::new(format!("n{}", i), "agent", format!("Task {}", i)))
+            .collect();
+        let graph = TaskGraph::new(nodes);
+        assert!(graph.validate().is_ok());
+        assert_eq!(graph.ready_tasks().len(), 10);
+    }
+
+    #[test]
+    fn test_disconnected_components() {
+        // Two separate subgraphs: {a, b} and {c, d}
+        let graph = TaskGraph::new(vec![
+            TaskNode::new("a", "agent", "A"),
+            TaskNode::new("b", "agent", "B").with_dependencies(vec!["a".into()]),
+            TaskNode::new("c", "agent", "C"),
+            TaskNode::new("d", "agent", "D").with_dependencies(vec!["c".into()]),
+        ]);
+        assert!(graph.validate().is_ok());
+        let ready = graph.ready_tasks();
+        assert_eq!(ready.len(), 2); // "a" and "c"
+    }
+
+    #[test]
+    fn test_duplicate_node_id_validation() {
+        let graph = TaskGraph::new(vec![
+            TaskNode::new("n1", "agent", "Task 1"),
+            TaskNode::new("n1", "agent", "Task 1 duplicate"),
+        ]);
+        assert!(graph.validate().is_err());
+        let err = graph.validate().unwrap_err().to_string();
+        assert!(err.contains("Duplicate node ID"));
+    }
+
+    #[test]
+    fn test_find_node_returns_none_for_missing() {
+        let graph = sample_graph();
+        assert!(graph.find_node("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_update_status_for_missing_node() {
+        let mut graph = sample_graph();
+        let result = graph.update_status("nonexistent", TaskStatus::Completed);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_set_result() {
+        let mut graph = sample_graph();
+        graph.set_result("n1", "/path/to/result".to_string()).unwrap();
+        let node = graph.find_node("n1").unwrap();
+        assert_eq!(node.status, TaskStatus::Completed);
+        assert_eq!(node.result_path, Some("/path/to/result".to_string()));
+    }
+
+    #[test]
+    fn test_retry_exhausted() {
+        let mut graph = TaskGraph::new(vec![
+            TaskNode::new("n1", "agent", "Task").with_max_retries(1)
+        ]);
+        graph.update_status("n1", TaskStatus::Failed).unwrap();
+        // First retry succeeds
+        assert!(graph.retry_failed("n1").unwrap());
+        assert_eq!(graph.find_node("n1").unwrap().retry_count, 1);
+        // Second retry should fail (exhausted)
+        graph.update_status("n1", TaskStatus::Failed).unwrap();
+        assert!(!graph.retry_failed("n1").unwrap());
+    }
+
+    #[test]
+    fn test_progress_empty_graph() {
+        let graph = TaskGraph::new(vec![]);
+        assert_eq!(graph.progress(), 0.0);
+        assert!(graph.is_complete()); // vacuously true
+    }
+
+    #[test]
+    fn test_is_complete_mixed_terminal_states() {
+        let mut graph = TaskGraph::new(vec![
+            TaskNode::new("n1", "agent", "T1"),
+            TaskNode::new("n2", "agent", "T2"),
+            TaskNode::new("n3", "agent", "T3"),
+        ]);
+        graph.update_status("n1", TaskStatus::Completed).unwrap();
+        graph.update_status("n2", TaskStatus::Failed).unwrap();
+        graph.update_status("n3", TaskStatus::Skipped).unwrap();
+        assert!(graph.is_complete());
+    }
+
+    #[test]
+    fn test_is_complete_false_when_running() {
+        let mut graph = sample_graph();
+        graph.update_status("n1", TaskStatus::Running).unwrap();
+        assert!(!graph.is_complete());
+    }
+
+    #[test]
+    fn test_to_ai_prompt_contains_task_info() {
+        let graph = sample_graph();
+        let prompt = graph.to_ai_prompt();
+        assert!(prompt.contains("Task Graph"));
+        assert!(prompt.contains("agent-a"));
+        assert!(prompt.contains("Progress"));
+    }
+
+    #[test]
+    fn test_complex_multi_level_graph() {
+        // Two root tasks, each with 2 children, converging into 1 final task
+        let graph = TaskGraph::new(vec![
+            TaskNode::new("r1", "agent", "Root 1"),
+            TaskNode::new("r2", "agent", "Root 2"),
+            TaskNode::new("c1", "agent", "Child 1").with_dependencies(vec!["r1".into()]),
+            TaskNode::new("c2", "agent", "Child 2").with_dependencies(vec!["r1".into()]),
+            TaskNode::new("c3", "agent", "Child 3").with_dependencies(vec!["r2".into()]),
+            TaskNode::new("c4", "agent", "Child 4").with_dependencies(vec!["r2".into()]),
+            TaskNode::new("final", "agent", "Final")
+                .with_dependencies(vec!["c1".into(), "c2".into(), "c3".into(), "c4".into()]),
+        ]);
+        assert!(graph.validate().is_ok());
+        assert_eq!(graph.nodes.len(), 7);
+        assert_eq!(graph.ready_tasks().len(), 2);
+    }
 }

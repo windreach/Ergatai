@@ -205,4 +205,86 @@ mod tests {
         let refs = extract_references("{{}} and {{valid}}");
         assert_eq!(refs, vec!["valid"]);
     }
+
+    // ── Additional edge case tests ──
+
+    #[test]
+    fn test_nested_braces_inner_preserved() {
+        // `{{outer {{inner}} }}` — the first `}}` closes the first `{{`
+        // so `{{outer {{inner}}` is resolved, then ` }}` remains
+        let context = ctx(&[]);
+        let result = render_template("{{outer {{inner}} }}", &context);
+        // First match: `{{outer {{inner}}` -> var_name = "outer {{inner"
+        // which won't be found, so preserved; then " }}" remains
+        assert!(result.contains("outer {{inner") || result.contains("{{outer {{inner}} }}"));
+    }
+
+    #[test]
+    fn test_unicode_content() {
+        let context = ctx(&[("greeting", "こんにちは世界")]);
+        assert_eq!(
+            render_template("Hello: {{greeting}}", &context),
+            "Hello: こんにちは世界"
+        );
+    }
+
+    #[test]
+    fn test_unicode_in_template() {
+        let context = ctx(&[("名前", "太郎")]);
+        assert_eq!(
+            render_template("名前: {{名前}}", &context),
+            "名前: 太郎"
+        );
+    }
+
+    #[test]
+    fn test_very_long_variable_name() {
+        let long_name = "a".repeat(1000);
+        let mut context = HashMap::new();
+        context.insert(long_name.clone(), "value".to_string());
+        let template = format!("{{{{{}}}}}", long_name);
+        assert_eq!(render_template(&template, &context), "value");
+    }
+
+    #[test]
+    fn test_variable_with_dots_and_special_chars() {
+        let context = ctx(&[
+            ("global.user.name", "Alice"),
+            ("node-1.result/path", "/tmp/out"),
+        ]);
+        assert_eq!(
+            render_template("User: {{global.user.name}}, Path: {{node-1.result/path}}", &context),
+            "User: Alice, Path: /tmp/out"
+        );
+    }
+
+    #[test]
+    fn test_multiple_adjacent_references_resolved() {
+        let context = ctx(&[("a", "1"), ("b", "2"), ("c", "3")]);
+        assert_eq!(render_template("{{a}}{{b}}{{c}}", &context), "123");
+    }
+
+    #[test]
+    fn test_extract_references_with_dots() {
+        let refs = extract_references("{{global.x}} and {{node.y}}");
+        assert_eq!(refs, vec!["global.x", "node.y"]);
+    }
+
+    #[test]
+    fn test_render_template_only_braces() {
+        let context = ctx(&[]);
+        assert_eq!(render_template("{{}}", &context), "{{}}");
+    }
+
+    #[test]
+    fn test_extract_references_empty_template() {
+        let refs = extract_references("");
+        assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn test_extract_references_only_unclosed() {
+        let refs = extract_references("{{unclosed");
+        assert!(refs.is_empty());
+    }
 }

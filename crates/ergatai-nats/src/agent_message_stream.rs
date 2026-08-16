@@ -83,4 +83,24 @@ mod tests {
         assert_eq!(configs.len(), 1);
         assert_eq!(configs[0].name, AGENT_MESSAGES_STREAM);
     }
+
+    #[test]
+    fn test_agent_message_stream_storage_type() {
+        let config = agent_message_stream_config();
+        assert_eq!(config.storage, StorageType::File);
+    }
+
+    #[test]
+    fn test_agent_message_stream_num_replicas() {
+        let config = agent_message_stream_config();
+        assert_eq!(config.num_replicas, 1);
+    }
+
+    #[test]
+    fn test_agent_message_stream_subject_wildcard() {
+        let config = agent_message_stream_config();
+        // Subject should use wildcard to match all agent message subjects
+        assert!(config.subjects[0].contains('*'), "Subject should contain wildcard");
+        assert_eq!(config.subjects[0], "ergatai.agent.message.*");
+    }
 }

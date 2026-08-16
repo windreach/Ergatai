@@ -346,4 +346,48 @@ mod tests {
         assert!(result.is_ok());
         std::fs::remove_file(&temp_file).ok();
     }
+
+    // ─── Additional tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_sensitive_directory_env_directory() {
+        // .env is a sensitive directory
+        assert!(is_in_sensitive_directory(".env"));
+        assert!(is_in_sensitive_directory(".env/local"));
+    }
+
+    #[test]
+    fn test_sensitive_directory_case_sensitivity() {
+        // Patterns are case-sensitive (lower-case ".ssh" matches)
+        assert!(is_in_sensitive_directory(".ssh/id_rsa"));
+        // ".SSH" is not in the known sensitive list
+        assert!(!is_in_sensitive_directory(".SSH/id_rsa"));
+    }
+
+    #[test]
+    fn test_sensitive_path_pem_matches_all_pem_files() {
+        // *.pem is in the sensitive list, so ALL .pem files are sensitive
+        assert!(is_sensitive_path("path/to/my-private-key.pem"));
+        assert!(is_sensitive_path("cert.pem"));
+        assert!(is_sensitive_path("public-doc.pem"));
+    }
+
+    #[test]
+    fn test_sensitive_path_json_with_secret_keyword() {
+        // *secret* matches files with "secret" in the name
+        assert!(is_sensitive_path("config/secret.json"));
+        assert!(is_sensitive_path("app-secrets.json"));
+        // "private.json" doesn't contain "secret" or "private*key"
+        assert!(!is_sensitive_path("keys/private.json"));
+    }
+
+    #[test]
+    fn test_sensitive_path_yaml_with_secret_keyword() {
+        // *secret* matches YAML files containing "secret" in name
+        assert!(is_sensitive_path("secret.yaml"));
+        assert!(is_sensitive_path("config/secret.yaml"));
+        // "credentials.yml" doesn't match any of the current patterns
+        // (only "credentials/**" directory pattern is sensitive, not the file itself)
+        assert!(!is_sensitive_path("credentials.yml"));
+    }
 }

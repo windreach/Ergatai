@@ -125,3 +125,148 @@ impl Default for McpIntegration {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ergatai_error::ErgataiError;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn test_mcp_integration_new() {
+        let mcp = McpIntegration::new();
+        // Just verify construction
+        let _ = format!("{:p}", &mcp);
+    }
+
+    #[test]
+    fn test_mcp_integration_default() {
+        let mcp = McpIntegration::default();
+        let _ = format!("{:p}", &mcp);
+    }
+
+    #[tokio::test]
+    async fn test_register_and_list_peers() {
+        let mcp = McpIntegration::new();
+        mcp.register_peer("peer-1".to_string(), |_| async { Ok(()) })
+            .await;
+        mcp.register_peer("peer-2".to_string(), |_| async { Ok(()) })
+            .await;
+        let mut peers = mcp.list_peers().await;
+        peers.sort();
+        assert_eq!(peers, vec!["peer-1".to_string(), "peer-2".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn test_unregister_peer() {
+        let mcp = McpIntegration::new();
+        mcp.register_peer("peer-1".to_string(), |_| async { Ok(()) })
+            .await;
+        mcp.register_peer("peer-2".to_string(), |_| async { Ok(()) })
+            .await;
+        mcp.unregister_peer("peer-1").await;
+        let peers = mcp.list_peers().await;
+        assert_eq!(peers, vec!["peer-2".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn test_unregister_nonexistent_peer() {
+        let mcp = McpIntegration::new();
+        // Should not panic
+        mcp.unregister_peer("nonexistent").await;
+    }
+
+    #[tokio::test]
+    async fn test_send_notification_success() {
+        let mcp = McpIntegration::new();
+        let received = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let received_clone = received.clone();
+        mcp.register_peer("peer-1".to_string(), move |msg: &str| {
+            let received = received_clone.clone();
+            let msg = msg.to_string();
+            async move {
+                received.lock().await.push(msg);
+                Ok(())
+            }
+        })
+        .await;
+        mcp.send_notification("peer-1", "hello").await.unwrap();
+        let messages = received.lock().await.clone();
+        assert_eq!(messages, vec!["hello".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn test_send_notification_unknown_peer() {
+        let mcp = McpIntegration::new();
+        let result = mcp.send_notification("unknown", "hello").await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("no active MCP connection"));
+    }
+
+    #[tokio::test]
+    async fn test_send_notification_callback_error() {
+        let mcp = McpIntegration::new();
+        mcp.register_peer("peer-1".to_string(), |_msg: &str| async {
+            Err(ErgataiError::internal("send failed".to_string()))
+        })
+        .await;
+        let result = mcp.send_notification("peer-1", "hello").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_register_peer_overwrites() {
+        let mcp = McpIntegration::new();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let c1 = counter.clone();
+        mcp.register_peer("peer-1".to_string(), move |_: &str| {
+            let c = c1.clone();
+            async move {
+                c.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        })
+        .await;
+
+        let counter2 = Arc::new(AtomicUsize::new(0));
+        let c2 = counter2.clone();
+        mcp.register_peer("peer-1".to_string(), move |_: &str| {
+            let c = c2.clone();
+            async move {
+                c.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        })
+        .await;
+
+        mcp.send_notification("peer-1", "hello").await.unwrap();
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
+        assert_eq!(counter2.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_multiple_notifications() {
+        let mcp = McpIntegration::new();
+        let received = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let received_clone = received.clone();
+        mcp.register_peer("peer-1".to_string(), move |msg: &str| {
+            let received = received_clone.clone();
+            let msg = msg.to_string();
+            async move {
+                received.lock().await.push(msg);
+                Ok(())
+            }
+        })
+        .await;
+        for i in 0..5 {
+            mcp.send_notification("peer-1", &format!("msg-{}", i))
+                .await
+                .unwrap();
+        }
+        let messages = received.lock().await.clone();
+        assert_eq!(messages.len(), 5);
+        assert_eq!(messages[0], "msg-0");
+        assert_eq!(messages[4], "msg-4");
+    }
+}

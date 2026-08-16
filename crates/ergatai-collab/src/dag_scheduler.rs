@@ -982,4 +982,284 @@ mod tests {
             "Upstream context should list output keys"
         );
     }
+
+    #[tokio::test]
+    async fn test_dag_id_is_deterministic() {
+        let graph = sample_graph();
+        let path = PathBuf::from("/tmp/project-x");
+        let s1 = DagScheduler::new(path.clone(), graph.clone());
+        let s2 = DagScheduler::new(path, TaskGraph::new(vec![]));
+        assert_eq!(s1.dag_id(), s2.dag_id());
+        assert!(s1.dag_id().starts_with("dag-"));
+    }
+
+    #[tokio::test]
+    async fn test_dag_id_differs_for_different_paths() {
+        let s1 = DagScheduler::new(PathBuf::from("/tmp/a"), sample_graph());
+        let s2 = DagScheduler::new(PathBuf::from("/tmp/b"), sample_graph());
+        assert_ne!(s1.dag_id(), s2.dag_id());
+    }
+
+    #[tokio::test]
+    async fn test_graph_snapshot_returns_valid_json() {
+        let graph = sample_graph();
+        let scheduler = DagScheduler::new(PathBuf::from("/tmp/snap"), graph);
+        let snapshot = scheduler.graph_snapshot().await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+        // Snapshot should contain the graph's nodes array
+        assert!(parsed.get("nodes").is_some());
+        assert_eq!(parsed["nodes"].as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_set_global_and_record_outputs_persist_in_context() {
+        let graph = sample_graph();
+        let scheduler = DagScheduler::new(PathBuf::from("/tmp/ctx"), graph);
+
+        scheduler.set_global("greeting", "hello").await;
+        scheduler
+            .record_outputs(
+                "n1",
+                HashMap::from([("result".to_string(), "done".to_string())]),
+            )
+            .await;
+
+        let ctx = scheduler.context();
+        let ctx = ctx.lock().await;
+        assert_eq!(
+            ctx.get_global("greeting").as_deref(),
+            Some("hello")
+        );
+        let outputs = ctx.get_node_outputs("n1");
+        assert!(outputs.is_some());
+        assert_eq!(outputs.unwrap().get("result").map(|s| s.as_str()), Some("done"));
+    }
+
+    #[tokio::test]
+    async fn test_is_complete_true_when_all_nodes_completed() {
+        let graph = TaskGraph::new(vec![TaskNode::new("n1", "a", "A")]);
+        let scheduler = DagScheduler::new(PathBuf::from("/tmp/complete"), graph);
+
+        // Mark the only node as completed directly on the graph
+        {
+            let mut g = scheduler.graph.lock().await;
+            g.update_status("n1", TaskStatus::Completed).unwrap();
+        }
+        assert!(scheduler.is_complete().await);
+    }
+
+    #[tokio::test]
+    async fn test_is_complete_false_with_pending_nodes() {
+        let graph = TaskGraph::new(vec![TaskNode::new("n1", "a", "A")]);
+        let scheduler = DagScheduler::new(PathBuf::from("/tmp/incomplete"), graph);
+        assert!(!scheduler.is_complete().await);
+    }
+
+    #[tokio::test]
+    async fn test_progress_increases_after_completion() {
+        let graph = TaskGraph::new(vec![
+            TaskNode::new("n1", "a", "A"),
+            TaskNode::new("n2", "a", "B"),
+        ]);
+        let scheduler = DagScheduler::new(PathBuf::from("/tmp/progress"), graph);
+        assert_eq!(scheduler.progress().await, 0.0);
+
+        {
+            let mut g = scheduler.graph.lock().await;
+            g.update_status("n1", TaskStatus::Completed).unwrap();
+        }
+        let p = scheduler.progress().await;
+        assert!((p - 0.5).abs() < 0.01, "expected ~0.5 progress, got {}", p);
+    }
+
+    #[tokio::test]
+    async fn test_on_node_completed_with_no_ready_downstream() {
+        // Linear chain A → B, only A is initially ready
+        let graph = TaskGraph::new(vec![
+            TaskNode::new("n1", "a", "A"),
+            TaskNode::new("n2", "a", "B").with_dependencies(vec!["n1".into()]),
+        ]);
+        let temp_dir = tempfile::tempdir().unwrap();
+        let scheduler = DagScheduler::new(temp_dir.path().to_path_buf(), graph);
+
+        // Mark n1 as Running (so it "completes" realistically)
+        {
+            let mut g = scheduler.graph.lock().await;
+            g.update_status("n1", TaskStatus::Running).unwrap();
+        }
+
+        // on_node_completed needs to find n1 and mark it complete.
+        // However, since submit_graph's ready-task preemption would set n2 to Running,
+        // and we don't have a real TaskScheduler backing this, newly_submitted should be empty
+        // because generate_and_submit will fail to launch anything.
+        // We just verify the node status is updated.
+        let _ = scheduler
+            .on_node_completed("n1", Some("/tmp/r.md".to_string()))
+            .await;
+
+        let g = scheduler.graph.lock().await;
+        assert_eq!(g.find_node("n1").unwrap().status, TaskStatus::Completed);
+    }
+
+    #[tokio::test]
+    async fn test_on_node_failed_retry_increments_count() {
+        let mut node = TaskNode::new("n1", "a", "A");
+        node.max_retries = 3;
+        let graph = TaskGraph::new(vec![node]);
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp_dir.path().join(".ergatai")).unwrap();
+        let scheduler = DagScheduler::new(temp_dir.path().to_path_buf(), graph);
+
+        // Move n1 to Running
+        {
+            let mut g = scheduler.graph.lock().await;
+            g.update_status("n1", TaskStatus::Running).unwrap();
+        }
+
+        // First failure: on_node_failed bumps retry_count to 1 and attempts to re-submit.
+        // In this test environment generate_and_submit fails (no ergatai_lock init),
+        // so the error path sets status back to Failed — but retry_count was already bumped.
+        scheduler.on_node_failed("n1", "oops").await.unwrap();
+        let g = scheduler.graph.lock().await;
+        let n = g.find_node("n1").unwrap();
+        assert_eq!(n.retry_count, 1, "retry_count should have been bumped before submission");
+    }
+
+    #[tokio::test]
+    async fn test_on_node_failed_exhausted_retries_marks_failed() {
+        let mut node = TaskNode::new("n1", "a", "A");
+        node.max_retries = 1;
+        node.retry_count = 1; // already used up retries
+        let graph = TaskGraph::new(vec![node]);
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp_dir.path().join(".ergatai")).unwrap();
+        let scheduler = DagScheduler::new(temp_dir.path().to_path_buf(), graph);
+
+        {
+            let mut g = scheduler.graph.lock().await;
+            g.update_status("n1", TaskStatus::Running).unwrap();
+        }
+
+        scheduler.on_node_failed("n1", "final failure").await.unwrap();
+        let g = scheduler.graph.lock().await;
+        let n = g.find_node("n1").unwrap();
+        assert_eq!(n.status, TaskStatus::Failed);
+        // retry_count should not have increased (already at max)
+        assert_eq!(n.retry_count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_on_node_failed_ignores_non_running_node() {
+        let graph = TaskGraph::new(vec![TaskNode::new("n1", "a", "A")]);
+        let temp_dir = tempfile::tempdir().unwrap();
+        let scheduler = DagScheduler::new(temp_dir.path().to_path_buf(), graph);
+
+        // n1 is Pending (not Running) - should be a no-op
+        scheduler.on_node_failed("n1", "err").await.unwrap();
+        let g = scheduler.graph.lock().await;
+        // Should remain Pending, not Failed
+        assert_eq!(g.find_node("n1").unwrap().status, TaskStatus::Pending);
+    }
+
+    #[tokio::test]
+    async fn test_skip_downstream_transitive() {
+        // Chain: n1 → n2 → n3, all pending
+        let graph = TaskGraph::new(vec![
+            TaskNode::new("n1", "a", "A"),
+            TaskNode::new("n2", "a", "B").with_dependencies(vec!["n1".into()]),
+            TaskNode::new("n3", "a", "C").with_dependencies(vec!["n2".into()]),
+            // Unrelated node that should NOT be skipped
+            TaskNode::new("n4", "a", "D"),
+        ]);
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let scheduler = DagScheduler::new(temp_dir.path().to_path_buf(), graph);
+        scheduler.skip_downstream("n1").await.unwrap();
+
+        let g = scheduler.graph.lock().await;
+        assert_eq!(g.find_node("n1").unwrap().status, TaskStatus::Pending); // not touched
+        assert_eq!(g.find_node("n2").unwrap().status, TaskStatus::Skipped);
+        assert_eq!(g.find_node("n3").unwrap().status, TaskStatus::Skipped);
+        assert_eq!(g.find_node("n4").unwrap().status, TaskStatus::Pending); // untouched
+    }
+
+    #[tokio::test]
+    async fn test_skip_downstream_diamond_graph() {
+        // Diamond: n1 → n2, n1 → n3, n2 → n4, n3 → n4
+        let graph = TaskGraph::new(vec![
+            TaskNode::new("n1", "a", "A"),
+            TaskNode::new("n2", "a", "B").with_dependencies(vec!["n1".into()]),
+            TaskNode::new("n3", "a", "C").with_dependencies(vec!["n1".into()]),
+            TaskNode::new("n4", "a", "D").with_dependencies(vec!["n2".into(), "n3".into()]),
+        ]);
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let scheduler = DagScheduler::new(temp_dir.path().to_path_buf(), graph);
+        scheduler.skip_downstream("n1").await.unwrap();
+
+        let g = scheduler.graph.lock().await;
+        assert_eq!(g.find_node("n2").unwrap().status, TaskStatus::Skipped);
+        assert_eq!(g.find_node("n3").unwrap().status, TaskStatus::Skipped);
+        assert_eq!(g.find_node("n4").unwrap().status, TaskStatus::Skipped);
+    }
+
+    #[tokio::test]
+    async fn test_build_upstream_context_block_empty_when_no_deps() {
+        let graph = TaskGraph::new(vec![TaskNode::new("n1", "a", "A")]);
+        let scheduler = DagScheduler::new(PathBuf::from("/tmp/upstream-empty"), graph);
+        let node = scheduler.graph.lock().await.find_node("n1").unwrap().clone();
+        let block = scheduler.build_upstream_context_block(&node).await;
+        assert!(block.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_build_upstream_context_block_shows_outputs() {
+        let graph = TaskGraph::new(vec![
+            TaskNode::new("n1", "a", "A"),
+            TaskNode::new("n2", "a", "B").with_dependencies(vec!["n1".into()]),
+        ]);
+        let scheduler = DagScheduler::new(PathBuf::from("/tmp/upstream"), graph);
+        scheduler
+            .record_outputs(
+                "n1",
+                HashMap::from([("key1".to_string(), "value1".to_string())]),
+            )
+            .await;
+
+        let node = scheduler.graph.lock().await.find_node("n2").unwrap().clone();
+        let block = scheduler.build_upstream_context_block(&node).await;
+        assert!(block.contains("Upstream Context"));
+        assert!(block.contains("key1"));
+        assert!(block.contains("value1"));
+    }
+
+    #[tokio::test]
+    async fn test_load_from_disk_roundtrip() {
+        let graph = sample_graph();
+        let temp_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp_dir.path().join(".ergatai")).unwrap();
+
+        let scheduler = DagScheduler::new(temp_dir.path().to_path_buf(), graph);
+        scheduler.set_global("k", "v").await;
+        scheduler.save_graph_unlocked().await.unwrap();
+
+        // Reload
+        let loaded = DagScheduler::load_from_disk(temp_dir.path().to_path_buf())
+            .await
+            .unwrap();
+        assert!(!loaded.is_complete().await);
+        let ctx = loaded.context();
+        let ctx = ctx.lock().await;
+        assert_eq!(ctx.get_global("k").as_deref(), Some("v"));
+    }
+
+    #[tokio::test]
+    async fn test_status_prompt_returns_non_empty() {
+        let graph = sample_graph();
+        let scheduler = DagScheduler::new(PathBuf::from("/tmp/status"), graph);
+        let prompt = scheduler.status_prompt().await;
+        assert!(!prompt.is_empty());
+    }
 }

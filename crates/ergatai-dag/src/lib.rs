@@ -8,8 +8,8 @@ pub mod dag_topology;
 pub mod template;
 
 // Legacy tree modules (deprecated, kept for backward compatibility)
-// pub mod tree_topology;
-// pub mod markdown_parser;
+pub mod tree_topology;
+pub mod markdown_parser;
 
 // Re-export DAG types as primary
 pub use context::DagContext;

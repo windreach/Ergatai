@@ -209,3 +209,83 @@ fn start_daemon_if_needed(rmux_path: &Path) -> ErgataiResult<()> {
 pub fn get_daemon_path() -> Option<PathBuf> {
     RMUX_INIT.get().and_then(|r| r.as_ref().ok()).cloned()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_rmux_locator_static_config() {
+        // Verify the static locator is configured correctly
+        assert_eq!(RMUX_LOCATOR.name, "rmux");
+        assert_eq!(RMUX_LOCATOR.env_override, Some("ERGATAI_RMUX_BINARY"));
+        assert_eq!(
+            RMUX_LOCATOR.resource_subdir_pattern,
+            Some("rmux-{platform}")
+        );
+    }
+
+    #[test]
+    fn test_check_daemon_running_with_nonexistent_path() {
+        // A nonexistent path should return false
+        let result = check_daemon_running(Some(Path::new("/nonexistent/rmux/binary")));
+        assert!(!result);
+    }
+
+    #[test]
+    fn test_check_daemon_running_with_none_fallback() {
+        // When None is passed, it falls back to "rmux" on PATH
+        // This should not panic even if rmux isn't installed
+        let _ = check_daemon_running(None);
+    }
+
+    #[test]
+    fn test_is_rmux_available_does_not_panic() {
+        // Should not panic regardless of whether rmux is installed
+        let _ = is_rmux_available();
+    }
+
+    #[test]
+    fn test_is_daemon_running_does_not_panic() {
+        // Should not panic regardless of whether daemon is running
+        let _ = is_daemon_running();
+    }
+
+    #[test]
+    fn test_get_daemon_path_before_init() {
+        // If configure_rmux_daemon hasn't been called, get_daemon_path returns None.
+        // However, since RMUX_INIT is a OnceLock, other tests may have triggered init.
+        // This test just verifies the function doesn't panic.
+        let _ = get_daemon_path();
+    }
+
+    #[test]
+    fn test_start_daemon_if_needed_nonexistent_path() {
+        // Should not panic or return error even with nonexistent path
+        // (rmux-sdk has its own auto-start logic, so this is lenient)
+        let result = start_daemon_if_needed(Path::new("/nonexistent/rmux"));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_configure_rmux_daemon_is_idempotent() {
+        // Calling configure multiple times should return same result
+        // (OnceLock guarantees this)
+        let r1 = configure_rmux_daemon();
+        let r2 = configure_rmux_daemon();
+        // Both should succeed or both should fail
+        assert_eq!(r1.is_ok(), r2.is_ok());
+        if let (Ok(p1), Ok(p2)) = (&r1, &r2) {
+            assert_eq!(p1, p2);
+        }
+    }
+
+    #[test]
+    fn test_env_override_variable_name() {
+        // The env var should match what's documented
+        assert_eq!(
+            RMUX_LOCATOR.env_override.unwrap(),
+            "ERGATAI_RMUX_BINARY"
+        );
+    }
+}

@@ -1137,4 +1137,213 @@ mod tests {
             "instruction should contain truncation marker"
         );
     }
+
+    #[tokio::test]
+    async fn test_format_files_section_empty() {
+        let launcher = AgentLauncher::new(std::env::temp_dir());
+        let assignment = AgentAssignment {
+            agent_name: "a".to_string(),
+            objective: "o".to_string(),
+            files_to_create: vec![],
+            files_to_modify: vec![],
+            files_to_read: vec![],
+            task_type: TaskType::CreateNew,
+            depends_on: vec![],
+            priority: None,
+        };
+        let section = launcher.format_files_section(&assignment);
+        assert_eq!(section, "No specific files assigned");
+    }
+
+    #[tokio::test]
+    async fn test_format_files_section_with_all_lists() {
+        let launcher = AgentLauncher::new(std::env::temp_dir());
+        let assignment = AgentAssignment {
+            agent_name: "a".to_string(),
+            objective: "o".to_string(),
+            files_to_create: vec![PathBuf::from("src/new.rs")],
+            files_to_modify: vec![PathBuf::from("src/old.rs")],
+            files_to_read: vec![PathBuf::from("src/read.rs")],
+            task_type: TaskType::CreateNew,
+            depends_on: vec![],
+            priority: None,
+        };
+        let section = launcher.format_files_section(&assignment);
+        assert!(section.contains("Files to create"));
+        assert!(section.contains("src/new.rs"));
+        assert!(section.contains("Files to modify"));
+        assert!(section.contains("src/old.rs"));
+        assert!(section.contains("Files to read"));
+        assert!(section.contains("src/read.rs"));
+    }
+
+    #[tokio::test]
+    async fn test_format_files_section_only_create() {
+        let launcher = AgentLauncher::new(std::env::temp_dir());
+        let assignment = AgentAssignment {
+            agent_name: "a".to_string(),
+            objective: "o".to_string(),
+            files_to_create: vec![PathBuf::from("x.rs"), PathBuf::from("y.rs")],
+            files_to_modify: vec![],
+            files_to_read: vec![],
+            task_type: TaskType::CreateNew,
+            depends_on: vec![],
+            priority: None,
+        };
+        let section = launcher.format_files_section(&assignment);
+        assert!(section.contains("Files to create"));
+        assert!(section.contains("x.rs"));
+        assert!(section.contains("y.rs"));
+        // Should NOT contain modify/read sections
+        assert!(!section.contains("Files to modify"));
+        assert!(!section.contains("Files to read"));
+    }
+
+    #[tokio::test]
+    async fn test_get_all_status_empty_initially() {
+        // Fresh launcher has no tracked agents
+        let launcher = AgentLauncher::new(std::env::temp_dir());
+        let all = launcher.get_all_status().await;
+        // Since running_agents() is a global singleton, other tests may have populated it.
+        // Just verify it doesn't panic and returns a Vec.
+        let _ = all;
+    }
+
+    #[tokio::test]
+    async fn test_get_agent_status_unknown_returns_none() {
+        let launcher = AgentLauncher::new(std::env::temp_dir());
+        let status = launcher
+            .get_agent_status("nonexistent-task|nonexistent-agent")
+            .await;
+        assert!(status.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_get_agent_status_after_manual_insert() {
+        let launcher = AgentLauncher::new(std::env::temp_dir());
+        // Manually insert a running agent record
+        let agent_id = AgentLauncher::make_agent_id("task-x", "agent-y");
+        {
+            let mut agents = launcher.running_agents.lock().await;
+            agents.insert(
+                agent_id.clone(),
+                RunningAgent {
+                    task_id: "task-x".to_string(),
+                    agent_name: "agent-y".to_string(),
+                    worktree_path: PathBuf::from("/tmp/work"),
+                    plan_file: PathBuf::from("/tmp/plan.md"),
+                    result_file: PathBuf::from("/tmp/result.md"),
+                    status: AgentStatus::Running,
+                    pane_id: None,
+                    token_id: None,
+                },
+            );
+        }
+
+        let status = launcher.get_agent_status(&agent_id).await;
+        assert!(status.is_some());
+        let s = status.unwrap();
+        assert_eq!(s.task_id, "task-x");
+        assert_eq!(s.agent_name, "agent-y");
+        assert_eq!(s.status, AgentStatus::Running);
+
+        // Clean up the global registry
+        launcher.running_agents.lock().await.remove(&agent_id);
+    }
+
+    #[tokio::test]
+    async fn test_all_agents_completed_true_when_completed() {
+        let launcher = AgentLauncher::new(std::env::temp_dir());
+        let agent_id = AgentLauncher::make_agent_id("task-done", "agent-a");
+        {
+            let mut agents = launcher.running_agents.lock().await;
+            agents.insert(
+                agent_id.clone(),
+                RunningAgent {
+                    task_id: "task-done".to_string(),
+                    agent_name: "agent-a".to_string(),
+                    worktree_path: PathBuf::from("/tmp"),
+                    plan_file: PathBuf::from("/tmp/p.md"),
+                    result_file: PathBuf::from("/tmp/r.md"),
+                    status: AgentStatus::Completed,
+                    pane_id: None,
+                    token_id: None,
+                },
+            );
+        }
+
+        assert!(launcher.all_agents_completed("task-done").await);
+        launcher.running_agents.lock().await.remove(&agent_id);
+    }
+
+    #[tokio::test]
+    async fn test_all_agents_completed_false_when_running() {
+        let launcher = AgentLauncher::new(std::env::temp_dir());
+        let agent_id = AgentLauncher::make_agent_id("task-live", "agent-b");
+        {
+            let mut agents = launcher.running_agents.lock().await;
+            agents.insert(
+                agent_id.clone(),
+                RunningAgent {
+                    task_id: "task-live".to_string(),
+                    agent_name: "agent-b".to_string(),
+                    worktree_path: PathBuf::from("/tmp"),
+                    plan_file: PathBuf::from("/tmp/p.md"),
+                    result_file: PathBuf::from("/tmp/r.md"),
+                    status: AgentStatus::Running,
+                    pane_id: None,
+                    token_id: None,
+                },
+            );
+        }
+
+        assert!(!launcher.all_agents_completed("task-live").await);
+        launcher.running_agents.lock().await.remove(&agent_id);
+    }
+
+    #[tokio::test]
+    async fn test_all_agents_completed_counts_failed_as_done() {
+        let launcher = AgentLauncher::new(std::env::temp_dir());
+        let agent_id = AgentLauncher::make_agent_id("task-failed", "agent-c");
+        {
+            let mut agents = launcher.running_agents.lock().await;
+            agents.insert(
+                agent_id.clone(),
+                RunningAgent {
+                    task_id: "task-failed".to_string(),
+                    agent_name: "agent-c".to_string(),
+                    worktree_path: PathBuf::from("/tmp"),
+                    plan_file: PathBuf::from("/tmp/p.md"),
+                    result_file: PathBuf::from("/tmp/r.md"),
+                    status: AgentStatus::Failed,
+                    pane_id: None,
+                    token_id: None,
+                },
+            );
+        }
+        // Failed is treated as "done" alongside Completed
+        assert!(launcher.all_agents_completed("task-failed").await);
+        launcher.running_agents.lock().await.remove(&agent_id);
+    }
+
+    #[tokio::test]
+    async fn test_agent_status_enum_values() {
+        assert_ne!(AgentStatus::Starting, AgentStatus::Running);
+        assert_ne!(AgentStatus::Completed, AgentStatus::Failed);
+    }
+
+    #[test]
+    fn test_safe_truncate_utf8_exact_boundary() {
+        // Content exactly at boundary
+        let content = "a".repeat(10000);
+        let truncated = safe_truncate_utf8(&content, 10000);
+        assert_eq!(truncated, content);
+    }
+
+    #[test]
+    fn test_safe_truncate_utf8_zero_limit() {
+        let truncated = safe_truncate_utf8("hello", 0);
+        assert!(truncated.ends_with("[... truncated ...]"));
+        // Should not panic; result prefix should be empty before the marker
+    }
 }

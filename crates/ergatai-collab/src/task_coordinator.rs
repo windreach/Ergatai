@@ -552,4 +552,444 @@ mod tests {
             msg
         );
     }
+
+    #[tokio::test]
+    async fn test_task_coordinator_init_creates_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let coordinator = TaskCoordinator::new(dir.path().to_path_buf());
+        coordinator.init().await.unwrap();
+
+        let plan_dir = dir.path().join(".ergatai").join(".plan");
+        let results_dir = plan_dir.join("results");
+        assert!(plan_dir.exists());
+        assert!(results_dir.exists());
+    }
+
+    #[tokio::test]
+    async fn test_create_plan_writes_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let coordinator = TaskCoordinator::new(dir.path().to_path_buf());
+        coordinator.init().await.unwrap();
+
+        let path = coordinator
+            .create_plan("task-001", "# Task: Hello")
+            .await
+            .unwrap();
+        assert!(path.exists());
+        assert_eq!(path.file_name().unwrap().to_str().unwrap(), "task-001.md");
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content, "# Task: Hello");
+    }
+
+    #[tokio::test]
+    async fn test_parse_plan_extracts_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let coordinator = TaskCoordinator::new(dir.path().to_path_buf());
+        coordinator.init().await.unwrap();
+
+        let content = r#"# Task: Big refactor
+
+**Coordinator**: main-agent
+
+## Merge Strategy
+Main handles conflicts.
+
+### @alice - Part A
+- **Objective**: Do part A
+- **Type**: CreateNew
+- **Files to create**: src/a.rs, src/a_test.rs
+
+### @bob - Part B
+- **Objective**: Do part B
+- **Type**: ModifyExisting
+- **Files to modify**: src/b.rs
+- **depends_on**: [alice]
+- **priority**: high
+"#;
+        let path = coordinator.create_plan("refactor-1", content).await.unwrap();
+        let plan = coordinator.parse_plan(&path).await.unwrap();
+
+        assert_eq!(plan.task_id, "refactor-1");
+        assert_eq!(plan.task_name, "Big refactor");
+        assert_eq!(plan.coordinator, "main-agent");
+        assert_eq!(plan.status, PlanStatus::InProgress);
+        assert_eq!(plan.merge_strategy, "Main handles conflicts.");
+        assert_eq!(plan.assignments.len(), 2);
+
+        let alice = &plan.assignments[0];
+        assert_eq!(alice.agent_name, "alice");
+        assert_eq!(alice.objective, "Do part A");
+        assert_eq!(alice.task_type, TaskType::CreateNew);
+        assert_eq!(alice.files_to_create.len(), 2);
+        assert!(alice.files_to_modify.is_empty());
+
+        let bob = &plan.assignments[1];
+        assert_eq!(bob.agent_name, "bob");
+        assert_eq!(bob.task_type, TaskType::ModifyExisting);
+        assert_eq!(bob.depends_on, vec!["alice".to_string()]);
+        assert_eq!(bob.priority.as_deref(), Some("high"));
+    }
+
+    #[tokio::test]
+    async fn test_parse_plan_missing_file_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let coordinator = TaskCoordinator::new(dir.path().to_path_buf());
+        let missing = dir.path().join("nope.md");
+        let result = coordinator.parse_plan(&missing).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_check_completion_returns_false_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let coordinator = TaskCoordinator::new(dir.path().to_path_buf());
+        coordinator.init().await.unwrap();
+
+        let plan = TaskPlan {
+            task_id: "task-1".to_string(),
+            task_name: "T".to_string(),
+            coordinator: "main".to_string(),
+            status: PlanStatus::InProgress,
+            assignments: vec![AgentAssignment {
+                agent_name: "alice".to_string(),
+                objective: "o".to_string(),
+                files_to_create: vec![],
+                files_to_modify: vec![],
+                files_to_read: vec![],
+                task_type: TaskType::CreateNew,
+                depends_on: vec![],
+                priority: None,
+            }],
+            merge_strategy: "none".to_string(),
+            plan_file: dir.path().join("task-1.md"),
+        };
+
+        let complete = coordinator.check_completion(&plan).await.unwrap();
+        assert!(!complete);
+    }
+
+    #[tokio::test]
+    async fn test_check_completion_returns_true_when_all_done() {
+        let dir = tempfile::tempdir().unwrap();
+        let coordinator = TaskCoordinator::new(dir.path().to_path_buf());
+        coordinator.init().await.unwrap();
+
+        // Create result files for both agents
+        let results_dir = dir.path().join(".ergatai").join(".plan").join("results");
+        tokio::fs::write(results_dir.join("task-1-alice.md"), "ok")
+            .await
+            .unwrap();
+        tokio::fs::write(results_dir.join("task-1-bob.md"), "ok")
+            .await
+            .unwrap();
+
+        let plan = TaskPlan {
+            task_id: "task-1".to_string(),
+            task_name: "T".to_string(),
+            coordinator: "main".to_string(),
+            status: PlanStatus::InProgress,
+            assignments: vec![
+                AgentAssignment {
+                    agent_name: "alice".to_string(),
+                    objective: "o".to_string(),
+                    files_to_create: vec![],
+                    files_to_modify: vec![],
+                    files_to_read: vec![],
+                    task_type: TaskType::CreateNew,
+                    depends_on: vec![],
+                    priority: None,
+                },
+                AgentAssignment {
+                    agent_name: "bob".to_string(),
+                    objective: "o".to_string(),
+                    files_to_create: vec![],
+                    files_to_modify: vec![],
+                    files_to_read: vec![],
+                    task_type: TaskType::CreateNew,
+                    depends_on: vec![],
+                    priority: None,
+                },
+            ],
+            merge_strategy: "none".to_string(),
+            plan_file: dir.path().join("task-1.md"),
+        };
+
+        let complete = coordinator.check_completion(&plan).await.unwrap();
+        assert!(complete);
+    }
+
+    #[tokio::test]
+    async fn test_check_completion_rejects_malicious_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        let coordinator = TaskCoordinator::new(dir.path().to_path_buf());
+        coordinator.init().await.unwrap();
+
+        let plan = TaskPlan {
+            task_id: "task-1".to_string(),
+            task_name: "T".to_string(),
+            coordinator: "main".to_string(),
+            status: PlanStatus::InProgress,
+            assignments: vec![AgentAssignment {
+                agent_name: "../etc".to_string(),
+                objective: "o".to_string(),
+                files_to_create: vec![],
+                files_to_modify: vec![],
+                files_to_read: vec![],
+                task_type: TaskType::CreateNew,
+                depends_on: vec![],
+                priority: None,
+            }],
+            merge_strategy: "none".to_string(),
+            plan_file: dir.path().join("task-1.md"),
+        };
+        let result = coordinator.check_completion(&plan).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_get_result_path_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let coordinator = TaskCoordinator::new(dir.path().to_path_buf());
+        let path = coordinator.get_result_path("task-1", "alice").unwrap();
+        let expected = dir
+            .path()
+            .join(".ergatai")
+            .join(".plan")
+            .join("results")
+            .join("task-1-alice.md");
+        assert_eq!(path, expected);
+    }
+
+    #[tokio::test]
+    async fn test_get_result_path_rejects_bad_inputs() {
+        let dir = tempfile::tempdir().unwrap();
+        let coordinator = TaskCoordinator::new(dir.path().to_path_buf());
+        assert!(coordinator.get_result_path("", "alice").is_err());
+        assert!(coordinator.get_result_path("task", "").is_err());
+        assert!(coordinator.get_result_path("a/b", "alice").is_err());
+        assert!(coordinator.get_result_path("task", "alice/bob").is_err());
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_task_removes_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let coordinator = TaskCoordinator::new(dir.path().to_path_buf());
+        coordinator.init().await.unwrap();
+
+        // Create a plan file and result files
+        coordinator
+            .create_plan("task-1", "# Task: x")
+            .await
+            .unwrap();
+        let results_dir = dir.path().join(".ergatai").join(".plan").join("results");
+        tokio::fs::write(results_dir.join("task-1-alice.md"), "ok")
+            .await
+            .unwrap();
+        tokio::fs::write(results_dir.join("task-1-bob.md"), "ok")
+            .await
+            .unwrap();
+        // Unrelated file for another task
+        tokio::fs::write(results_dir.join("other-task-x.md"), "x")
+            .await
+            .unwrap();
+
+        coordinator.cleanup_task("task-1").await.unwrap();
+
+        // Plan + task-1-* results should be gone
+        assert!(!dir
+            .path()
+            .join(".ergatai")
+            .join(".plan")
+            .join("task-1.md")
+            .exists());
+        assert!(!results_dir.join("task-1-alice.md").exists());
+        assert!(!results_dir.join("task-1-bob.md").exists());
+        // Unrelated task untouched
+        assert!(results_dir.join("other-task-x.md").exists());
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_task_rejects_malicious_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let coordinator = TaskCoordinator::new(dir.path().to_path_buf());
+        coordinator.init().await.unwrap();
+
+        let result = coordinator.cleanup_task("../../evil").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_task_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let coordinator = TaskCoordinator::new(dir.path().to_path_buf());
+        coordinator.init().await.unwrap();
+        // Should not error even if no plan/results exist
+        coordinator.cleanup_task("never-existed").await.unwrap();
+    }
+
+    #[test]
+    fn test_parse_task_type_variants() {
+        assert_eq!(parse_task_type("ReadOnly"), TaskType::ReadOnly);
+        assert_eq!(parse_task_type("read"), TaskType::ReadOnly);
+        assert_eq!(parse_task_type("只读"), TaskType::ReadOnly);
+        assert_eq!(parse_task_type("CreateNew"), TaskType::CreateNew);
+        assert_eq!(parse_task_type("create"), TaskType::CreateNew);
+        assert_eq!(parse_task_type("创建"), TaskType::CreateNew);
+        assert_eq!(parse_task_type("ModifyExisting"), TaskType::ModifyExisting);
+        assert_eq!(parse_task_type("modify"), TaskType::ModifyExisting);
+        assert_eq!(parse_task_type("修改"), TaskType::ModifyExisting);
+        // Unknown falls back to ReadOnly
+        assert_eq!(parse_task_type("garbage"), TaskType::ReadOnly);
+    }
+
+    #[test]
+    fn test_parse_file_list_comma_separated() {
+        let list = parse_file_list("src/a.rs, src/b.rs, src/c.rs");
+        assert_eq!(list.len(), 3);
+        assert_eq!(list[0], PathBuf::from("src/a.rs"));
+        assert_eq!(list[2], PathBuf::from("src/c.rs"));
+    }
+
+    #[test]
+    fn test_parse_file_list_empty() {
+        let list = parse_file_list("");
+        assert!(list.is_empty());
+        let list = parse_file_list("   ,  , ");
+        assert!(list.is_empty());
+    }
+
+    #[test]
+    fn test_parse_depends_on_array() {
+        let deps = parse_depends_on("[alice, bob, charlie]");
+        assert_eq!(deps, vec!["alice", "bob", "charlie"]);
+    }
+
+    #[test]
+    fn test_parse_depends_on_without_brackets() {
+        let deps = parse_depends_on("alice, bob");
+        assert_eq!(deps, vec!["alice", "bob"]);
+    }
+
+    #[test]
+    fn test_parse_depends_on_empty() {
+        let deps = parse_depends_on("[]");
+        assert!(deps.is_empty());
+        let deps = parse_depends_on("");
+        assert!(deps.is_empty());
+    }
+
+    #[test]
+    fn test_extract_task_name_none() {
+        assert!(extract_task_name("no header here").is_none());
+        assert!(extract_task_name("## Task: not h1").is_none());
+    }
+
+    #[test]
+    fn test_extract_task_name_chinese() {
+        let content = "# 任务：中文任务名\n\ncontent";
+        assert_eq!(
+            extract_task_name(content),
+            Some("中文任务名".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_coordinator_none() {
+        assert!(extract_coordinator("no coordinator").is_none());
+    }
+
+    #[test]
+    fn test_extract_merge_strategy_stops_at_next_section() {
+        let content = "## Merge Strategy\nFirst line.\nSecond line.\n## Other\nignored";
+        let strategy = extract_merge_strategy(content);
+        assert_eq!(strategy, Some("First line.".to_string()));
+    }
+
+    #[test]
+    fn test_extract_merge_strategy_none() {
+        assert!(extract_merge_strategy("## Other\nnope").is_none());
+    }
+
+    #[test]
+    fn test_to_task_graph_creates_nodes() {
+        let plan = TaskPlan {
+            task_id: "t1".to_string(),
+            task_name: "My task".to_string(),
+            coordinator: "main".to_string(),
+            status: PlanStatus::InProgress,
+            assignments: vec![
+                AgentAssignment {
+                    agent_name: "alice".to_string(),
+                    objective: "Do A".to_string(),
+                    files_to_create: vec![PathBuf::from("a.rs")],
+                    files_to_modify: vec![],
+                    files_to_read: vec![],
+                    task_type: TaskType::CreateNew,
+                    depends_on: vec![],
+                    priority: None,
+                },
+                AgentAssignment {
+                    agent_name: "bob".to_string(),
+                    objective: "Do B".to_string(),
+                    files_to_create: vec![],
+                    files_to_modify: vec![PathBuf::from("b.rs")],
+                    files_to_read: vec![],
+                    task_type: TaskType::ModifyExisting,
+                    depends_on: vec!["alice".to_string()],
+                    priority: Some("high".to_string()),
+                },
+            ],
+            merge_strategy: "none".to_string(),
+            plan_file: PathBuf::from("plan.md"),
+        };
+
+        let graph = plan.to_task_graph();
+        assert_eq!(graph.nodes.len(), 2);
+        assert_eq!(graph.description.as_deref(), Some("My task"));
+
+        // Find alice and bob by agent name (UUID-assigned ids are non-deterministic)
+        let alice = graph.nodes.iter().find(|n| n.agent == "alice").unwrap();
+        let bob = graph.nodes.iter().find(|n| n.agent == "bob").unwrap();
+
+        // Alice has no deps
+        assert!(alice.depends_on.is_empty());
+        // Bob depends on alice's UUID (not the literal name "alice")
+        assert_eq!(bob.depends_on, vec![alice.id.clone()]);
+        // Metadata should carry file lists
+        assert!(alice.metadata.contains_key("files_to_create"));
+        assert!(bob.metadata.contains_key("files_to_modify"));
+    }
+
+    #[test]
+    fn test_to_task_graph_unresolved_dependency_kept_as_is() {
+        let plan = TaskPlan {
+            task_id: "t1".to_string(),
+            task_name: "T".to_string(),
+            coordinator: "main".to_string(),
+            status: PlanStatus::InProgress,
+            assignments: vec![AgentAssignment {
+                agent_name: "bob".to_string(),
+                objective: "o".to_string(),
+                files_to_create: vec![],
+                files_to_modify: vec![],
+                files_to_read: vec![],
+                task_type: TaskType::CreateNew,
+                depends_on: vec!["ghost".to_string()], // no such agent
+                priority: None,
+            }],
+            merge_strategy: "none".to_string(),
+            plan_file: PathBuf::from("p.md"),
+        };
+        let graph = plan.to_task_graph();
+        // Unresolved dependency kept as literal name
+        assert_eq!(graph.nodes[0].depends_on, vec!["ghost".to_string()]);
+    }
+
+    #[test]
+    fn test_join_paths_helper() {
+        let paths = vec![PathBuf::from("a.rs"), PathBuf::from("b.rs")];
+        assert_eq!(join_paths(&paths), "a.rs,b.rs");
+        assert_eq!(join_paths(&[]), "");
+        assert_eq!(join_paths(&[PathBuf::from("only.rs")]), "only.rs");
+    }
 }

@@ -39,3 +39,84 @@ pub async fn get_status(State(_state): State<AppState>) -> impl IntoResponse {
         daemon_info,
     })
 }
+
+// ── Tests ──
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_status_response_serialization_all_fields() {
+        let resp = StatusResponse {
+            nats_initialized: true,
+            nats_port: Some(4222),
+            active_agents: 3,
+            daemon_info: None,
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["nats_initialized"], true);
+        assert_eq!(json["nats_port"], 4222);
+        assert_eq!(json["active_agents"], 3);
+        assert!(json["daemon_info"].is_null());
+    }
+
+    #[test]
+    fn test_status_response_serialization_no_nats() {
+        let resp = StatusResponse {
+            nats_initialized: false,
+            nats_port: None,
+            active_agents: 0,
+            daemon_info: None,
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["nats_initialized"], false);
+        assert!(json["nats_port"].is_null());
+        assert_eq!(json["active_agents"], 0);
+    }
+
+    #[test]
+    fn test_status_response_active_agents_varies() {
+        for count in [0, 1, 5, 100] {
+            let resp = StatusResponse {
+                nats_initialized: true,
+                nats_port: Some(4222),
+                active_agents: count,
+                daemon_info: None,
+            };
+            let json = serde_json::to_value(&resp).unwrap();
+            assert_eq!(json["active_agents"], count);
+        }
+    }
+
+    #[test]
+    fn test_status_response_json_shape_is_flat() {
+        let resp = StatusResponse {
+            nats_initialized: true,
+            nats_port: Some(4222),
+            active_agents: 2,
+            daemon_info: None,
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        // All 4 fields should be present at the top level
+        let obj = json.as_object().unwrap();
+        assert_eq!(obj.len(), 4);
+        assert!(obj.contains_key("nats_initialized"));
+        assert!(obj.contains_key("nats_port"));
+        assert!(obj.contains_key("active_agents"));
+        assert!(obj.contains_key("daemon_info"));
+    }
+
+    #[test]
+    fn test_status_response_nats_port_range() {
+        // Valid port numbers should serialize correctly
+        let resp = StatusResponse {
+            nats_initialized: true,
+            nats_port: Some(65535),
+            active_agents: 0,
+            daemon_info: None,
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["nats_port"], 65535);
+    }
+}

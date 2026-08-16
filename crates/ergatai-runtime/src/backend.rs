@@ -87,3 +87,225 @@ pub trait AgentRuntimeBackend: Send + Sync + 'static {
     /// not allowed (trait objects are not `Sized`).
     fn as_any(&self) -> &dyn std::any::Any;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{AgentHandle, BackendCapabilities, ResourceLimits, WaitResult, WorkspaceHandle, WorkspaceSpec};
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    /// A mock backend for testing the trait interface.
+    struct MockBackend {
+        name: &'static str,
+        create_count: AtomicUsize,
+    }
+
+    impl MockBackend {
+        fn new(name: &'static str) -> Self {
+            Self {
+                name,
+                create_count: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl AgentRuntimeBackend for MockBackend {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+
+        fn capabilities(&self) -> BackendCapabilities {
+            BackendCapabilities {
+                supports_message_injection: true,
+                supports_output_capture: false,
+                supports_resource_limits: false,
+                supports_workspace_reuse: false,
+                supports_network_isolation: false,
+                max_concurrent_agents: None,
+            }
+        }
+
+        async fn initialize(&self) -> ErgataiResult<()> {
+            Ok(())
+        }
+
+        async fn create_workspace(&self, spec: WorkspaceSpec) -> ErgataiResult<WorkspaceHandle> {
+            self.create_count.fetch_add(1, Ordering::SeqCst);
+            Ok(WorkspaceHandle {
+                id: spec.id,
+                backend: self.name.to_string(),
+                metadata: HashMap::new(),
+            })
+        }
+
+        async fn start_agent(
+            &self,
+            handle: &WorkspaceHandle,
+            _command: &str,
+            _instruction: Option<&str>,
+        ) -> ErgataiResult<AgentHandle> {
+            Ok(AgentHandle {
+                workspace: handle.clone(),
+                agent_id: format!("{}-agent", handle.id),
+                process_id: None,
+                metadata: HashMap::new(),
+            })
+        }
+
+        async fn inject_message(&self, _handle: &AgentHandle, _message: &str) -> ErgataiResult<()> {
+            Ok(())
+        }
+
+        async fn capture_output(&self, _handle: &AgentHandle) -> ErgataiResult<Option<String>> {
+            Ok(None)
+        }
+
+        async fn is_alive(&self, _handle: &AgentHandle) -> ErgataiResult<bool> {
+            Ok(false)
+        }
+
+        async fn stop_agent(&self, _handle: &AgentHandle) -> ErgataiResult<()> {
+            Ok(())
+        }
+
+        async fn kill_agent(&self, _handle: &AgentHandle) -> ErgataiResult<()> {
+            Ok(())
+        }
+
+        async fn wait_for_exit(
+            &self,
+            _handle: &AgentHandle,
+            _timeout: Option<Duration>,
+        ) -> ErgataiResult<WaitResult> {
+            Ok(WaitResult::Exited { code: 0 })
+        }
+
+        async fn list_workspaces(&self) -> ErgataiResult<Vec<WorkspaceHandle>> {
+            Ok(vec![])
+        }
+
+        async fn cleanup_workspace(&self, _handle: &WorkspaceHandle) -> ErgataiResult<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&self) -> ErgataiResult<()> {
+            Ok(())
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    #[test]
+    fn test_backend_name() {
+        let backend = MockBackend::new("mock");
+        assert_eq!(backend.name(), "mock");
+    }
+
+    #[test]
+    fn test_backend_capabilities() {
+        let backend = MockBackend::new("mock");
+        let caps = backend.capabilities();
+        assert!(caps.supports_message_injection);
+        assert!(!caps.supports_output_capture);
+        assert!(caps.max_concurrent_agents.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_backend_initialize() {
+        let backend = MockBackend::new("mock");
+        assert!(backend.initialize().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_backend_create_workspace() {
+        let backend = MockBackend::new("mock");
+        let spec = WorkspaceSpec {
+            id: "ws-1".to_string(),
+            work_dir: PathBuf::from("/tmp"),
+            env: HashMap::new(),
+            resources: ResourceLimits::default(),
+            backend_config: serde_json::json!({}),
+        };
+        let handle = backend.create_workspace(spec).await.unwrap();
+        assert_eq!(handle.id, "ws-1");
+        assert_eq!(handle.backend, "mock");
+        assert_eq!(backend.create_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_backend_start_agent() {
+        let backend = MockBackend::new("mock");
+        let ws = WorkspaceHandle {
+            id: "ws-1".to_string(),
+            backend: "mock".to_string(),
+            metadata: HashMap::new(),
+        };
+        let agent = backend.start_agent(&ws, "echo hi", None).await.unwrap();
+        assert_eq!(agent.agent_id, "ws-1-agent");
+        assert_eq!(agent.workspace.id, "ws-1");
+    }
+
+    #[tokio::test]
+    async fn test_backend_inject_message() {
+        let backend = MockBackend::new("mock");
+        let agent = AgentHandle {
+            workspace: WorkspaceHandle {
+                id: "ws-1".to_string(),
+                backend: "mock".to_string(),
+                metadata: HashMap::new(),
+            },
+            agent_id: "agent-1".to_string(),
+            process_id: None,
+            metadata: HashMap::new(),
+        };
+        assert!(backend.inject_message(&agent, "hello").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_backend_wait_for_exit() {
+        let backend = MockBackend::new("mock");
+        let agent = AgentHandle {
+            workspace: WorkspaceHandle {
+                id: "ws-1".to_string(),
+                backend: "mock".to_string(),
+                metadata: HashMap::new(),
+            },
+            agent_id: "agent-1".to_string(),
+            process_id: None,
+            metadata: HashMap::new(),
+        };
+        let result = backend.wait_for_exit(&agent, None).await.unwrap();
+        match result {
+            WaitResult::Exited { code } => assert_eq!(code, 0),
+            _ => panic!("Expected Exited"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_backend_shutdown() {
+        let backend = MockBackend::new("mock");
+        assert!(backend.shutdown().await.is_ok());
+    }
+
+    #[test]
+    fn test_backend_as_any_downcast() {
+        let backend = MockBackend::new("mock");
+        let trait_obj: &dyn AgentRuntimeBackend = &backend;
+        let downcast = trait_obj.as_any().downcast_ref::<MockBackend>();
+        assert!(downcast.is_some());
+        assert_eq!(downcast.unwrap().name(), "mock");
+    }
+
+    #[tokio::test]
+    async fn test_backend_list_workspaces_empty() {
+        let backend = MockBackend::new("mock");
+        let workspaces = backend.list_workspaces().await.unwrap();
+        assert!(workspaces.is_empty());
+    }
+}

@@ -132,3 +132,108 @@ pub async fn delete_workspace(
             .into_response(),
     }
 }
+
+// ── Tests ──
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // ── CreateWorkspaceRequest deserialization ──
+
+    #[test]
+    fn test_create_workspace_request_id_only() {
+        let req: CreateWorkspaceRequest =
+            serde_json::from_value(json!({"id": "ws-1"})).unwrap();
+        assert_eq!(req.id, "ws-1");
+        assert!(req.work_dir.is_none());
+        assert!(req.env.is_none());
+    }
+
+    #[test]
+    fn test_create_workspace_request_all_fields() {
+        let req: CreateWorkspaceRequest = serde_json::from_value(json!({
+            "id": "ws-2",
+            "work_dir": "/home/user/project",
+            "env": {"LANG": "en_US.UTF-8"}
+        }))
+        .unwrap();
+        assert_eq!(req.id, "ws-2");
+        assert_eq!(req.work_dir.as_deref(), Some("/home/user/project"));
+        let env = req.env.unwrap();
+        assert_eq!(env.get("LANG").unwrap(), "en_US.UTF-8");
+    }
+
+    #[test]
+    fn test_create_workspace_request_missing_id_fails() {
+        let result: Result<CreateWorkspaceRequest, _> =
+            serde_json::from_value(json!({"work_dir": "/tmp"}));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_create_workspace_request_empty_id() {
+        let req: CreateWorkspaceRequest =
+            serde_json::from_value(json!({"id": ""})).unwrap();
+        assert_eq!(req.id, "");
+    }
+
+    #[test]
+    fn test_create_workspace_request_empty_env() {
+        let req: CreateWorkspaceRequest =
+            serde_json::from_value(json!({"id": "ws", "env": {}})).unwrap();
+        assert_eq!(req.env.unwrap().len(), 0);
+    }
+
+    // ── WorkspaceResponse serialization ──
+
+    #[test]
+    fn test_workspace_response_serialization() {
+        let mut metadata = HashMap::new();
+        metadata.insert("key".to_string(), "value".to_string());
+        let resp = WorkspaceResponse {
+            id: "ws-1".to_string(),
+            backend: "rmux".to_string(),
+            metadata,
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["id"], "ws-1");
+        assert_eq!(json["backend"], "rmux");
+        assert_eq!(json["metadata"]["key"], "value");
+    }
+
+    #[test]
+    fn test_workspace_response_empty_metadata() {
+        let resp = WorkspaceResponse {
+            id: "ws-1".to_string(),
+            backend: "tmux".to_string(),
+            metadata: HashMap::new(),
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert!(json["metadata"].as_object().unwrap().is_empty());
+    }
+
+    // ── ErrorResponse serialization ──
+
+    #[test]
+    fn test_error_response_contains_message() {
+        let resp = ErrorResponse {
+            error: "Workspace ws-1 not found".to_string(),
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["error"], "Workspace ws-1 not found");
+    }
+
+    #[test]
+    fn test_error_response_only_has_error_field() {
+        let resp = ErrorResponse {
+            error: "some error".to_string(),
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        // Verify the shape is exactly {"error": "some error"}
+        let obj = json.as_object().unwrap();
+        assert_eq!(obj.len(), 1);
+        assert!(obj.contains_key("error"));
+    }
+}

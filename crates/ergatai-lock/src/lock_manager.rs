@@ -3404,4 +3404,425 @@ mod tests {
         ).unwrap();
         assert_eq!(mode, "READ");
     }
+
+    // ─── Additional tests ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_multiple_read_locks_coexist() {
+        let (manager, _temp) = create_test_manager();
+
+        let sys_a = SystemToken::new(
+            "agent-a".to_string(),
+            "session-a".to_string(),
+            manager.project_root.to_string_lossy().to_string(),
+            3600,
+            30,
+        );
+        let sys_b = SystemToken::new(
+            "agent-b".to_string(),
+            "session-b".to_string(),
+            manager.project_root.to_string_lossy().to_string(),
+            3600,
+            30,
+        );
+        manager.register_system_token(&sys_a).unwrap();
+        manager.register_system_token(&sys_b).unwrap();
+
+        let read_a = FileToken::new(
+            "agent-a".to_string(),
+            "session-a".to_string(),
+            sys_a.id.clone(),
+            "**".to_string(),
+            FileMode::Read,
+            None,
+            "system".to_string(),
+            3600,
+            15,
+        );
+        let read_b = FileToken::new(
+            "agent-b".to_string(),
+            "session-b".to_string(),
+            sys_b.id.clone(),
+            "**".to_string(),
+            FileMode::Read,
+            None,
+            "system".to_string(),
+            3600,
+            15,
+        );
+        manager.register_file_token(&read_a).unwrap();
+        manager.register_file_token(&read_b).unwrap();
+
+        // Both READ locks should succeed on the same file
+        manager.acquire_lock(&read_a, "test.txt").await.unwrap();
+        manager.acquire_lock(&read_b, "test.txt").await.unwrap();
+
+        // is_file_locked only returns true for WRITE locks
+        assert!(!manager.is_file_locked("test.txt").unwrap());
+
+        // But there should be 2 ACTIVE READ locks in the DB
+        let conn = manager.conn.lock().unwrap();
+        let active: Vec<(String, String)> = conn
+            .prepare(
+                "SELECT agent_id, mode FROM file_locks WHERE file_path = ?1 AND status = 'ACTIVE'",
+            )
+            .unwrap()
+            .query_map(params!["test.txt"], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(active.len(), 2);
+        assert!(active.iter().all(|(_, m)| m == "READ"));
+    }
+
+    #[tokio::test]
+    async fn test_multi_file_locking_independent() {
+        let (manager, _temp) = create_test_manager();
+        std::fs::write(manager.project_root.join("other.txt"), "other").unwrap();
+
+        let system_token = SystemToken::new(
+            "test-agent".to_string(),
+            "session-1".to_string(),
+            manager.project_root.to_string_lossy().to_string(),
+            3600,
+            30,
+        );
+        manager.register_system_token(&system_token).unwrap();
+
+        let token_a = FileToken::new(
+            "test-agent".to_string(),
+            "session-1".to_string(),
+            system_token.id.clone(),
+            "**".to_string(),
+            FileMode::Write,
+            None,
+            "system".to_string(),
+            3600,
+            15,
+        );
+        let token_b = FileToken::new(
+            "test-agent".to_string(),
+            "session-1".to_string(),
+            system_token.id.clone(),
+            "**".to_string(),
+            FileMode::Write,
+            None,
+            "system".to_string(),
+            3600,
+            15,
+        );
+        manager.register_file_token(&token_a).unwrap();
+        manager.register_file_token(&token_b).unwrap();
+
+        manager.acquire_lock(&token_a, "test.txt").await.unwrap();
+        manager.acquire_lock(&token_b, "other.txt").await.unwrap();
+
+        assert!(manager.is_file_locked("test.txt").unwrap());
+        assert!(manager.is_file_locked("other.txt").unwrap());
+
+        // Release one doesn't affect the other
+        manager.release_lock(token_a.id.as_str(), "test.txt").await.unwrap();
+        assert!(!manager.is_file_locked("test.txt").unwrap());
+        assert!(manager.is_file_locked("other.txt").unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_acquire_release_different_files() {
+        use std::sync::Arc;
+        use tokio::task::JoinSet;
+
+        let (manager, _temp) = create_test_manager();
+
+        // Create 10 files
+        for i in 0..10 {
+            std::fs::write(manager.project_root.join(format!("file_{i}.txt")), "content").unwrap();
+        }
+
+        let manager = Arc::new(manager);
+        let system_token = Arc::new(SystemToken::new(
+            "test-agent".to_string(),
+            "session-1".to_string(),
+            manager.project_root.to_string_lossy().to_string(),
+            3600,
+            30,
+        ));
+        manager.register_system_token(&system_token).unwrap();
+
+        let mut join_set = JoinSet::new();
+        for i in 0..10 {
+            let mgr = manager.clone();
+            let sys = system_token.clone();
+            join_set.spawn(async move {
+                let file_token = FileToken::new(
+                    "test-agent".to_string(),
+                    "session-1".to_string(),
+                    sys.id.clone(),
+                    "**".to_string(),
+                    FileMode::Write,
+                    None,
+                    "system".to_string(),
+                    3600,
+                    15,
+                );
+                mgr.register_file_token(&file_token).unwrap();
+                let file_path = format!("file_{i}.txt");
+                mgr.acquire_lock(&file_token, &file_path).await.unwrap();
+                assert!(mgr.is_file_locked(&file_path).unwrap());
+                mgr.release_lock(file_token.id.as_str(), &file_path).await.unwrap();
+                assert!(!mgr.is_file_locked(&file_path).unwrap());
+            });
+        }
+
+        while let Some(result) = join_set.join_next().await {
+            result.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_record_violation_and_audit() {
+        let (manager, _temp) = create_test_manager();
+        manager.record_violation("test.txt", "WRITE_WITHOUT_LOCK").unwrap();
+
+        let conn = manager.conn.lock().unwrap();
+        let count: i32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM audit_log WHERE file_path = 'test.txt' AND action = 'WRITE_WITHOUT_LOCK'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_update_heartbeat() {
+        let (manager, _temp) = create_test_manager();
+
+        let system_token = SystemToken::new(
+            "test-agent".to_string(),
+            "session-1".to_string(),
+            manager.project_root.to_string_lossy().to_string(),
+            3600,
+            30,
+        );
+        manager.register_system_token(&system_token).unwrap();
+
+        let token = FileToken::new(
+            "test-agent".to_string(),
+            "session-1".to_string(),
+            system_token.id.clone(),
+            "**".to_string(),
+            FileMode::Write,
+            None,
+            "system".to_string(),
+            3600,
+            15,
+        );
+        manager.register_file_token(&token).unwrap();
+        manager.acquire_lock(&token, "test.txt").await.unwrap();
+
+        // Set heartbeat to the past
+        manager.set_heartbeat_past(system_token.id.as_str(), 100).unwrap();
+
+        // Update heartbeat should succeed and refresh the timestamp
+        manager.update_heartbeat(system_token.id.as_str()).unwrap();
+
+        // Verify the heartbeat was updated (it should be recent now)
+        let conn = manager.conn.lock().unwrap();
+        let heartbeat: String = conn
+            .query_row(
+                "SELECT heartbeat_at FROM system_tokens WHERE id = ?1",
+                params![system_token.id.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        // Should not be empty
+        assert!(!heartbeat.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_locks_by_session() {
+        let (manager, _temp) = create_test_manager();
+        std::fs::write(manager.project_root.join("other.txt"), "x").unwrap();
+
+        let system_token = SystemToken::new(
+            "test-agent".to_string(),
+            "session-1".to_string(),
+            manager.project_root.to_string_lossy().to_string(),
+            3600,
+            30,
+        );
+        manager.register_system_token(&system_token).unwrap();
+
+        let token_a = FileToken::new(
+            "test-agent".to_string(),
+            "session-1".to_string(),
+            system_token.id.clone(),
+            "**".to_string(),
+            FileMode::Write,
+            None,
+            "system".to_string(),
+            3600,
+            15,
+        );
+        let token_b = FileToken::new(
+            "test-agent".to_string(),
+            "session-1".to_string(),
+            system_token.id.clone(),
+            "**".to_string(),
+            FileMode::Read,
+            None,
+            "system".to_string(),
+            3600,
+            15,
+        );
+        manager.register_file_token(&token_a).unwrap();
+        manager.register_file_token(&token_b).unwrap();
+
+        manager.acquire_lock(&token_a, "test.txt").await.unwrap();
+        manager.acquire_lock(&token_b, "other.txt").await.unwrap();
+
+        let locks = manager.get_locks_by_session("session-1").unwrap();
+        assert_eq!(locks.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_session_registration_counts() {
+        let (manager, _temp) = create_test_manager();
+
+        // Initially no sessions
+        assert_eq!(manager.active_session_count(), 0);
+
+        manager.register_session();
+        assert_eq!(manager.active_session_count(), 1);
+
+        manager.register_session();
+        assert_eq!(manager.active_session_count(), 2);
+
+        manager.unregister_session();
+        assert_eq!(manager.active_session_count(), 1);
+
+        manager.unregister_session();
+        assert_eq!(manager.active_session_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_expire_token() {
+        let (manager, _temp) = create_test_manager();
+
+        let system_token = SystemToken::new(
+            "test-agent".to_string(),
+            "session-1".to_string(),
+            manager.project_root.to_string_lossy().to_string(),
+            3600,
+            30,
+        );
+        manager.register_system_token(&system_token).unwrap();
+
+        let file_token = FileToken::new(
+            "test-agent".to_string(),
+            "session-1".to_string(),
+            system_token.id.clone(),
+            "**".to_string(),
+            FileMode::Write,
+            None,
+            "system".to_string(),
+            3600,
+            15,
+        );
+        manager.register_file_token(&file_token).unwrap();
+
+        // Expire the system token
+        manager.expire_token(system_token.id.as_str()).unwrap();
+
+        // System token should now be in EXPIRED status
+        let conn = manager.conn.lock().unwrap();
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM system_tokens WHERE id = ?1",
+                params![system_token.id.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "EXPIRED");
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_old_audit_logs() {
+        let (manager, _temp) = create_test_manager();
+
+        // Insert an old audit entry (100 days ago) and a fresh one
+        {
+            let conn = manager.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO audit_log (timestamp, agent_id, session_id, action, file_path, mode)
+                 VALUES (datetime('now', '-100 days'), 'old-agent', 's1', 'LOCK_ACQUIRED', 'old.rs', 'WRITE')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO audit_log (timestamp, agent_id, session_id, action, file_path, mode)
+                 VALUES (datetime('now'), 'new-agent', 's2', 'LOCK_ACQUIRED', 'new.rs', 'WRITE')",
+                [],
+            )
+            .unwrap();
+        }
+
+        // Cleanup entries older than 30 days
+        let deleted = manager.cleanup_old_audit_logs(30).unwrap();
+        assert_eq!(deleted, 1);
+
+        let conn = manager.conn.lock().unwrap();
+        let count: i32 = conn
+            .query_row("SELECT COUNT(*) FROM audit_log", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_get_all_active_locks() {
+        let (manager, _temp) = create_test_manager();
+        std::fs::write(manager.project_root.join("b.txt"), "b").unwrap();
+
+        let system_token = SystemToken::new(
+            "test-agent".to_string(),
+            "session-1".to_string(),
+            manager.project_root.to_string_lossy().to_string(),
+            3600,
+            30,
+        );
+        manager.register_system_token(&system_token).unwrap();
+
+        let token_a = FileToken::new(
+            "test-agent".to_string(),
+            "session-1".to_string(),
+            system_token.id.clone(),
+            "**".to_string(),
+            FileMode::Write,
+            None,
+            "system".to_string(),
+            3600,
+            15,
+        );
+        let token_b = FileToken::new(
+            "test-agent".to_string(),
+            "session-1".to_string(),
+            system_token.id.clone(),
+            "**".to_string(),
+            FileMode::Write,
+            None,
+            "system".to_string(),
+            3600,
+            15,
+        );
+        manager.register_file_token(&token_a).unwrap();
+        manager.register_file_token(&token_b).unwrap();
+        manager.acquire_lock(&token_a, "test.txt").await.unwrap();
+        manager.acquire_lock(&token_b, "b.txt").await.unwrap();
+
+        let all_locks = manager.get_all_active_locks().unwrap();
+        assert_eq!(all_locks.len(), 2);
+    }
 }

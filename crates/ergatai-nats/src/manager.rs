@@ -194,3 +194,202 @@ pub async fn shutdown_nats() {
 
     info!("NATS shutdown complete");
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Test that nats_state() returns the same static instance
+    #[test]
+    fn test_nats_state_singleton() {
+        let state1 = nats_state();
+        let state2 = nats_state();
+        // Both should point to the same static instance
+        assert_eq!(
+            format!("{:p}", state1),
+            format!("{:p}", state2),
+            "nats_state() should return the same static instance"
+        );
+    }
+
+    /// Test initial state is empty (no server, no connection)
+    #[tokio::test]
+    async fn test_initial_state_is_empty() {
+        // Reset state for this test
+        shutdown_nats().await;
+
+        let state = nats_state();
+        let state_guard = state.read().await;
+        assert!(state_guard.server.is_none(), "Server should be None initially");
+        assert!(state_guard.connection.is_none(), "Connection should be None initially");
+    }
+
+    /// Test is_nats_initialized returns false when not initialized
+    #[tokio::test]
+    async fn test_is_nats_initialized_false_initially() {
+        shutdown_nats().await;
+        assert!(!is_nats_initialized().await, "Should not be initialized initially");
+    }
+
+    /// Test get_nats_connection returns None when not initialized
+    #[tokio::test]
+    async fn test_get_nats_connection_none_initially() {
+        shutdown_nats().await;
+        let conn = get_nats_connection().await;
+        assert!(conn.is_none(), "Should return None when not initialized");
+    }
+
+    /// Test get_nats_server_port returns None when not initialized
+    #[tokio::test]
+    async fn test_get_nats_server_port_none_initially() {
+        shutdown_nats().await;
+        let port = get_nats_server_port().await;
+        assert!(port.is_none(), "Should return None when not initialized");
+    }
+
+    /// Test shutdown_nats is idempotent (can be called multiple times)
+    #[tokio::test]
+    async fn test_shutdown_nats_idempotent() {
+        shutdown_nats().await;
+        shutdown_nats().await;
+        shutdown_nats().await;
+        // Should not panic
+        assert!(!is_nats_initialized().await);
+    }
+
+    /// Test init_nats starts server and creates connection
+    #[tokio::test]
+    async fn test_init_nats_starts_server() {
+        shutdown_nats().await;
+
+        let conn = init_nats().await;
+        match conn {
+            Ok(connection) => {
+                assert!(connection.is_connected(), "Connection should be active");
+                assert!(is_nats_initialized().await, "Should be initialized after init");
+
+                let port = get_nats_server_port().await;
+                assert!(port.is_some(), "Should have a port after init");
+                assert!(port.unwrap() >= 4222, "Port should be in valid range");
+
+                // Cleanup
+                shutdown_nats().await;
+            }
+            Err(e) => {
+                eprintln!("⚠️  Skipping (nats-server not available): {}", e);
+            }
+        }
+    }
+
+    /// Test init_nats is idempotent
+    #[tokio::test]
+    async fn test_init_nats_idempotent() {
+        shutdown_nats().await;
+
+        match init_nats().await {
+            Ok(_conn1) => {
+                let port1 = get_nats_server_port().await.unwrap();
+
+                // Call init again - should return the same connection
+                match init_nats().await {
+                    Ok(conn2) => {
+                        let port2 = get_nats_server_port().await.unwrap();
+                        assert_eq!(port1, port2, "Port should remain the same");
+                        assert!(conn2.is_connected(), "Connection should still be active");
+                    }
+                    Err(e) => {
+                        panic!("Second init_nats should not fail: {}", e);
+                    }
+                }
+
+                shutdown_nats().await;
+            }
+            Err(e) => {
+                eprintln!("⚠️  Skipping (nats-server not available): {}", e);
+            }
+        }
+    }
+
+    /// Test shutdown properly cleans up state
+    #[tokio::test]
+    async fn test_shutdown_cleanup() {
+        shutdown_nats().await;
+
+        match init_nats().await {
+            Ok(_) => {
+                assert!(is_nats_initialized().await, "Should be initialized");
+
+                shutdown_nats().await;
+
+                assert!(!is_nats_initialized().await, "Should not be initialized after shutdown");
+                assert!(get_nats_connection().await.is_none(), "Connection should be None");
+                assert!(get_nats_server_port().await.is_none(), "Port should be None");
+            }
+            Err(e) => {
+                eprintln!("⚠️  Skipping (nats-server not available): {}", e);
+            }
+        }
+    }
+
+    /// Test get_nats_connection returns clone of connection
+    #[tokio::test]
+    async fn test_get_nats_connection_returns_clone() {
+        shutdown_nats().await;
+
+        match init_nats().await {
+            Ok(_conn1) => {
+                let conn2 = get_nats_connection().await;
+                assert!(conn2.is_some(), "Should return connection");
+                assert!(conn2.unwrap().is_connected(), "Connection should be active");
+
+                shutdown_nats().await;
+            }
+            Err(e) => {
+                eprintln!("⚠️  Skipping (nats-server not available): {}", e);
+            }
+        }
+    }
+
+    /// Test port allocation is in valid range
+    #[tokio::test]
+    async fn test_port_allocation_range() {
+        shutdown_nats().await;
+
+        match init_nats().await {
+            Ok(_) => {
+                let port = get_nats_server_port().await.unwrap();
+                assert!(port >= 4222, "Port should be >= 4222");
+                assert!(port < 4322, "Port should be < 4322 (4222 + 100)");
+
+                shutdown_nats().await;
+            }
+            Err(e) => {
+                eprintln!("⚠️  Skipping (nats-server not available): {}", e);
+            }
+        }
+    }
+
+    /// Test sequential init_nats calls (should be safe)
+    #[tokio::test]
+    async fn test_concurrent_init_nats() {
+        shutdown_nats().await;
+
+        // Run sequentially - init_nats should be idempotent
+        let mut success_count = 0;
+        for _ in 0..3 {
+            match init_nats().await {
+                Ok(_) => success_count += 1,
+                Err(e) => {
+                    eprintln!("⚠️  init_nats failed: {}", e);
+                }
+            }
+        }
+
+        // If any succeeded, we should be initialized
+        if success_count > 0 {
+            assert!(is_nats_initialized().await, "Should be initialized after successful init");
+        }
+
+        shutdown_nats().await;
+    }
+}

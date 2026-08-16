@@ -773,4 +773,78 @@ mod tests {
             assert_eq!(deserialized, status);
         }
     }
+
+    // ─── Additional tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_token_id_display_and_as_str() {
+        let id = TokenId::new();
+        let s = id.as_str();
+        assert!(!s.is_empty());
+        // Display trait should also produce the same string
+        assert_eq!(format!("{}", id), s);
+    }
+
+    #[test]
+    fn test_token_id_uniqueness() {
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..1000 {
+            let id = TokenId::new();
+            assert!(seen.insert(id.as_str().to_string()), "duplicate TokenId generated");
+        }
+    }
+
+    #[test]
+    fn test_file_token_is_expired_logic() {
+        let token = FileToken::new(
+            "agent".to_string(),
+            "session".to_string(),
+            TokenId::new(),
+            "**".to_string(),
+            FileMode::Read,
+            None,
+            "system".to_string(),
+            3600, // 1 hour TTL
+            15,
+        );
+        // A freshly created token should be Active (not Expired)
+        assert_eq!(token.status, TokenStatus::Active);
+        // expires_at should be in the future (issued_at + TTL)
+        assert!(token.expires_at > token.issued_at);
+    }
+
+    #[test]
+    fn test_system_token_clone_and_equality() {
+        let token = SystemToken::new(
+            "agent".to_string(),
+            "session".to_string(),
+            "/project".to_string(),
+            3600,
+            30,
+        );
+        let cloned = token.clone();
+        assert_eq!(token.id, cloned.id);
+        assert_eq!(token.agent_id, cloned.agent_id);
+        assert_eq!(token.session_id, cloned.session_id);
+    }
+
+    #[test]
+    fn test_file_token_matches_path_with_question_mark_glob() {
+        let token = FileToken::new(
+            "agent".to_string(),
+            "session".to_string(),
+            TokenId::new(),
+            "src/?.rs".to_string(),
+            FileMode::Read,
+            None,
+            "system".to_string(),
+            3600,
+            15,
+        );
+        // '?' matches a single character
+        assert!(token.matches_path("src/a.rs"));
+        assert!(token.matches_path("src/z.rs"));
+        // Two characters shouldn't match '?'
+        assert!(!token.matches_path("src/ab.rs"));
+    }
 }

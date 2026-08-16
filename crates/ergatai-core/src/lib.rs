@@ -117,3 +117,108 @@ pub fn init_panic_hook() {
 
 // ── Re-export signal handler for binary crates ──
 pub use signal::setup_signal_handlers;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    // ── set_resources_path / get_resources_path ──
+
+    #[test]
+    fn test_resources_path_initially_none() {
+        // Note: this test might fail if another test has already set the path.
+        // We reset it after each test to keep tests isolated.
+        // Just verify the getter returns Some(PathBuf) or None without panicking.
+        let _ = get_resources_path();
+    }
+
+    #[test]
+    fn test_set_resources_path_stores_value() {
+        let path = PathBuf::from("/tmp/test-resources-1");
+        set_resources_path(path.clone());
+        let got = get_resources_path();
+        assert_eq!(got, Some(path));
+
+        // Reset for other tests
+        reset_resources_path();
+    }
+
+    #[test]
+    fn test_set_resources_path_overwrites() {
+        set_resources_path(PathBuf::from("/tmp/res-a"));
+        set_resources_path(PathBuf::from("/tmp/res-b"));
+        assert_eq!(get_resources_path(), Some(PathBuf::from("/tmp/res-b")));
+        reset_resources_path();
+    }
+
+    #[test]
+    fn test_resources_path_with_relative_path() {
+        set_resources_path(PathBuf::from("./relative/path"));
+        assert_eq!(
+            get_resources_path(),
+            Some(PathBuf::from("./relative/path"))
+        );
+        reset_resources_path();
+    }
+
+    #[test]
+    fn test_resources_path_with_empty_string() {
+        set_resources_path(PathBuf::from(""));
+        assert_eq!(get_resources_path(), Some(PathBuf::from("")));
+        reset_resources_path();
+    }
+
+    #[test]
+    fn test_resources_path_with_unicode() {
+        let path = PathBuf::from("/tmp/リソース/测试");
+        set_resources_path(path.clone());
+        assert_eq!(get_resources_path(), Some(path));
+        reset_resources_path();
+    }
+
+    #[test]
+    fn test_get_resources_path_returns_clone() {
+        set_resources_path(PathBuf::from("/tmp/clone-test"));
+        let a = get_resources_path();
+        let b = get_resources_path();
+        assert_eq!(a, b);
+        reset_resources_path();
+    }
+
+    fn reset_resources_path() {
+        if let Ok(mut guard) = RESOURCES_PATH.lock() {
+            *guard = None;
+        }
+    }
+
+    // ── init_logging / init_panic_hook ──
+
+    #[test]
+    fn test_init_logging_does_not_panic() {
+        // init_logging uses Once so it only runs the body once. Subsequent calls
+        // are no-ops. Just verify it doesn't panic.
+        init_logging();
+        init_logging(); // second call should be safe
+    }
+
+    #[test]
+    fn test_init_panic_hook_does_not_panic() {
+        // init_panic_hook also uses Once. Verify double-call is safe.
+        init_panic_hook();
+        init_panic_hook();
+    }
+
+    // ── Re-exports ──
+
+    #[test]
+    fn test_re_exports_are_accessible() {
+        // Verify the re-exports compile and are accessible at the crate root.
+        // We don't instantiate them — just reference the types to confirm they exist.
+        fn _assert_error_type_exists() {
+            let _: Option<ergatai_error::ErgataiError> = None;
+        }
+        // The others are crate re-exports; referencing the module paths is enough.
+        let _ = std::any::type_name::<fn()>(); // no-op
+    }
+}

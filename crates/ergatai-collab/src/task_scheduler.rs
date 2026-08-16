@@ -675,4 +675,336 @@ mod tests {
         assert_eq!(scheduler.pending_count().await, 0);
         std::fs::remove_dir_all(&temp_dir).ok();
     }
+
+    #[tokio::test]
+    async fn test_strategy_default_values() {
+        assert_eq!(ScheduleStrategy::WaitForAgent, ScheduleStrategy::WaitForAgent);
+        assert_ne!(ScheduleStrategy::QueueTask, ScheduleStrategy::Parallel);
+    }
+
+    #[tokio::test]
+    async fn test_agent_availability_initially_available() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let scheduler = TaskScheduler::new(temp_dir.path().to_path_buf(), ScheduleStrategy::WaitForAgent);
+        let avail = scheduler.check_agent_availability("any-agent").await;
+        assert_eq!(avail, AgentAvailability::Available);
+    }
+
+    #[tokio::test]
+    async fn test_agent_availability_busy_after_processing_added() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let scheduler = TaskScheduler::new(temp_dir.path().to_path_buf(), ScheduleStrategy::WaitForAgent);
+        // Simulate an agent currently processing a task
+        scheduler.processing.lock().await.push(("task-1".to_string(), "alice".to_string()));
+
+        let avail = scheduler.check_agent_availability("alice").await;
+        assert!(matches!(
+            avail,
+            AgentAvailability::Busy { current_task_id } if current_task_id == "task-1"
+        ));
+
+        // Different agent should still be Available
+        let avail = scheduler.check_agent_availability("bob").await;
+        assert_eq!(avail, AgentAvailability::Available);
+    }
+
+    #[tokio::test]
+    async fn test_mark_completed_removes_from_processing() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let scheduler = TaskScheduler::new(temp_dir.path().to_path_buf(), ScheduleStrategy::WaitForAgent);
+        scheduler.processing.lock().await.push(("task-1".to_string(), "alice".to_string()));
+        scheduler.processing.lock().await.push(("task-2".to_string(), "bob".to_string()));
+
+        scheduler.mark_completed("task-1").await;
+
+        let processing = scheduler.processing.lock().await;
+        assert_eq!(processing.len(), 1);
+        assert_eq!(processing[0].0, "task-2");
+    }
+
+    #[tokio::test]
+    async fn test_mark_completed_idempotent() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let scheduler = TaskScheduler::new(temp_dir.path().to_path_buf(), ScheduleStrategy::WaitForAgent);
+        // Marking a non-existent task should not error or panic
+        scheduler.mark_completed("does-not-exist").await;
+        assert!(scheduler.processing.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_cancel_task_returns_true_when_found() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        tokio::fs::create_dir_all(temp_dir.path().join(".ergatai"))
+            .await
+            .unwrap();
+        let scheduler = TaskScheduler::new(temp_dir.path().to_path_buf(), ScheduleStrategy::WaitForAgent);
+        scheduler.pending_tasks.lock().await.push(PendingTask {
+            task_id: "task-1".to_string(),
+            plan_file: PathBuf::from("/tmp/p.md"),
+            target_agent: "alice".to_string(),
+            submitted_at: 100,
+            priority: 1,
+        });
+
+        let removed = scheduler.cancel_task("task-1").await.unwrap();
+        assert!(removed);
+        assert_eq!(scheduler.pending_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_cancel_task_returns_false_when_not_found() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let scheduler = TaskScheduler::new(temp_dir.path().to_path_buf(), ScheduleStrategy::WaitForAgent);
+        let removed = scheduler.cancel_task("no-such-task").await.unwrap();
+        assert!(!removed);
+    }
+
+    #[tokio::test]
+    async fn test_list_pending_returns_clone() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let scheduler = TaskScheduler::new(temp_dir.path().to_path_buf(), ScheduleStrategy::WaitForAgent);
+        scheduler.pending_tasks.lock().await.push(PendingTask {
+            task_id: "t1".to_string(),
+            plan_file: PathBuf::from("a.md"),
+            target_agent: "alice".to_string(),
+            submitted_at: 10,
+            priority: 2,
+        });
+        scheduler.pending_tasks.lock().await.push(PendingTask {
+            task_id: "t2".to_string(),
+            plan_file: PathBuf::from("b.md"),
+            target_agent: "bob".to_string(),
+            submitted_at: 20,
+            priority: 1,
+        });
+
+        let list = scheduler.list_pending().await;
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].task_id, "t1");
+        assert_eq!(list[1].task_id, "t2");
+    }
+
+    #[tokio::test]
+    async fn test_save_and_load_from_disk_roundtrip() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        // save_to_disk writes into <project_root>/.ergatai/, so create it
+        tokio::fs::create_dir_all(temp_dir.path().join(".ergatai"))
+            .await
+            .unwrap();
+        let scheduler = TaskScheduler::new(temp_dir.path().to_path_buf(), ScheduleStrategy::WaitForAgent);
+
+        scheduler.pending_tasks.lock().await.push(PendingTask {
+            task_id: "t1".to_string(),
+            plan_file: PathBuf::from("/tmp/p.md"),
+            target_agent: "alice".to_string(),
+            submitted_at: 42,
+            priority: 3,
+        });
+
+        scheduler.save_to_disk().await.unwrap();
+
+        // Create a fresh scheduler pointing to the same file, load
+        let scheduler2 = TaskScheduler::new(temp_dir.path().to_path_buf(), ScheduleStrategy::WaitForAgent);
+        scheduler2.load_from_disk().await.unwrap();
+
+        let tasks = scheduler2.list_pending().await;
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].task_id, "t1");
+        assert_eq!(tasks[0].target_agent, "alice");
+        assert_eq!(tasks[0].submitted_at, 42);
+        assert_eq!(tasks[0].priority, 3);
+    }
+
+    #[tokio::test]
+    async fn test_load_from_disk_no_file_is_ok() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let scheduler = TaskScheduler::new(temp_dir.path().to_path_buf(), ScheduleStrategy::WaitForAgent);
+        // No queue file exists — should not error
+        scheduler.load_from_disk().await.unwrap();
+        assert_eq!(scheduler.pending_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_load_from_disk_rejects_corrupted_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let queue_file = temp_dir.path().join(".ergatai").join(".scheduler-queue.json");
+        tokio::fs::create_dir_all(queue_file.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&queue_file, "this is not json")
+            .await
+            .unwrap();
+
+        let scheduler = TaskScheduler::new(temp_dir.path().to_path_buf(), ScheduleStrategy::WaitForAgent);
+        let result = scheduler.load_from_disk().await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_load_from_disk_legacy_format_supported() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let queue_file = temp_dir.path().join(".ergatai").join(".scheduler-queue.json");
+        tokio::fs::create_dir_all(queue_file.parent().unwrap())
+            .await
+            .unwrap();
+        // Legacy format: bare array without version wrapper
+        let legacy = r#"[
+            {"task_id":"legacy-1","plan_file":"/tmp/l.md","target_agent":"a","submitted_at":1,"priority":1}
+        ]"#;
+        tokio::fs::write(&queue_file, legacy).await.unwrap();
+
+        let scheduler = TaskScheduler::new(temp_dir.path().to_path_buf(), ScheduleStrategy::WaitForAgent);
+        scheduler.load_from_disk().await.unwrap();
+        let tasks = scheduler.list_pending().await;
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].task_id, "legacy-1");
+    }
+
+    #[tokio::test]
+    async fn test_load_from_disk_clears_queue_when_version_newer() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let queue_file = temp_dir.path().join(".ergatai").join(".scheduler-queue.json");
+        tokio::fs::create_dir_all(queue_file.parent().unwrap())
+            .await
+            .unwrap();
+        // Version 999 (way ahead) should clear queue
+        let newer = r#"{
+            "version": 999,
+            "tasks": [{"task_id":"t1","plan_file":"p.md","target_agent":"a","submitted_at":1,"priority":1}]
+        }"#;
+        tokio::fs::write(&queue_file, newer).await.unwrap();
+
+        let scheduler = TaskScheduler::new(temp_dir.path().to_path_buf(), ScheduleStrategy::WaitForAgent);
+        scheduler.load_from_disk().await.unwrap();
+        assert_eq!(scheduler.pending_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_load_from_disk_idempotent_does_not_overwrite_existing() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        tokio::fs::create_dir_all(temp_dir.path().join(".ergatai"))
+            .await
+            .unwrap();
+        let scheduler = TaskScheduler::new(temp_dir.path().to_path_buf(), ScheduleStrategy::WaitForAgent);
+
+        // Pre-populate in memory
+        scheduler.pending_tasks.lock().await.push(PendingTask {
+            task_id: "in-memory".to_string(),
+            plan_file: PathBuf::from("x.md"),
+            target_agent: "alice".to_string(),
+            submitted_at: 0,
+            priority: 1,
+        });
+
+        // Save a conflicting file
+        scheduler.pending_tasks.lock().await.clear();
+        scheduler.pending_tasks.lock().await.push(PendingTask {
+            task_id: "on-disk".to_string(),
+            plan_file: PathBuf::from("y.md"),
+            target_agent: "bob".to_string(),
+            submitted_at: 0,
+            priority: 1,
+        });
+        scheduler.save_to_disk().await.unwrap();
+
+        // Restore in-memory task
+        scheduler.pending_tasks.lock().await.clear();
+        scheduler.pending_tasks.lock().await.push(PendingTask {
+            task_id: "in-memory".to_string(),
+            plan_file: PathBuf::from("x.md"),
+            target_agent: "alice".to_string(),
+            submitted_at: 0,
+            priority: 1,
+        });
+
+        // load_from_disk should not overwrite existing in-memory state
+        scheduler.load_from_disk().await.unwrap();
+        let tasks = scheduler.list_pending().await;
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].task_id, "in-memory");
+    }
+
+    #[tokio::test]
+    async fn test_process_pending_with_no_tasks_is_zero() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        tokio::fs::create_dir_all(temp_dir.path().join(".ergatai"))
+            .await
+            .unwrap();
+        let scheduler = TaskScheduler::new(temp_dir.path().to_path_buf(), ScheduleStrategy::WaitForAgent);
+        let count = scheduler.process_pending().await.unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_process_pending_sorts_by_priority_then_time() {
+        // Test the sorting logic by directly manipulating the pending queue
+        // and verifying the ordering.
+        let temp_dir = tempfile::tempdir().unwrap();
+        tokio::fs::create_dir_all(temp_dir.path().join(".ergatai"))
+            .await
+            .unwrap();
+        let scheduler = TaskScheduler::new(temp_dir.path().to_path_buf(), ScheduleStrategy::WaitForAgent);
+
+        {
+            let mut pending = scheduler.pending_tasks.lock().await;
+            pending.push(PendingTask {
+                task_id: "low-prio".to_string(),
+                plan_file: PathBuf::from("/nonexistent/plan1.md"), // will fail to parse
+                target_agent: "a".to_string(),
+                submitted_at: 10,
+                priority: 5,
+            });
+            pending.push(PendingTask {
+                task_id: "high-prio".to_string(),
+                plan_file: PathBuf::from("/nonexistent/plan2.md"), // will fail to parse
+                target_agent: "b".to_string(),
+                submitted_at: 20,
+                priority: 1,
+            });
+        }
+
+        // process_pending will fail to parse (nonexistent plan files) but the
+        // order should have been: high-prio first, then low-prio. Since both fail,
+        // both go back into remaining and end up in the queue.
+        let count = scheduler.process_pending().await.unwrap();
+        assert_eq!(count, 0);
+        // Both tasks should still be queued (failed to parse)
+        assert_eq!(scheduler.pending_count().await, 2);
+    }
+
+    #[tokio::test]
+    async fn test_cancel_task_persists_to_disk() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        tokio::fs::create_dir_all(temp_dir.path().join(".ergatai"))
+            .await
+            .unwrap();
+        let scheduler = TaskScheduler::new(temp_dir.path().to_path_buf(), ScheduleStrategy::WaitForAgent);
+        scheduler.pending_tasks.lock().await.push(PendingTask {
+            task_id: "t1".to_string(),
+            plan_file: PathBuf::from("p.md"),
+            target_agent: "alice".to_string(),
+            submitted_at: 0,
+            priority: 1,
+        });
+        scheduler.cancel_task("t1").await.unwrap();
+
+        // Verify disk state matches
+        let scheduler2 = TaskScheduler::new(temp_dir.path().to_path_buf(), ScheduleStrategy::WaitForAgent);
+        scheduler2.load_from_disk().await.unwrap();
+        assert_eq!(scheduler2.pending_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_agent_availability_multiple_tasks() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let scheduler = TaskScheduler::new(temp_dir.path().to_path_buf(), ScheduleStrategy::WaitForAgent);
+        {
+            let mut p = scheduler.processing.lock().await;
+            p.push(("t1".to_string(), "alice".to_string()));
+            p.push(("t2".to_string(), "alice".to_string()));
+        }
+        // Should report busy with whichever match is found first
+        let avail = scheduler.check_agent_availability("alice").await;
+        assert!(matches!(avail, AgentAvailability::Busy { .. }));
+    }
 }
