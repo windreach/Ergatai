@@ -285,7 +285,10 @@ impl ErgataiMcpServer {
 
             match bus.publish_agent_message_reliable(&payload).await {
                 Ok(ack) => {
-                    self.send_failures.write().await.remove(&resolved_agent_id);
+                    // NOTE: Don't clear send_failures here — the message is only queued,
+                    // not yet delivered. Actual delivery happens async in the consumer.
+                    // Clearing on publish would defeat the circuit-breaker for NATS-routed
+                    // messages where delivery consistently fails but publish succeeds.
 
                     let response_json = serde_json::json!({
                         "status": "queued",

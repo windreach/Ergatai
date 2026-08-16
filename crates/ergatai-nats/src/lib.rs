@@ -22,8 +22,8 @@ pub use agent_message_stream::{
 };
 pub use connection::NatsConnection;
 pub use dag_event_stream::{
-    all_dag_event_stream_configs, dag_events_stream_config, DAG_EVENTS_CONSUMER, DAG_EVENTS_STREAM,
-    TASK_SUBMISSIONS_CONSUMER,
+    all_dag_event_stream_configs, dag_events_stream_config, init_dag_stream_pull_consumer,
+    DAG_EVENTS_CONSUMER, DAG_EVENTS_STREAM, TASK_SUBMISSIONS_CONSUMER,
 };
 pub use event_bus::EventBus;
 pub use events::{

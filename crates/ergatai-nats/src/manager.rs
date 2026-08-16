@@ -110,13 +110,34 @@ async fn init_jetstream_streams(connection: &NatsConnection) -> ErgataiResult<()
 
     for config in configs {
         let stream_name = config.name.clone();
+        let expected_retention = config.retention;
+        let expected_max_age = config.max_age;
 
         // Use get_or_create_stream for atomic check-and-create.
         // The previous get_stream + create_stream pattern had a TOCTOU race:
         // two concurrent init calls could both fail get_stream and both attempt
         // create_stream, causing one to fail with "stream already exists".
         match jetstream.get_or_create_stream(config).await {
-            Ok(_) => {
+            Ok(mut stream) => {
+                // Verify that an existing stream's config matches what we expect.
+                // get_or_create_stream does NOT update an existing stream's config,
+                // so if retention/max_age drifted between versions, we need to warn.
+                if let Ok(info) = stream.info().await {
+                    let actual_retention = info.config.retention;
+                    let actual_max_age = info.config.max_age;
+                    if actual_retention != expected_retention || actual_max_age != expected_max_age
+                    {
+                        tracing::warn!(
+                            stream = %stream_name,
+                            ?expected_retention,
+                            ?actual_retention,
+                            expected_max_age_secs = expected_max_age.as_secs(),
+                            actual_max_age_secs = actual_max_age.as_secs(),
+                            "Stream config mismatch — existing stream has different settings. \
+                             Delete and recreate the stream to apply new config."
+                        );
+                    }
+                }
                 info!("JetStream stream '{}' ready", stream_name);
             }
             Err(e) => {

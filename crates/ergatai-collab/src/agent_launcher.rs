@@ -636,7 +636,12 @@ Write your results in markdown:
                     .flatten()
                     .map(|s| {
                         if s.len() > 2000 {
-                            s[s.len() - 2000..].to_string()
+                            // Find a safe char boundary to avoid panicking on multi-byte UTF-8
+                            let mut start = s.len() - 2000;
+                            while start > 0 && !s.is_char_boundary(start) {
+                                start -= 1;
+                            }
+                            s[start..].to_string()
                         } else {
                             s
                         }
@@ -778,20 +783,20 @@ Write your results in markdown:
     /// Called at the start of each new DAG run to prevent ghost agents
     /// from previous runs appearing in `get_all_status()` results.
     pub async fn clear_stale_agents(&self) -> ErgataiResult<()> {
-        let stale_agents: Vec<(String, String)> = {
+        let stale_agents: Vec<(String, String, Option<String>)> = {
             let mut agents = self.running_agents.lock().await;
             let stale: Vec<_> = agents
                 .iter()
                 .filter(|(_, a)| {
                     a.status == AgentStatus::Completed || a.status == AgentStatus::Failed
                 })
-                .map(|(id, a)| (id.clone(), a.task_id.clone()))
+                .map(|(id, a)| (id.clone(), a.task_id.clone(), a.token_id.clone()))
                 .collect();
 
             let mut result = Vec::with_capacity(stale.len());
-            for (id, task_id) in stale {
+            for (id, task_id, token_id) in stale {
                 if agents.remove(&id).is_some() {
-                    result.push((id, task_id));
+                    result.push((id, task_id, token_id));
                 }
             }
 
@@ -805,7 +810,7 @@ Write your results in markdown:
 
         // Now clean up agents + tokens without holding the lock
         let runtime = get_agent_runtime();
-        for (agent_id, task_id) in &stale_agents {
+        for (agent_id, task_id, token_id) in &stale_agents {
             // Find and stop via runtime
             let runtime_agent_id = runtime
                 .list_agents()
@@ -828,6 +833,30 @@ Write your results in markdown:
             if let Ok(watchdog) = ergatai_lock::get_watchdog(task_id).await {
                 let watchdog = watchdog.write().await;
                 let _ = watchdog.clear_busy(&session_id).await;
+            }
+
+            // SECURITY: Revoke file access tokens so stale agents don't retain
+            // file write permissions beyond their lifetime (same as cleanup_agent).
+            if let Some(ref token_id) = token_id {
+                match ergatai_lock::get_lock_manager(task_id).await {
+                    Ok(lock_manager) => {
+                        if let Err(e) = lock_manager.expire_token(token_id) {
+                            tracing::warn!(
+                                agent_id = %agent_id,
+                                token_id = %token_id,
+                                error = %e,
+                                "Failed to expire file access token during stale agent cleanup"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::debug!(
+                            agent_id = %agent_id,
+                            error = %e,
+                            "Lock manager not available for token revocation"
+                        );
+                    }
+                }
             }
         }
 

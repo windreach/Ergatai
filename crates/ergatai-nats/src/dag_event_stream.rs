@@ -60,6 +60,55 @@ pub fn all_dag_event_stream_configs() -> Vec<Config> {
     vec![dag_events_stream_config()]
 }
 
+/// Initialize a pull consumer on the DAG_EVENTS stream with the given name and filter.
+///
+/// Shared helper used by both TaskScheduler (task submissions) and DagScheduler (dag events)
+/// to avoid duplicating consumer setup logic.
+pub async fn init_dag_stream_pull_consumer(
+    connection: &crate::NatsConnection,
+    consumer_name: &str,
+    filter_subject: &str,
+) -> Result<
+    futures_util::stream::BoxStream<
+        'static,
+        Result<async_nats::jetstream::Message, Box<dyn std::error::Error + Send + Sync>>,
+    >,
+    String,
+> {
+    use async_nats::jetstream::consumer::{pull, AckPolicy, DeliverPolicy};
+    use futures_util::StreamExt;
+
+    let stream = connection
+        .jetstream()
+        .get_stream(DAG_EVENTS_STREAM)
+        .await
+        .map_err(|e| format!("Stream {} not found: {}", DAG_EVENTS_STREAM, e))?;
+
+    let consumer_config = pull::Config {
+        durable_name: Some(consumer_name.to_string()),
+        filter_subject: filter_subject.to_string(),
+        deliver_policy: DeliverPolicy::All,
+        ack_policy: AckPolicy::Explicit,
+        ack_wait: Duration::from_secs(60),
+        max_deliver: 5,
+        ..Default::default()
+    };
+
+    let consumer = stream
+        .get_or_create_consumer(consumer_name, consumer_config)
+        .await
+        .map_err(|e| format!("Failed to create consumer '{}': {}", consumer_name, e))?;
+
+    let messages = consumer
+        .messages()
+        .await
+        .map_err(|e| format!("Failed to get message stream: {}", e))?;
+
+    Ok(Box::pin(messages.map(|r| {
+        r.map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+    })))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

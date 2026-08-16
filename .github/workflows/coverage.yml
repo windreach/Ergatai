@@ -1,0 +1,84 @@
+name: Coverage
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  coverage:
+    name: Code coverage report
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov --locked
+
+      - name: Cache cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-coverage-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-coverage-
+
+      - name: Generate coverage report
+        run: cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: lcov.info
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
+        continue-on-error: true  # Don't fail if Codecov is unavailable
+
+      - name: Generate HTML coverage report
+        run: cargo llvm-cov --workspace --all-features --html
+
+      - name: Upload coverage artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: target/llvm-cov/html/
+          retention-days: 7
+
+      - name: Check coverage threshold
+        run: |
+          # Get coverage percentage with error handling
+          COVERAGE_OUTPUT=$(cargo llvm-cov --workspace --all-features --summary-only)
+          COVERAGE=$(echo "$COVERAGE_OUTPUT" | grep -oP '\d+\.\d+%' | head -1 | tr -d '%' || echo "")
+
+          if [ -z "$COVERAGE" ]; then
+            echo "❌ Failed to parse coverage output"
+            echo "Output was: $COVERAGE_OUTPUT"
+            exit 1
+          fi
+
+          echo "Coverage: ${COVERAGE}%"
+
+          # Set minimum threshold (adjust as needed)
+          MIN_COVERAGE=50.0
+
+          if (( $(echo "$COVERAGE < $MIN_COVERAGE" | bc -l) )); then
+            echo "❌ Coverage ${COVERAGE}% is below threshold ${MIN_COVERAGE}%"
+            echo "Please add more tests to improve coverage."
+            exit 1
+          else
+            echo "✅ Coverage ${COVERAGE}% meets threshold ${MIN_COVERAGE}%"
+          fi

@@ -8,6 +8,7 @@
 //! where tmux is not available.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -27,12 +28,17 @@ const EXIT_POLL_INTERVAL: Duration = Duration::from_secs(1);
 pub struct DirectProcessBackend {
     /// Base directory for workspace directories.
     work_dir_base: std::path::PathBuf,
+    /// Exit code slots keyed by PID string — populated by monitor tasks when processes exit.
+    exit_codes: Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<Option<i32>>>>>>,
 }
 
 impl DirectProcessBackend {
     /// Create a new backend with the given base working directory.
     pub fn new(work_dir_base: std::path::PathBuf) -> Self {
-        Self { work_dir_base }
+        Self {
+            work_dir_base,
+            exit_codes: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        }
     }
 }
 
@@ -146,9 +152,28 @@ impl AgentRuntimeBackend for DirectProcessBackend {
             }
         }
 
-        drop(child);
+        // Spawn a monitor task that holds the Child handle and waits for exit,
+        // recording the real exit code in a shared slot. This prevents zombies
+        // and allows wait_for_exit to report the actual exit code.
+        let exit_code = Arc::new(tokio::sync::Mutex::new(None));
+        let exit_code_clone = exit_code.clone();
+        let agent_id_for_monitor = format!("agent-{}", uuid::Uuid::new_v4());
+        tokio::spawn(async move {
+            let code = match child.wait().await {
+                Ok(status) => status.code().unwrap_or(-1),
+                Err(_) => -1,
+            };
+            *exit_code_clone.lock().await = Some(code);
+            debug!(pid = pid, exit_code = code, "Process exited");
+        });
 
-        let agent_id = format!("agent-{}", uuid::Uuid::new_v4());
+        let agent_id = agent_id_for_monitor;
+
+        // Register the exit code slot so wait_for_exit can retrieve the real code
+        self.exit_codes
+            .lock()
+            .await
+            .insert(pid.to_string(), exit_code);
 
         info!(pid = pid, agent_id = agent_id, "Agent process started");
 
@@ -266,7 +291,21 @@ impl AgentRuntimeBackend for DirectProcessBackend {
 
         loop {
             if !self.is_alive(handle).await? {
-                return Ok(WaitResult::Exited { code: 0 });
+                // Retrieve the real exit code from the monitor task's slot
+                let code = if let Some(pid) = &handle.process_id {
+                    let codes = self.exit_codes.lock().await;
+                    codes
+                        .get(pid)
+                        .and_then(|slot| {
+                            // Try to read without blocking — if the monitor hasn't
+                            // recorded the code yet, it will shortly
+                            slot.try_lock().ok().and_then(|guard| *guard)
+                        })
+                        .unwrap_or(-1)
+                } else {
+                    -1
+                };
+                return Ok(WaitResult::Exited { code });
             }
 
             if let Some(timeout) = timeout {

@@ -266,4 +266,4 @@ Ergatai 在中间作为消息 relay，让 agents 可以互相通信。
 
 ## 更多问题？
 
-查看 [完整文档](https://github.com/ergatai/ergatai) 或提交 Issue。
+查看 [完整文档](https://github.com/windreach/Ergatai) 或提交 Issue。

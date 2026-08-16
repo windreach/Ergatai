@@ -18,7 +18,9 @@ version = "0.1.0"
 edition = "2021"
 authors = ["Ergatai Team"]
 license = "Apache-2.0"
-repository = "https://github.com/ergatai/ergatai"
+repository = "https://github.com/windreach/Ergatai"
+homepage = "https://github.com/windreach/Ergatai"
+documentation = "https://docs.rs/ergatai-core"
 
 [workspace.dependencies]
 # Async runtime

@@ -3,11 +3,11 @@
 //! Spawns nats-server binary as a child process and manages its lifecycle.
 
 use std::path::PathBuf;
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::time::Duration;
 
-use tokio::time::sleep;
+use tokio::time::{sleep, timeout};
 use tracing::{error, info, warn};
 
 use ergatai_error::{ErgataiError, ErgataiResult};
@@ -19,13 +19,19 @@ const DEFAULT_PORT: u16 = 4222;
 const MAX_PORT_ATTEMPTS: u16 = 10;
 
 /// Time to wait for nats-server to start (milliseconds)
-const STARTUP_WAIT_MS: u64 = 200;
+const STARTUP_WAIT_MS: u64 = 500;
+
+/// Maximum time to wait for NATS server to be ready to accept connections (seconds)
+const READINESS_TIMEOUT_SECS: u64 = 10;
 
 /// Maximum number of retry attempts when port binding fails
 const MAX_BIND_RETRIES: u32 = 3;
 
 /// Delay between bind retries (milliseconds)
-const BIND_RETRY_DELAY_MS: u64 = 50;
+const BIND_RETRY_DELAY_MS: u64 = 100;
+
+/// Delay between readiness check attempts (milliseconds)
+const READINESS_CHECK_INTERVAL_MS: u64 = 100;
 
 /// NATS server process manager
 ///
@@ -65,6 +71,8 @@ impl NatsServer {
                         ErgataiError::internal("Invalid NATS store directory path")
                     })?,
                 ])
+                .stderr(Stdio::piped())
+                .stdout(Stdio::null())
                 .spawn()
             {
                 Ok(mut child) => {
@@ -72,25 +80,59 @@ impl NatsServer {
 
                     match child.try_wait() {
                         Ok(Some(status)) => {
-                            warn!(port = port, status = %status, attempt = attempt + 1, "nats-server exited prematurely, retrying with different port");
-                            last_error =
-                                Some(format!("nats-server exited with status: {}", status));
+                            // Process exited - read stderr to see why
+                            let stderr_output = if let Some(mut stderr) = child.stderr.take() {
+                                use std::io::Read;
+                                let mut buffer = String::new();
+                                let _ = stderr.read_to_string(&mut buffer);
+                                buffer
+                            } else {
+                                String::new()
+                            };
+
+                            warn!(
+                                port = port,
+                                status = %status,
+                                stderr = %stderr_output,
+                                attempt = attempt + 1,
+                                "nats-server exited prematurely"
+                            );
+                            last_error = Some(format!(
+                                "nats-server exited with status: {}, stderr: {}",
+                                status, stderr_output
+                            ));
                             sleep(Duration::from_millis(BIND_RETRY_DELAY_MS)).await;
                             continue;
                         }
                         Ok(None) => {
-                            info!(port = port, "nats-server started successfully");
-                            return Ok(Self {
-                                child: Some(child),
-                                port,
-                            });
+                            // Process is running - now wait for it to be ready to accept connections
+                            info!(port = port, "nats-server process started, waiting for readiness...");
+
+                            match Self::wait_for_ready(port).await {
+                                Ok(()) => {
+                                    info!(port = port, "nats-server is ready to accept connections");
+                                    return Ok(Self {
+                                        child: Some(child),
+                                        port,
+                                    });
+                                }
+                                Err(e) => {
+                                    warn!(port = port, error = %e, "nats-server failed to become ready");
+                                    last_error = Some(format!("nats-server not ready: {}", e));
+                                    // Kill the unresponsive process
+                                    let _ = child.kill();
+                                    let _ = child.wait();
+                                    sleep(Duration::from_millis(BIND_RETRY_DELAY_MS)).await;
+                                    continue;
+                                }
+                            }
                         }
                         Err(e) => {
-                            warn!(error = %e, "Failed to check nats-server status");
-                            return Ok(Self {
-                                child: Some(child),
-                                port,
-                            });
+                            warn!(error = %e, "Failed to check nats-server status, killing process");
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            last_error = Some(format!("Failed to check status: {}", e));
+                            sleep(Duration::from_millis(BIND_RETRY_DELAY_MS)).await;
                         }
                     }
                 }
@@ -107,6 +149,39 @@ impl NatsServer {
             MAX_BIND_RETRIES,
             last_error.unwrap_or_else(|| "Unknown error".to_string())
         )))
+    }
+
+    /// Wait for NATS server to be ready to accept connections
+    ///
+    /// Attempts to connect to the server with retries until timeout.
+    async fn wait_for_ready(port: u16) -> ErgataiResult<()> {
+        let url = format!("127.0.0.1:{}", port);
+        let timeout_duration = Duration::from_secs(READINESS_TIMEOUT_SECS);
+        let check_interval = Duration::from_millis(READINESS_CHECK_INTERVAL_MS);
+
+        timeout(timeout_duration, async {
+            loop {
+                // Try to connect to NATS
+                match async_nats::connect(&url).await {
+                    Ok(client) => {
+                        // Connection succeeded - server is ready
+                        client.flush().await.ok();
+                        return Ok(());
+                    }
+                    Err(_) => {
+                        // Connection failed - wait and retry
+                        sleep(check_interval).await;
+                    }
+                }
+            }
+        })
+        .await
+        .map_err(|_| {
+            ErgataiError::internal(format!(
+                "nats-server failed to become ready within {}s",
+                READINESS_TIMEOUT_SECS
+            ))
+        })?
     }
 
     /// Start a new nats-server instance
@@ -249,8 +324,18 @@ impl NatsServer {
 /// causes port conflicts), all tests share a single server instance.
 /// Tests isolate data via unique stream/consumer names.
 ///
-/// Uses a Mutex<Option<>> for lazy init + Box::leak to keep the server alive
-/// until process exit (the child process is never dropped/killed).
+/// # Lifecycle
+///
+/// Uses `Box::leak` to keep the server alive until process exit. This is intentional:
+/// - The NATS child process lives for the entire test run
+/// - Drop is never called on the leaked server (by design)
+/// - When the test process exits, the OS cleans up child processes
+///
+/// **Note**: If tests are interrupted (Ctrl+C, timeout), NATS processes may remain
+/// as zombies until manually cleaned up. This is acceptable for test scenarios.
+///
+/// For production use, create `NatsServer` instances directly (not via this function)
+/// so Drop can properly clean up resources.
 static SHARED_TEST_SERVER: Mutex<Option<&'static NatsServer>> = Mutex::new(None);
 
 /// Get a shared nats-server for testing.
@@ -260,18 +345,16 @@ static SHARED_TEST_SERVER: Mutex<Option<&'static NatsServer>> = Mutex::new(None)
 /// Returns the same instance on subsequent calls.
 /// The server process lives until the test process exits.
 ///
-/// Note: Holds std::sync::Mutex across async operation, which is acceptable here because:
-/// 1. This is test-only code with one-time initialization
-/// 2. Prevents race condition where multiple threads create zombie NATS processes
-#[allow(clippy::await_holding_lock)]
+/// Fixed: Release lock before async operations to prevent deadlock.
 pub async fn shared_test_server() -> ErgataiResult<&'static NatsServer> {
-    // Hold lock throughout initialization to prevent race condition
-    let mut guard = SHARED_TEST_SERVER.lock().unwrap();
-
-    // Check if already initialized
-    if let Some(server) = *guard {
-        return Ok(server);
+    // Check if already initialized (quick path without holding lock during async)
+    {
+        let guard = SHARED_TEST_SERVER.lock().unwrap();
+        if let Some(server) = *guard {
+            return Ok(server);
+        }
     }
+    // Lock released here before async operation
 
     // Start server with a unique temp store directory
     let store_dir = std::env::temp_dir()
@@ -283,6 +366,12 @@ pub async fn shared_test_server() -> ErgataiResult<&'static NatsServer> {
     let server = NatsServer::start_with_store_dir(store_dir).await?;
     let leaked: &'static NatsServer = Box::leak(Box::new(server));
 
+    // Re-acquire lock to store the server
+    let mut guard = SHARED_TEST_SERVER.lock().unwrap();
+    // Double-check in case another thread initialized while we were starting the server
+    if let Some(existing) = *guard {
+        return Ok(existing);
+    }
     *guard = Some(leaked);
     Ok(leaked)
 }
@@ -291,12 +380,44 @@ impl Drop for NatsServer {
     fn drop(&mut self) {
         if let Some(mut child) = self.child.take() {
             info!(port = self.port, "Killing nats-server");
+
+            // Try to kill the process
             if let Err(e) = child.kill() {
-                error!(error = %e, "Failed to kill nats-server");
+                error!(error = %e, port = self.port, "Failed to kill nats-server");
+                return;
             }
-            // Reap the child process to prevent zombie
-            if let Err(e) = child.wait() {
-                error!(error = %e, "Failed to wait for nats-server");
+
+            // Wait for process to exit with a timeout to prevent hanging
+            // Use a simple loop with sleep since we can't use tokio timeout in Drop
+            const DROP_MAX_WAIT_MS: u64 = 5000; // 5 seconds
+            const DROP_CHECK_INTERVAL_MS: u64 = 100;
+            let mut waited_ms = 0;
+
+            loop {
+                match child.try_wait() {
+                    Ok(Some(_)) => {
+                        // Process exited successfully
+                        info!(port = self.port, "nats-server process exited");
+                        return;
+                    }
+                    Ok(None) => {
+                        // Still running
+                        if waited_ms >= DROP_MAX_WAIT_MS {
+                            warn!(
+                                port = self.port,
+                                waited_ms = waited_ms,
+                                "nats-server did not exit within timeout, leaving as zombie"
+                            );
+                            return;
+                        }
+                        std::thread::sleep(Duration::from_millis(DROP_CHECK_INTERVAL_MS));
+                        waited_ms += DROP_CHECK_INTERVAL_MS;
+                    }
+                    Err(e) => {
+                        error!(error = %e, port = self.port, "Error waiting for nats-server to exit");
+                        return;
+                    }
+                }
             }
         }
     }

@@ -61,12 +61,12 @@ pub fn start_message_delivery_consumer(
     tokio::spawn(async move {
         info!("Message delivery consumer starting");
 
-        // Initialize the pull consumer inline (pull::Consumer is private,
-        // so we cannot name its type in a function signature).
-        let messages = match init_pull_consumer(&connection).await {
+        // Initialize the pull consumer with retry — the AGENT_MESSAGES stream may
+        // not be ready yet during early startup. Retry up to 10 times with backoff.
+        let messages = match init_pull_consumer_with_retry(&connection, &cancel).await {
             Ok(m) => m,
             Err(e) => {
-                error!(error = %e, "Failed to initialize message delivery consumer");
+                error!(error = %e, "Failed to initialize message delivery consumer after retries");
                 return;
             }
         };
@@ -104,14 +104,15 @@ async fn init_pull_consumer(
 
     // Durable pull consumer with explicit ack.
     // - `ack_wait: 30s` — consumer has 30s to deliver before redelivery
-    // - `max_deliver: 5` — after 5 failed attempts, message is discarded
+    // - `max_deliver: 20` — after 20 failed attempts, message is discarded by JetStream
+    //   (the consumer logs the final discard so operators can detect message loss)
     // - `deliver_policy: All` — start from beginning of stream (catch up on missed)
     let consumer_config = pull::Config {
         durable_name: Some(CONSUMER_NAME.to_string()),
         deliver_policy: DeliverPolicy::All,
         ack_policy: AckPolicy::Explicit,
         ack_wait: Duration::from_secs(30),
-        max_deliver: 5,
+        max_deliver: 20,
         ..Default::default()
     };
 
@@ -130,6 +131,49 @@ async fn init_pull_consumer(
     Ok(Box::pin(messages.map(|r| {
         r.map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
     })))
+}
+
+/// Initialize the pull consumer with retry logic.
+///
+/// During early startup the AGENT_MESSAGES stream may not exist yet. Instead of
+/// failing immediately and leaving the system without message delivery, retry
+/// up to 10 times with exponential backoff (500ms → 30s cap).
+async fn init_pull_consumer_with_retry(
+    connection: &NatsConnection,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> ErgataiResult<
+    futures::stream::BoxStream<
+        'static,
+        Result<async_nats::jetstream::Message, Box<dyn std::error::Error + Send + Sync>>,
+    >,
+> {
+    let mut delay = Duration::from_millis(500);
+    let max_delay = Duration::from_secs(30);
+
+    for attempt in 1..=10 {
+        match init_pull_consumer(connection).await {
+            Ok(stream) => return Ok(stream),
+            Err(e) => {
+                if attempt == 10 {
+                    return Err(e);
+                }
+                warn!(
+                    attempt = attempt,
+                    error = %e,
+                    delay_ms = delay.as_millis() as u64,
+                    "Consumer init failed, retrying"
+                );
+                tokio::select! {
+                    _ = cancel.cancelled() => {
+                        return Err(ErgataiError::NatsError("Cancelled during consumer init retry".to_string()));
+                    }
+                    _ = tokio::time::sleep(delay) => {}
+                }
+                delay = (delay * 2).min(max_delay);
+            }
+        }
+    }
+    unreachable!()
 }
 
 /// Main message processing loop.
@@ -198,6 +242,19 @@ async fn handle_message(msg: &async_nats::jetstream::Message, peer_registry: &Pe
     let from = &payload.from_agent;
     let to = &payload.to_agent;
 
+    // Warn on redeliveries — indicates a prior delivery attempt may have succeeded
+    // but the ack failed, or the consumer restarted mid-delivery.
+    if let Ok(info) = msg.info() {
+        if info.delivered > 1 {
+            warn!(
+                from = from,
+                to = to,
+                delivery_count = info.delivered,
+                "Message redelivered — possible duplicate. Prior ack may have failed."
+            );
+        }
+    }
+
     debug!(
         from = from,
         to = to,
@@ -230,9 +287,16 @@ async fn handle_message(msg: &async_nats::jetstream::Message, peer_registry: &Pe
 
     // ── Attempt 2: Direct MCP custom notification (fallback) ──
     // This is used when the target agent is not tracked by AgentRuntime
-    // but has a direct MCP connection
-    match send_mcp_notification(to, &payload, peer_registry).await {
-        Ok(()) => {
+    // but has a direct MCP connection. Wrapped in a timeout to prevent
+    // blocking the consumer beyond ack_wait (30s) if the peer is slow.
+    let delivery_timeout = Duration::from_secs(10);
+    match tokio::time::timeout(
+        delivery_timeout,
+        send_mcp_notification(to, &payload, peer_registry),
+    )
+    .await
+    {
+        Ok(Ok(())) => {
             info!(
                 from = from,
                 to = to,
@@ -242,7 +306,7 @@ async fn handle_message(msg: &async_nats::jetstream::Message, peer_registry: &Pe
                 warn!("Failed to ack MCP delivery: {}", e);
             }
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             warn!(
                 from = from,
                 to = to,
@@ -251,6 +315,17 @@ async fn handle_message(msg: &async_nats::jetstream::Message, peer_registry: &Pe
             );
             if let Err(nak_err) = msg.ack_with(AckKind::Nak(None)).await {
                 error!("Failed to nak message: {}", nak_err);
+            }
+        }
+        Err(_) => {
+            warn!(
+                from = from,
+                to = to,
+                timeout_secs = delivery_timeout.as_secs(),
+                "MCP notification timed out — naking for retry"
+            );
+            if let Err(nak_err) = msg.ack_with(AckKind::Nak(None)).await {
+                error!("Failed to nak message after timeout: {}", nak_err);
             }
         }
     }

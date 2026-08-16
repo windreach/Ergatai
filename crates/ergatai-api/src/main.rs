@@ -488,7 +488,7 @@ async fn readiness_check() -> impl IntoResponse {
     let nats_ready = nats::is_nats_initialized().await
         && nats::get_nats_connection()
             .await
-            .map(|c| c.is_connected())
+            .map(|c| c.is_ready())
             .unwrap_or(false);
 
     if nats_ready {

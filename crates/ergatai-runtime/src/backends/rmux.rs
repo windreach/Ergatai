@@ -646,9 +646,14 @@ impl AgentRuntimeBackend for RmuxBackend {
 
     async fn is_alive(&self, handle: &AgentHandle) -> ErgataiResult<bool> {
         let key = handle.agent_id.clone();
-        let panes = self.panes.read().await;
-        let Some(pane) = panes.get(&key) else {
-            return Ok(false);
+        // Clone the pane handle out of the map, then drop the read guard
+        // before making async calls to avoid blocking writers.
+        let pane = {
+            let panes = self.panes.read().await;
+            match panes.get(&key) {
+                Some(pane) => pane.clone(),
+                None => return Ok(false),
+            }
         };
 
         // Check if the pane's foreground process is still running.

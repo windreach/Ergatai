@@ -665,12 +665,43 @@ impl Default for TmuxManager {
 impl Drop for TmuxManager {
     fn drop(&mut self) {
         let agent_count = self.agents.try_read().map(|a| a.len()).unwrap_or(0);
+
         if agent_count > 0 {
             warn!(
                 "TmuxManager dropped with {} agents still registered in session '{}'. \
-                 Panes were NOT cleaned up — call kill_session() explicitly.",
+                 Attempting cleanup...",
                 agent_count, self.default_session
             );
+
+            // Try to clean up the tmux session synchronously
+            // Use std::process::Command since we're in a synchronous Drop context
+            let result = std::process::Command::new("tmux")
+                .args(&["kill-session", "-t", &self.default_session])
+                .output();
+
+            match result {
+                Ok(output) if output.status.success() => {
+                    info!(
+                        session = %self.default_session,
+                        "Successfully cleaned up tmux session on drop"
+                    );
+                }
+                Ok(output) => {
+                    warn!(
+                        session = %self.default_session,
+                        status = %output.status,
+                        stderr = %String::from_utf8_lossy(&output.stderr),
+                        "Failed to kill tmux session on drop (may already be gone)"
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        session = %self.default_session,
+                        error = %e,
+                        "Failed to execute tmux command on drop"
+                    );
+                }
+            }
         }
     }
 }

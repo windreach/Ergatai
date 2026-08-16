@@ -161,16 +161,26 @@ impl NatsConnection {
     ///
     /// Uses the async-nats connection state to determine if the client is connected.
     /// Returns true if the client exists and hasn't been explicitly closed.
+    /// Treats both Pending (initial connect) and Connected as healthy — only
+    /// Disconnected means truly unusable.
     pub fn is_connected(&self) -> bool {
-        // async-nats 0.38 exposes only three states: Pending (initial connect),
-        // Connected, and Disconnected (explicitly closed). We treat Pending and
-        // Connected as healthy — Pending covers the transient startup window,
-        // and async-nats handles reconnects internally without surfacing them
-        // as distinct states. Only Disconnected means truly unusable.
         matches!(
             self.client.connection_state(),
             async_nats::connection::State::Connected
                 | async_nats::connection::State::Pending
+        )
+    }
+
+    /// Check if connection is fully ready for operations
+    ///
+    /// Unlike `is_connected()`, this only returns true when the connection is
+    /// in the `Connected` state — not during the initial `Pending` handshake.
+    /// Use this for readiness probes that need to verify the connection can
+    /// actually send/receive messages right now.
+    pub fn is_ready(&self) -> bool {
+        matches!(
+            self.client.connection_state(),
+            async_nats::connection::State::Connected
         )
     }
 

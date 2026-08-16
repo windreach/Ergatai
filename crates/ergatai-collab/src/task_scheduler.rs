@@ -633,46 +633,13 @@ async fn init_task_submission_consumer(
         Result<async_nats::jetstream::Message, Box<dyn std::error::Error + Send + Sync>>,
     >,
 > {
-    use async_nats::jetstream::consumer::{pull, AckPolicy, DeliverPolicy};
-    use futures_util::StreamExt;
-
-    let stream = connection
-        .jetstream()
-        .get_stream(ergatai_nats::DAG_EVENTS_STREAM)
-        .await
-        .map_err(|e| {
-            ErgataiError::NatsError(format!(
-                "Stream {} not found: {}",
-                ergatai_nats::DAG_EVENTS_STREAM,
-                e
-            ))
-        })?;
-
-    let consumer_config = pull::Config {
-        durable_name: Some(ergatai_nats::TASK_SUBMISSIONS_CONSUMER.to_string()),
-        filter_subject: "ergatai.task.submit.*".to_string(),
-        deliver_policy: DeliverPolicy::All,
-        ack_policy: AckPolicy::Explicit,
-        ack_wait: std::time::Duration::from_secs(60),
-        max_deliver: 5,
-        ..Default::default()
-    };
-
-    let consumer = stream
-        .get_or_create_consumer(ergatai_nats::TASK_SUBMISSIONS_CONSUMER, consumer_config)
-        .await
-        .map_err(|e| {
-            ErgataiError::NatsError(format!("Failed to create task submission consumer: {}", e))
-        })?;
-
-    let messages = consumer
-        .messages()
-        .await
-        .map_err(|e| ErgataiError::NatsError(format!("Failed to get message stream: {}", e)))?;
-
-    Ok(Box::pin(messages.map(|r| {
-        r.map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
-    })))
+    ergatai_nats::init_dag_stream_pull_consumer(
+        connection,
+        ergatai_nats::TASK_SUBMISSIONS_CONSUMER,
+        "ergatai.task.submit.*",
+    )
+    .await
+    .map_err(|e| ErgataiError::NatsError(e))
 }
 
 /// Global scheduler instance
