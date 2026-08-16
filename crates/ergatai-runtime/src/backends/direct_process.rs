@@ -48,6 +48,10 @@ impl AgentRuntimeBackend for DirectProcessBackend {
         "direct-process"
     }
 
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn capabilities(&self) -> BackendCapabilities {
         BackendCapabilities {
             supports_message_injection: false,

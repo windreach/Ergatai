@@ -408,7 +408,7 @@ async fn async_main(args: Args) -> Result<()> {
         // TODO(middleware): Re-enable after HTTP client migration
         // .route("/api/v1/chat", post(create_chat))
         // .route("/api/v1/agents", get(list_agents))
-        .route("/api/v1/status", get(get_status))
+        .route("/api/v1/status", get(api::status::get_status))
         .route("/api/v1/dag", post(submit_dag))
         .route("/api/v1/dag/status", get(dag_status))
         // MCP Streamable HTTP endpoint (POST/GET/DELETE /mcp)
@@ -589,13 +589,6 @@ struct AgentSummary {
 }
 
 #[derive(Debug, Serialize)]
-struct StatusResponse {
-    nats_initialized: bool,
-    nats_port: Option<u16>,
-    active_agents: usize,
-}
-
-#[derive(Debug, Serialize)]
 struct DagStatusResponse {
     running: bool,
     progress: Option<f32>,
@@ -681,30 +674,6 @@ fn validate_cwd(cwd: &str) -> Result<PathBuf, String> {
 // TODO(middleware): Re-enable after HTTP client migration
 // POST /api/v1/chat and GET /api/v1/agents are disabled in middleware mode.
 // Agents now connect via MCP and are tracked in AgentRegistry.
-
-/// GET /api/v1/status — system status snapshot.
-///
-/// Returns NATS connectivity status and connected agent count.
-async fn get_status() -> impl IntoResponse {
-    // Record status request metric
-    metrics::counter!("api_requests_total", "endpoint" => "status").increment(1);
-
-    let nats_initialized = nats::is_nats_initialized().await;
-    let nats_port = nats::get_nats_server_port().await;
-
-    let active_agents = ergatai_core::agent_registry::agent_registry()
-        .active_count()
-        .await;
-
-    // Record active agents gauge
-    metrics::gauge!("active_agents").set(active_agents as f64);
-
-    Json(StatusResponse {
-        nats_initialized,
-        nats_port,
-        active_agents,
-    })
-}
 
 /// POST /api/v1/dag — submit a DAG workflow for execution.
 ///

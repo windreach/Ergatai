@@ -28,6 +28,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use serde::Serialize;
 use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, info, warn};
 
@@ -1096,7 +1097,7 @@ impl RmuxBackend {
 ///
 /// Contains both local tracking state (what this backend instance manages)
 /// and real daemon state (queried from the rmux daemon on each call).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct RmuxDaemonInfo {
     /// Whether the daemon binary can be located (env var → bundled → PATH).
     pub binary_available: bool,
@@ -1119,7 +1120,7 @@ pub struct RmuxDaemonInfo {
 }
 
 /// Details for a single pane managed by this backend, queried from the daemon.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ManagedPaneInfo {
     /// Session name this pane belongs to (e.g., "ergatai-task-123").
     pub session_name: String,
@@ -1145,6 +1146,10 @@ pub struct ManagedPaneInfo {
 impl AgentRuntimeBackend for RmuxBackend {
     fn name(&self) -> &'static str {
         "rmux"
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 
     fn capabilities(&self) -> BackendCapabilities {

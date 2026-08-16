@@ -79,4 +79,11 @@ pub trait AgentRuntimeBackend: Send + Sync + 'static {
 
     /// Cleanup all resources (shutdown).
     async fn shutdown(&self) -> ErgataiResult<()>;
+
+    /// Return self as `&dyn Any` to enable downcasting through the trait object.
+    ///
+    /// Each concrete backend implements this as `fn as_any(&self) -> &dyn Any { self }`.
+    /// Required because casting `&dyn AgentRuntimeBackend` directly to `&dyn Any` is
+    /// not allowed (trait objects are not `Sized`).
+    fn as_any(&self) -> &dyn std::any::Any;
 }
