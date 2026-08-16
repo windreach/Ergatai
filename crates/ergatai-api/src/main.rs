@@ -33,6 +33,7 @@ use tower_governor::{governor::GovernorConfigBuilder, key_extractor::KeyExtracto
 
 // MCP module
 mod mcp;
+mod api;
 use mcp::{create_mcp_service, start_message_delivery_consumer, start_peer_reaper};
 
 /// Shared application state available to all handlers.
