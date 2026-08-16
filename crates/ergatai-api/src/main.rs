@@ -11,9 +11,10 @@
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use anyhow::Result;
+use tokio::sync::broadcast;
 use axum::{
     body::Body,
     extract::State,
@@ -44,16 +45,22 @@ struct AppState {
     /// Optional API token for authentication. If set, all requests must include
     /// an `Authorization: Bearer <token>` header.
     api_token: Option<String>,
+    /// Broadcast channel for WebSocket event broadcasting (CLI status monitoring).
+    event_tx: Arc<broadcast::Sender<serde_json::Value>>,
 }
 
 static APP_STATE: OnceLock<AppState> = OnceLock::new();
 
 fn app_state_with_token(token: Option<String>) -> &'static AppState {
-    APP_STATE.get_or_init(|| AppState {
-        default_cwd: std::env::current_dir()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|_| ".".to_string()),
-        api_token: token,
+    APP_STATE.get_or_init(|| {
+        let (event_tx, _) = broadcast::channel(1024);
+        AppState {
+            default_cwd: std::env::current_dir()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| ".".to_string()),
+            api_token: token,
+            event_tx: Arc::new(event_tx),
+        }
     })
 }
 
@@ -165,18 +172,26 @@ fn setup_env_before_runtime() -> Args {
         unsafe { std::env::set_var("RUST_LOG", "debug") };
     }
 
-    // Locate rmux-daemon binary and set RMUX_SDK_DAEMON_BINARY env var.
+    // rmux is the primary infrastructure — locate daemon and auto-start if needed.
     // Must happen before tokio runtime because it calls std::env::set_var.
-    // If the daemon isn't found, log a warning but don't fail — the tmux
-    // backend remains available as a fallback.
-    match ergatai_binary::configure_rmux_daemon() {
+    //
+    // Search order:
+    // 1. ERGATAI_RMUX_BINARY environment variable
+    // 2. Bundled resources (downloaded by build.rs)
+    // 3. Sibling directory (next to ergatai-api binary)
+    // 4. System PATH (development fallback)
+    match ergatai_binary::ensure_rmux_daemon(true) {
         Ok(path) => {
-            tracing::info!(path = %path.display(), "rmux-daemon configured");
+            tracing::info!(path = %path.display(), "rmux-daemon ready");
         }
         Err(e) => {
-            tracing::warn!(
-                "rmux-daemon not found ({}). Falling back to tmux backend. \
-                 Install rmux-daemon or set ERGATAI_RMUX_BINARY to enable rmux.",
+            // rmux is required for production use. If not found, the backend will
+            // fail to initialize. We log the error but continue so the user sees
+            // a clear error message from the backend initialization.
+            tracing::error!(
+                "rmux-daemon not found: {}. \
+                 Ergatai requires rmux as its terminal multiplexer infrastructure. \
+                 The daemon should be bundled with the release, or set ERGATAI_RMUX_BINARY.",
                 e
             );
         }
