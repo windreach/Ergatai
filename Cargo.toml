@@ -11,6 +11,7 @@ members = [
     "crates/ergatai-collab",
     "crates/ergatai-core",
     "crates/ergatai-api",
+    "crates/ergatai-cli",
     "examples/simple-agent",
 ]
 

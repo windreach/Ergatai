@@ -1,0 +1,22 @@
+[package]
+name = "ergatai-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "ergatai"
+path = "src/main.rs"
+
+[dependencies]
+ergatai-error = { path = "../ergatai-error" }
+
+clap = { workspace = true, features = ["derive"] }
+reqwest = { version = "0.11", features = ["json"] }
+tokio = { workspace = true, features = ["full"] }
+tokio-tungstenite = "0.20"
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+futures-util = "0.3"
