@@ -1,0 +1,16 @@
+[package]
+name = "ergatai-binary"
+version = "0.1.0"
+edition = "2021"
+authors = ["Ergatai Team"]
+license = "Apache-2.0"
+repository = "https://github.com/windreach/Ergatai"
+description = "Binary locator and manager for Ergatai external dependencies (NATS, rmux)"
+
+[dependencies]
+ergatai-error = { path = "../ergatai-error" }
+tracing = "0.1"
+thiserror = "1.0"
+
+[dev-dependencies]
+tempfile = "3.10"

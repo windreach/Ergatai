@@ -9,6 +9,7 @@ description = "NATS messaging infrastructure for Ergatai"
 
 [dependencies]
 ergatai-error = { path = "../ergatai-error" }
+ergatai-binary = { path = "../ergatai-binary" }
 tokio.workspace = true
 async-nats.workspace = true
 serde.workspace = true

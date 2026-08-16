@@ -165,6 +165,23 @@ fn setup_env_before_runtime() -> Args {
         unsafe { std::env::set_var("RUST_LOG", "debug") };
     }
 
+    // Locate rmux-daemon binary and set RMUX_SDK_DAEMON_BINARY env var.
+    // Must happen before tokio runtime because it calls std::env::set_var.
+    // If the daemon isn't found, log a warning but don't fail — the tmux
+    // backend remains available as a fallback.
+    match ergatai_binary::configure_rmux_daemon() {
+        Ok(path) => {
+            tracing::info!(path = %path.display(), "rmux-daemon configured");
+        }
+        Err(e) => {
+            tracing::warn!(
+                "rmux-daemon not found ({}). Falling back to tmux backend. \
+                 Install rmux-daemon or set ERGATAI_RMUX_BINARY to enable rmux.",
+                e
+            );
+        }
+    }
+
     args
 }
 

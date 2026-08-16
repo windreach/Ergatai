@@ -9,6 +9,7 @@ description = "Pluggable agent runtime backends for Ergatai"
 
 [dependencies]
 ergatai-error = { path = "../ergatai-error" }
+ergatai-binary = { path = "../ergatai-binary" }
 tokio.workspace = true
 async-trait.workspace = true
 serde.workspace = true

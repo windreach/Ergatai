@@ -18,6 +18,8 @@ ergatai-nats = { path = "../ergatai-nats" }
 ergatai-error = { path = "../ergatai-error" }
 # Agent runtime (pluggable backends)
 ergatai-runtime = { path = "../ergatai-runtime" }
+# Binary locator (NATS, rmux daemon)
+ergatai-binary = { path = "../ergatai-binary" }
 
 # NATS client (for message forwarding)
 async-nats.workspace = true

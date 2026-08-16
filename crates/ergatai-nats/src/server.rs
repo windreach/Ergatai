@@ -16,7 +16,8 @@ use ergatai_error::{ErgataiError, ErgataiResult};
 const DEFAULT_PORT: u16 = 4222;
 
 /// Maximum port attempts before giving up
-const MAX_PORT_ATTEMPTS: u16 = 10;
+/// Increased from 10 to 100 to avoid port exhaustion during parallel test runs
+const MAX_PORT_ATTEMPTS: u16 = 100;
 
 /// Time to wait for nats-server to start (milliseconds)
 const STARTUP_WAIT_MS: u64 = 500;
@@ -46,7 +47,7 @@ impl NatsServer {
     ///
     /// Used by tests to avoid loading stale persistent data.
     pub async fn start_with_store_dir(store_dir: PathBuf) -> ErgataiResult<Self> {
-        let binary_path = Self::find_binary()?;
+        let binary_path = ergatai_binary::find_nats_binary()?;
 
         // Ensure store directory exists
         tokio::fs::create_dir_all(&store_dir).await.map_err(|e| {
@@ -226,68 +227,6 @@ impl NatsServer {
         Ok(base_dir.join("ergatai").join("nats-store"))
     }
 
-    /// Locate the nats-server binary
-    ///
-    /// Searches in:
-    /// 1. ERGATAI_NATS_BINARY environment variable
-    /// 2. Electron resources/ directory (platform-specific)
-    /// 3. System PATH (for development)
-    fn find_binary() -> ErgataiResult<PathBuf> {
-        // 1. Environment variable override
-        if let Ok(path) = std::env::var("ERGATAI_NATS_BINARY") {
-            let path = PathBuf::from(path);
-            if path.exists() {
-                return Ok(path);
-            }
-            warn!(path = %path.display(), "ERGATAI_NATS_BINARY points to non-existent file");
-        }
-
-        // 2. Electron resources directory
-        // In production, nats-server is bundled in resources/nats-server-{platform}
-        if let Ok(exe_path) = std::env::current_exe() {
-            if let Some(exe_dir) = exe_path.parent() {
-                let platform = if cfg!(target_os = "macos") {
-                    "darwin"
-                } else if cfg!(target_os = "windows") {
-                    "win32"
-                } else {
-                    "linux"
-                };
-
-                let binary_name = if cfg!(target_os = "windows") {
-                    "nats-server.exe"
-                } else {
-                    "nats-server"
-                };
-
-                let resource_path = exe_dir
-                    .join("resources")
-                    .join(format!("nats-server-{}", platform))
-                    .join(binary_name);
-
-                if resource_path.exists() {
-                    return Ok(resource_path);
-                }
-            }
-        }
-
-        // 3. System PATH (development fallback)
-        if let Ok(output) = Command::new("which").arg("nats-server").output() {
-            if output.status.success() {
-                let path_str = String::from_utf8_lossy(&output.stdout);
-                let path = PathBuf::from(path_str.trim());
-                if path.exists() {
-                    warn!("Using nats-server from system PATH (not recommended for production)");
-                    return Ok(path);
-                }
-            }
-        }
-
-        Err(ErgataiError::internal(
-            "nats-server binary not found. Set ERGATAI_NATS_BINARY or install nats-server",
-        ))
-    }
-
     /// Find an available port starting from DEFAULT_PORT
     ///
     /// Tries ports in range [4222, 4232) and returns the first available one.
@@ -332,11 +271,24 @@ impl NatsServer {
 /// - When the test process exits, the OS cleans up child processes
 ///
 /// **Note**: If tests are interrupted (Ctrl+C, timeout), NATS processes may remain
-/// as zombies until manually cleaned up. This is acceptable for test scenarios.
+/// as zombies until manually cleaned up. Use `cleanup_test_servers()` or run
+/// `pkill -9 nats-server` to clean them up.
 ///
 /// For production use, create `NatsServer` instances directly (not via this function)
 /// so Drop can properly clean up resources.
 static SHARED_TEST_SERVER: Mutex<Option<&'static NatsServer>> = Mutex::new(None);
+
+/// Cleanup function to kill all NATS server processes started by tests
+///
+/// Call this at the end of test suites or use `pkill -9 nats-server` manually.
+/// This is necessary because `shared_test_server()` uses `Box::leak()` which
+/// prevents Drop from being called.
+pub fn cleanup_test_servers() {
+    use std::process::Command;
+    let _ = Command::new("pkill")
+        .args(&["-9", "nats-server"])
+        .output();
+}
 
 /// Get a shared nats-server for testing.
 ///
@@ -430,7 +382,7 @@ mod tests {
     #[test]
     fn test_port_range() {
         assert_eq!(DEFAULT_PORT, 4222);
-        assert_eq!(MAX_PORT_ATTEMPTS, 10);
+        assert_eq!(MAX_PORT_ATTEMPTS, 100);
     }
 
     #[tokio::test]

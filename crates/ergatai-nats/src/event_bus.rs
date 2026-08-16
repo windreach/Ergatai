@@ -527,6 +527,20 @@ mod tests {
         let conn = crate::NatsConnection::connect_to_server(server)
             .await
             .unwrap();
+
+        // Create or get the DAG_EVENTS stream (shared across tests)
+        // Using get_or_create_stream via create_stream which handles existing streams gracefully
+        let config = async_nats::jetstream::stream::Config {
+            name: "DAG_EVENTS".to_string(),
+            subjects: vec![
+                "ergatai.task.submit.*".to_string(),
+                "ergatai.dag.>".to_string(),
+            ],
+            ..Default::default()
+        };
+        // Ignore error if stream already exists with same config (from another test)
+        let _ = conn.create_stream(config).await;
+
         let bus = EventBus::new(conn);
 
         // Subscribe first
@@ -572,6 +586,18 @@ mod tests {
         let conn = crate::NatsConnection::connect_to_server(server)
             .await
             .unwrap();
+
+        // Create or get the DAG_EVENTS stream (shared across tests)
+        let config = async_nats::jetstream::stream::Config {
+            name: "DAG_EVENTS".to_string(),
+            subjects: vec![
+                "ergatai.task.submit.*".to_string(),
+                "ergatai.dag.>".to_string(),
+            ],
+            ..Default::default()
+        };
+        let _ = conn.create_stream(config).await;
+
         let bus = EventBus::new(conn);
 
         let mut sub = bus.subscribe_all_node_complete().await.unwrap();
@@ -615,6 +641,18 @@ mod tests {
         let conn = crate::NatsConnection::connect_to_server(server)
             .await
             .unwrap();
+
+        // Create or get the DAG_EVENTS stream (shared across tests)
+        let config = async_nats::jetstream::stream::Config {
+            name: "DAG_EVENTS".to_string(),
+            subjects: vec![
+                "ergatai.task.submit.*".to_string(),
+                "ergatai.dag.>".to_string(),
+            ],
+            ..Default::default()
+        };
+        let _ = conn.create_stream(config).await;
+
         let bus = EventBus::new(conn);
 
         let mut sub = bus.subscribe_all_node_failed().await.unwrap();

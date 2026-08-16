@@ -433,6 +433,59 @@ impl RmuxBackend {
             Err(_) => Ok(None),
         }
     }
+
+    // ── Daemon status ──
+
+    /// Check whether the rmux daemon binary is available on this host.
+    ///
+    /// This does NOT connect to a running daemon — it only verifies the binary
+    /// can be found via `ergatai_binary` (env var → bundled → PATH). Use
+    /// `is_daemon_connected()` to check whether we have an active connection.
+    pub fn is_daemon_available(&self) -> bool {
+        ergatai_binary::is_rmux_available()
+    }
+
+    /// Check whether we currently have an active connection to the daemon.
+    ///
+    /// Returns `false` if the lazy connection has not been established yet.
+    /// Does NOT attempt to connect — call `initialize()` for that.
+    pub async fn is_daemon_connected(&self) -> bool {
+        self.rmux.lock().await.is_some()
+    }
+
+    /// Snapshot of daemon status, useful for diagnostics and the CLI
+    /// `ergatai daemon status` command.
+    pub async fn daemon_info(&self) -> RmuxDaemonInfo {
+        let binary_available = self.is_daemon_available();
+        let connected = self.is_daemon_connected().await;
+        let pane_count = self.panes.read().await.len();
+        let workspace_count = self.anchor_panes.read().await.len();
+
+        let binary_path = ergatai_binary::configure_rmux_daemon().ok();
+
+        RmuxDaemonInfo {
+            binary_available,
+            binary_path,
+            connected,
+            pane_count,
+            workspace_count,
+        }
+    }
+}
+
+/// Snapshot of rmux daemon state — returned by `RmuxBackend::daemon_info()`.
+#[derive(Debug, Clone)]
+pub struct RmuxDaemonInfo {
+    /// Whether the daemon binary can be located (env var → bundled → PATH).
+    pub binary_available: bool,
+    /// Resolved path to the daemon binary (if found).
+    pub binary_path: Option<std::path::PathBuf>,
+    /// Whether this backend has an active daemon connection.
+    pub connected: bool,
+    /// Number of pane handles currently tracked.
+    pub pane_count: usize,
+    /// Number of workspaces (sessions) tracked.
+    pub workspace_count: usize,
 }
 
 #[async_trait]
