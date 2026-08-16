@@ -21,7 +21,7 @@ use axum::{
     http::{header, Request, StatusCode},
     middleware::{self, Next},
     response::IntoResponse,
-    routing::{get, post},
+    routing::{delete, get, post},
     Json, Router,
 };
 use clap::Parser;
@@ -405,10 +405,18 @@ async fn async_main(args: Args) -> Result<()> {
         .route("/health", get(health_check))
         .route("/ready", get(readiness_check))
         .route("/metrics", get(metrics_endpoint))
-        // TODO(middleware): Re-enable after HTTP client migration
-        // .route("/api/v1/chat", post(create_chat))
-        // .route("/api/v1/agents", get(list_agents))
+        // Workspace management
+        .route("/api/v1/workspaces", get(api::workspaces::list_workspaces))
+        .route("/api/v1/workspaces", post(api::workspaces::create_workspace))
+        .route("/api/v1/workspaces/:id", delete(api::workspaces::delete_workspace))
+        // Agent management
+        .route("/api/v1/agents", get(api::agents::list_agents))
+        .route("/api/v1/agents", post(api::agents::spawn_agent))
+        .route("/api/v1/agents/:id", delete(api::agents::kill_agent))
+        .route("/api/v1/agents/:id/message", post(api::agents::send_message))
+        // Status
         .route("/api/v1/status", get(api::status::get_status))
+        // DAG (existing)
         .route("/api/v1/dag", post(submit_dag))
         .route("/api/v1/dag/status", get(dag_status))
         // MCP Streamable HTTP endpoint (POST/GET/DELETE /mcp)
