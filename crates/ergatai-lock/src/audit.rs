@@ -3,8 +3,8 @@
 //! Provides comprehensive audit logging, statistics, and security reporting
 //! for file access operations.
 
-use ergatai_error::ErgataiError;
 use chrono::{DateTime, Duration, Utc};
+use ergatai_error::ErgataiError;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};

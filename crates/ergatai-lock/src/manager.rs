@@ -13,8 +13,8 @@ use ergatai_error::ErgataiError;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
-use ergatai_error::ErgataiResult;
 use crate::{FileLockManager, SnapshotManager, Watchdog, WatchdogConfig};
+use ergatai_error::ErgataiResult;
 use ergatai_nats::get_nats_connection;
 
 /// Per-project file access control state

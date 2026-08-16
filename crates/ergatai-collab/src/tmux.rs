@@ -127,7 +127,7 @@ fn strip_ansi(s: &str) -> String {
         if c == '\x1b' {
             if chars.peek() == Some(&'[') {
                 chars.next(); // consume '['
-                // Skip parameter + intermediate + final bytes
+                              // Skip parameter + intermediate + final bytes
                 loop {
                     match chars.peek() {
                         Some(&b) if (0x20..=0x3F).contains(&(b as u32)) => {
@@ -171,14 +171,15 @@ async fn run_tmux_cmd(args: &[&str]) -> Result<std::process::Output> {
     for attempt in 0..=TMUX_CMD_RETRIES {
         if attempt > 0 {
             tokio::time::sleep(TMUX_RETRY_DELAY).await;
-            debug!("Retrying tmux command (attempt {}): {:?}", attempt + 1, args);
+            debug!(
+                "Retrying tmux command (attempt {}): {:?}",
+                attempt + 1,
+                args
+            );
         }
 
-        let result = tokio::time::timeout(
-            TMUX_CMD_TIMEOUT,
-            Command::new("tmux").args(args).output(),
-        )
-        .await;
+        let result =
+            tokio::time::timeout(TMUX_CMD_TIMEOUT, Command::new("tmux").args(args).output()).await;
 
         match result {
             Ok(Ok(output)) => return Ok(output),
@@ -188,7 +189,8 @@ async fn run_tmux_cmd(args: &[&str]) -> Result<std::process::Output> {
             Err(_) => {
                 last_err = Some(anyhow::anyhow!(
                     "tmux command timed out after {:?}: {:?}",
-                    TMUX_CMD_TIMEOUT, args
+                    TMUX_CMD_TIMEOUT,
+                    args
                 ));
             }
         }
@@ -198,7 +200,9 @@ async fn run_tmux_cmd(args: &[&str]) -> Result<std::process::Output> {
 
 /// Run a tmux command and check for success, returning stderr on failure.
 async fn run_tmux_cmd_checked(args: &[&str], context_msg: &str) -> Result<()> {
-    let output = run_tmux_cmd(args).await.map_err(|e| e.context(context_msg.to_string()))?;
+    let output = run_tmux_cmd(args)
+        .await
+        .map_err(|e| e.context(context_msg.to_string()))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         anyhow::bail!("{}: {}", context_msg, stderr.trim());
@@ -265,10 +269,14 @@ impl TmuxManager {
         );
         run_tmux_cmd_checked(
             &[
-                "new-session", "-d",
-                "-s", &self.default_session,
-                "-x", &width.to_string(),
-                "-y", &height.to_string(),
+                "new-session",
+                "-d",
+                "-s",
+                &self.default_session,
+                "-x",
+                &width.to_string(),
+                "-y",
+                &height.to_string(),
             ],
             "Failed to create tmux session",
         )
@@ -301,10 +309,12 @@ impl TmuxManager {
         } else {
             let output = run_tmux_cmd(&[
                 "split-window",
-                "-t", &self.default_session,
+                "-t",
+                &self.default_session,
                 "-h",
                 "-P",
-                "-F", "#{pane_id}",
+                "-F",
+                "#{pane_id}",
             ])
             .await
             .context("Failed to split window")?;
@@ -425,11 +435,8 @@ impl TmuxManager {
             .remove(agent_id)
             .ok_or_else(|| anyhow::anyhow!("Agent {} not found", agent_id))?;
 
-        if let Err(e) = run_tmux_cmd_checked(
-            &["kill-pane", "-t", &agent.pane],
-            "Failed to kill pane",
-        )
-        .await
+        if let Err(e) =
+            run_tmux_cmd_checked(&["kill-pane", "-t", &agent.pane], "Failed to kill pane").await
         {
             warn!(
                 "Failed to kill pane {} (may already be closed): {}",
@@ -477,13 +484,9 @@ impl TmuxManager {
             PANE_FORMAT_DELIMITER, PANE_FORMAT_DELIMITER
         );
 
-        let output = run_tmux_cmd(&[
-            "list-panes",
-            "-t", &self.default_session,
-            "-F", &format,
-        ])
-        .await
-        .context("Failed to list panes")?;
+        let output = run_tmux_cmd(&["list-panes", "-t", &self.default_session, "-F", &format])
+            .await
+            .context("Failed to list panes")?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -552,9 +555,7 @@ impl TmuxManager {
     pub async fn try_claim_unmapped_pane(&self, mcp_agent_id: &str) -> Option<String> {
         let pane = {
             let mut agents = self.agents.write().await;
-            let unmapped = agents
-                .values_mut()
-                .find(|a| a.mapped_to_mcp.is_none())?;
+            let unmapped = agents.values_mut().find(|a| a.mapped_to_mcp.is_none())?;
             unmapped.mapped_to_mcp = Some(mcp_agent_id.to_string());
             unmapped.pane.clone()
         };
@@ -564,10 +565,7 @@ impl TmuxManager {
             .await
             .insert(mcp_agent_id.to_string(), pane.clone());
 
-        info!(
-            "Claimed tmux pane {} for MCP agent {}",
-            pane, mcp_agent_id
-        );
+        info!("Claimed tmux pane {} for MCP agent {}", pane, mcp_agent_id);
         Some(pane)
     }
 
@@ -607,19 +605,11 @@ impl TmuxManager {
 
     /// Look up the tmux pane for an MCP agent.
     pub async fn get_tmux_pane_for_mcp_agent(&self, mcp_agent_id: &str) -> Option<String> {
-        self.mcp_to_tmux_map
-            .read()
-            .await
-            .get(mcp_agent_id)
-            .cloned()
+        self.mcp_to_tmux_map.read().await.get(mcp_agent_id).cloned()
     }
 
     /// Inject a message into an MCP agent's tmux pane via the mapping.
-    pub async fn inject_message_by_mcp_id(
-        &self,
-        mcp_agent_id: &str,
-        message: &str,
-    ) -> Result<()> {
+    pub async fn inject_message_by_mcp_id(&self, mcp_agent_id: &str, message: &str) -> Result<()> {
         let tmux_pane = self
             .get_tmux_pane_for_mcp_agent(mcp_agent_id)
             .await

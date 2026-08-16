@@ -6,9 +6,9 @@
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
-use ergatai_error::{ErgataiError, ErgataiResult};
 use crate::connection::NatsConnection;
 use crate::events::*;
+use ergatai_error::{ErgataiError, ErgataiResult};
 
 /// Event bus for typed NATS pub/sub
 ///
@@ -466,9 +466,7 @@ impl EventBus {
 /// Receive and deserialize a typed event from a subscriber.
 ///
 /// Returns `None` on timeout, `Err` on deserialization failure.
-pub async fn receive_event<T>(
-    subscriber: &mut async_nats::Subscriber,
-) -> Option<ErgataiResult<T>>
+pub async fn receive_event<T>(subscriber: &mut async_nats::Subscriber) -> Option<ErgataiResult<T>>
 where
     T: for<'de> Deserialize<'de> + std::marker::Unpin,
 {

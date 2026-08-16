@@ -17,9 +17,7 @@ use tracing::{debug, info, warn};
 use ergatai_error::{ErgataiError, ErgataiResult};
 
 use crate::backend::AgentRuntimeBackend;
-use crate::types::{
-    AgentHandle, BackendCapabilities, WaitResult, WorkspaceHandle, WorkspaceSpec,
-};
+use crate::types::{AgentHandle, BackendCapabilities, WaitResult, WorkspaceHandle, WorkspaceSpec};
 
 // ── Configuration constants ──
 
@@ -88,7 +86,11 @@ impl LocalPtyBackend {
         for attempt in 0..=TMUX_CMD_RETRIES {
             if attempt > 0 {
                 tokio::time::sleep(TMUX_RETRY_DELAY).await;
-                debug!("Retrying tmux command (attempt {}): {:?}", attempt + 1, args);
+                debug!(
+                    "Retrying tmux command (attempt {}): {:?}",
+                    attempt + 1,
+                    args
+                );
             }
 
             let result = tokio::time::timeout(
@@ -243,7 +245,9 @@ impl AgentRuntimeBackend for LocalPtyBackend {
         let session = Self::session_name_from_handle(handle)?;
 
         if command.is_empty() {
-            return Err(ErgataiError::internal("Agent command must not be empty".to_string()));
+            return Err(ErgataiError::internal(
+                "Agent command must not be empty".to_string(),
+            ));
         }
         if command.contains('\n') || command.contains('\r') {
             return Err(ErgataiError::internal(
@@ -284,7 +288,11 @@ impl AgentRuntimeBackend for LocalPtyBackend {
         )
         .await?;
 
-        info!(pane_id = pane_id, session = session, "Agent started in tmux pane");
+        info!(
+            pane_id = pane_id,
+            session = session,
+            "Agent started in tmux pane"
+        );
 
         if let Some(instr) = instruction {
             tokio::time::sleep(INSTRUCTION_DELAY).await;
@@ -336,11 +344,8 @@ impl AgentRuntimeBackend for LocalPtyBackend {
         let pane_id = Self::pane_id(handle)?;
         info!(pane_id = pane_id, "Stopping agent (killing pane)");
 
-        if let Err(e) = Self::run_tmux_cmd_checked(
-            &["kill-pane", "-t", &pane_id],
-            "Failed to kill pane",
-        )
-        .await
+        if let Err(e) =
+            Self::run_tmux_cmd_checked(&["kill-pane", "-t", &pane_id], "Failed to kill pane").await
         {
             warn!(pane_id = pane_id, error = %e, "Failed to kill pane (may already be closed)");
         }
@@ -377,8 +382,7 @@ impl AgentRuntimeBackend for LocalPtyBackend {
     }
 
     async fn list_workspaces(&self) -> ErgataiResult<Vec<WorkspaceHandle>> {
-        let output =
-            Self::run_tmux_cmd(&["list-sessions", "-F", "#{session_name}"]).await?;
+        let output = Self::run_tmux_cmd(&["list-sessions", "-F", "#{session_name}"]).await?;
 
         if !output.status.success() {
             return Ok(Vec::new());
@@ -412,11 +416,9 @@ impl AgentRuntimeBackend for LocalPtyBackend {
         let session = Self::session_name_from_handle(handle)?;
         info!(session = session, "Cleaning up tmux session");
 
-        if let Err(e) = Self::run_tmux_cmd_checked(
-            &["kill-session", "-t", &session],
-            "Failed to kill session",
-        )
-        .await
+        if let Err(e) =
+            Self::run_tmux_cmd_checked(&["kill-session", "-t", &session], "Failed to kill session")
+                .await
         {
             warn!(session = session, error = %e, "kill-session failed (may already be gone)");
         }
@@ -429,7 +431,10 @@ impl AgentRuntimeBackend for LocalPtyBackend {
         for ws in &workspaces {
             self.cleanup_workspace(ws).await?;
         }
-        info!(count = workspaces.len(), "Shutdown: cleaned up all workspaces");
+        info!(
+            count = workspaces.len(),
+            "Shutdown: cleaned up all workspaces"
+        );
         Ok(())
     }
 }

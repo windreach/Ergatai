@@ -61,9 +61,9 @@ impl NatsServer {
                     "127.0.0.1",
                     "--jetstream",
                     "-sd",
-                    store_dir
-                        .to_str()
-                        .ok_or_else(|| ErgataiError::internal("Invalid NATS store directory path"))?,
+                    store_dir.to_str().ok_or_else(|| {
+                        ErgataiError::internal("Invalid NATS store directory path")
+                    })?,
                 ])
                 .spawn()
             {
@@ -73,7 +73,8 @@ impl NatsServer {
                     match child.try_wait() {
                         Ok(Some(status)) => {
                             warn!(port = port, status = %status, attempt = attempt + 1, "nats-server exited prematurely, retrying with different port");
-                            last_error = Some(format!("nats-server exited with status: {}", status));
+                            last_error =
+                                Some(format!("nats-server exited with status: {}", status));
                             sleep(Duration::from_millis(BIND_RETRY_DELAY_MS)).await;
                             continue;
                         }

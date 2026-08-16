@@ -12,8 +12,8 @@ use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watche
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
-use ergatai_error::{ErgataiError, ErgataiResult};
 use crate::lock_manager::FileLockManager;
+use ergatai_error::{ErgataiError, ErgataiResult};
 
 /// File system watcher for detecting unauthorized modifications
 pub struct FileSystemWatcher {

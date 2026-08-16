@@ -8,14 +8,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use rmcp::{
-    ErrorData, RoleServer, ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
         CallToolResult, ContentBlock, CustomNotification, InitializeRequestParams,
         InitializeResult, ServerCapabilities, ServerInfo, ServerNotification,
     },
     service::{Peer, RequestContext},
-    tool, tool_handler, tool_router,
+    tool, tool_handler, tool_router, ErrorData, RoleServer, ServerHandler,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -62,10 +61,7 @@ impl std::fmt::Debug for ErgataiMcpServer {
 
 impl ErgataiMcpServer {
     /// Create a new server instance (called per-session by the factory)
-    pub fn new(
-        registry: Arc<AgentRegistry>,
-        peer_registry: PeerRegistry,
-    ) -> Self {
+    pub fn new(registry: Arc<AgentRegistry>, peer_registry: PeerRegistry) -> Self {
         Self {
             tool_router: Self::tool_router(),
             registry,
@@ -103,7 +99,8 @@ impl Drop for ErgataiMcpServer {
             let peer_registry = self.peer_registry.clone();
             info!("MCP session ending, unregistering agent: {}", agent_id);
             tokio::spawn(async move {
-                do_unregister_agent(&registry, &peer_registry, &agent_id, "MCP session closed").await;
+                do_unregister_agent(&registry, &peer_registry, &agent_id, "MCP session closed")
+                    .await;
             });
         }
     }
@@ -141,7 +138,6 @@ struct SendMessageParams {
     #[serde(default)]
     message_type: Option<String>,
 }
-
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct SubmitOrchestrationParams {
@@ -209,7 +205,9 @@ impl ErgataiMcpServer {
     ///    or MCP notification. Provides durability, retry on failure, and delivery confirmation.
     /// 2. **Direct tmux injection** (fallback) — when NATS is unavailable, falls back to
     ///    direct tmux injection, then MCP notification. No persistence guarantee.
-    #[tool(description = "Send a message to another agent (NATS JetStream for reliability, tmux/MCP fallback)")]
+    #[tool(
+        description = "Send a message to another agent (NATS JetStream for reliability, tmux/MCP fallback)"
+    )]
     async fn send_message(
         &self,
         params: Parameters<SendMessageParams>,
@@ -244,8 +242,8 @@ impl ErgataiMcpServer {
                     .iter()
                     .find(|a| {
                         a.agent_id == *target_agent_id
-                        || a.task_id.as_deref() == Some(target_agent_id)
-                        || a.mcp_agent_id.as_deref() == Some(target_agent_id)
+                            || a.task_id.as_deref() == Some(target_agent_id)
+                            || a.mcp_agent_id.as_deref() == Some(target_agent_id)
                     })
                     .map(|a| a.agent_id.clone())
             });
@@ -261,7 +259,10 @@ impl ErgataiMcpServer {
         };
 
         // Get the sender agent ID
-        let from_agent = self.session_agent_id.read().await
+        let from_agent = self
+            .session_agent_id
+            .read()
+            .await
             .clone()
             .unwrap_or_else(|| "unknown-mcp-client".to_string());
 
@@ -310,7 +311,10 @@ impl ErgataiMcpServer {
         }
 
         // ── Fallback: direct tmux injection (no persistence) ──
-        if let Ok(result) = self.try_tmux_injection(&resolved_agent_id, &from_agent, message).await {
+        if let Ok(result) = self
+            .try_tmux_injection(&resolved_agent_id, &from_agent, message)
+            .await
+        {
             self.send_failures.write().await.remove(&resolved_agent_id);
             return Ok(result);
         }
@@ -335,7 +339,10 @@ impl ErgataiMcpServer {
         let dag_definition = &params.0.dag_definition;
         let context_value = &params.0.context;
 
-        info!("Submitting DAG orchestration ({} bytes)", dag_definition.len());
+        info!(
+            "Submitting DAG orchestration ({} bytes)",
+            dag_definition.len()
+        );
 
         // Check if a DAG is already running
         if let Some(existing) = ergatai_core::cross_agent::get_dag_scheduler() {
@@ -348,12 +355,9 @@ impl ErgataiMcpServer {
         }
 
         // Parse markdown → TaskGraph
-        let graph = ergatai_core::orchestration::parse_dag_markdown(dag_definition)
-            .map_err(|e| {
-                ErrorData::invalid_params(
-                    format!("Failed to parse DAG definition: {}", e),
-                    None,
-                )
+        let graph =
+            ergatai_core::orchestration::parse_dag_markdown(dag_definition).map_err(|e| {
+                ErrorData::invalid_params(format!("Failed to parse DAG definition: {}", e), None)
             })?;
 
         // Build DagContext from optional context parameter
@@ -361,10 +365,7 @@ impl ErgataiMcpServer {
         if let Some(ctx_val) = context_value {
             if let Some(vars) = ctx_val.as_object() {
                 for (k, v) in vars {
-                    dag_context.set_global(
-                        k.clone(),
-                        v.as_str().unwrap_or_default().to_string(),
-                    );
+                    dag_context.set_global(k.clone(), v.as_str().unwrap_or_default().to_string());
                 }
             }
         }
@@ -372,20 +373,18 @@ impl ErgataiMcpServer {
         // Create DagScheduler
         let project_root =
             std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-        let scheduler = ergatai_core::cross_agent::DagScheduler::with_context(
-            project_root,
-            graph,
-            dag_context,
-        );
+        let scheduler =
+            ergatai_core::cross_agent::DagScheduler::with_context(project_root, graph, dag_context);
 
         // Register globally + start NATS event listener
         ergatai_core::cross_agent::set_dag_scheduler(scheduler.clone());
         scheduler.clone().start_event_listener();
 
         // Submit the graph (dispatches ready nodes)
-        let submitted = scheduler.submit_graph().await.map_err(|e| {
-            ErrorData::internal_error(format!("Failed to submit DAG: {}", e), None)
-        })?;
+        let submitted = scheduler
+            .submit_graph()
+            .await
+            .map_err(|e| ErrorData::internal_error(format!("Failed to submit DAG: {}", e), None))?;
 
         let progress = scheduler.progress().await;
         let status = scheduler.status_prompt().await;
@@ -454,10 +453,7 @@ impl ErgataiMcpServer {
         message: &str,
     ) -> Result<CallToolResult, ErrorData> {
         // Format the message with sender info
-        let formatted_message = format!(
-            "Message from {}: {}",
-            from_agent, message
-        );
+        let formatted_message = format!("Message from {}: {}", from_agent, message);
 
         info!(
             "Attempting AgentRuntime injection to agent {}: {}",
@@ -466,7 +462,10 @@ impl ErgataiMcpServer {
 
         // Try to inject via AgentRuntime (uses backend injection or MCP fallback)
         let runtime = get_agent_runtime();
-        match runtime.inject_message(resolved_agent_id, &formatted_message).await {
+        match runtime
+            .inject_message(resolved_agent_id, &formatted_message)
+            .await
+        {
             Ok(()) => {
                 info!("Message injected to {} via AgentRuntime", resolved_agent_id);
                 Ok(CallToolResult::success(vec![ContentBlock::text(
@@ -480,7 +479,10 @@ impl ErgataiMcpServer {
                 )]))
             }
             Err(e) => {
-                warn!("AgentRuntime injection to {} failed: {}", resolved_agent_id, e);
+                warn!(
+                    "AgentRuntime injection to {} failed: {}",
+                    resolved_agent_id, e
+                );
                 Err(ErrorData::internal_error(
                     format!("AgentRuntime injection failed: {}", e),
                     None,
@@ -529,10 +531,7 @@ impl ErgataiMcpServer {
             .await
         {
             Ok(_) => {
-                self.send_failures
-                    .write()
-                    .await
-                    .remove(resolved_agent_id);
+                self.send_failures.write().await.remove(resolved_agent_id);
 
                 let message_id = uuid::Uuid::new_v4().to_string();
                 let response_json = serde_json::json!({
@@ -622,11 +621,15 @@ impl ServerHandler for ErgataiMcpServer {
         *self.session_agent_id.write().await = Some(unique_agent_id.clone());
 
         // Register agent in registry
-        if let Err(e) = self.registry
+        if let Err(e) = self
+            .registry
             .register_agent(unique_agent_id.clone(), connection_id.clone(), None)
             .await
         {
-            return Err(ErrorData::invalid_params(format!("Failed to register agent: {}", e), None::<serde_json::Value>));
+            return Err(ErrorData::invalid_params(
+                format!("Failed to register agent: {}", e),
+                None::<serde_json::Value>,
+            ));
         }
 
         // Note: AgentRuntime backend (LocalPtyBackend) handles pane discovery
@@ -634,10 +637,10 @@ impl ServerHandler for ErgataiMcpServer {
         // need tmux mapping should be launched via AgentRuntime.
 
         // Save the peer handle for pushing notifications to this agent
-        self.peer_registry.write().await.insert(
-            unique_agent_id.clone(),
-            context.peer.clone(),
-        );
+        self.peer_registry
+            .write()
+            .await
+            .insert(unique_agent_id.clone(), context.peer.clone());
 
         info!(
             "Agent registered: {} (connection: {}, peer handle saved)",
@@ -665,18 +668,16 @@ impl ServerHandler for ErgataiMcpServer {
 
     /// Return server info with tools capability
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(
-                rmcp::model::Implementation::new("ergatai", env!("CARGO_PKG_VERSION"))
-            )
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_server_info(
+            rmcp::model::Implementation::new("ergatai", env!("CARGO_PKG_VERSION")),
+        )
     }
 }
 
 // ── Public API for creating the Streamable HTTP service ──
 
 use rmcp::transport::streamable_http_server::{
-    StreamableHttpServerConfig, StreamableHttpService,
-    session::local::LocalSessionManager,
+    session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
 };
 
 /// Create the MCP Streamable HTTP service for mounting in axum.
@@ -700,9 +701,7 @@ pub fn create_mcp_service(
         .with_sse_retry(Some(std::time::Duration::from_secs(3)))
         .with_json_response(true)
         .with_cancellation_token(cancellation_token)
-        .with_allowed_hosts([
-            "localhost", "127.0.0.1", "::1", "0.0.0.0",
-        ]);
+        .with_allowed_hosts(["localhost", "127.0.0.1", "::1", "0.0.0.0"]);
 
     // Session keep_alive: auto-close sessions after this duration of inactivity.
     // This catches dead clients (kill, network drop) within 2 minutes.
@@ -711,7 +710,12 @@ pub fn create_mcp_service(
     session_manager.session_config.keep_alive = Some(std::time::Duration::from_secs(120));
 
     StreamableHttpService::new(
-        move || Ok(ErgataiMcpServer::new(registry.clone(), peer_registry.clone())),
+        move || {
+            Ok(ErgataiMcpServer::new(
+                registry.clone(),
+                peer_registry.clone(),
+            ))
+        },
         std::sync::Arc::new(session_manager),
         config,
     )

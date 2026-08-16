@@ -7,7 +7,7 @@ pub mod message_router;
 pub mod plan_watcher;
 pub mod task_coordinator;
 pub mod task_scheduler; // Agent-to-agent message routing via NATS
-pub mod tmux;          // Tmux-based agent management
+pub mod tmux; // Tmux-based agent management
 
 pub use agent_launcher::{AgentLauncher, AgentStatus, RunningAgent};
 pub use dag_scheduler::{clear_dag_scheduler, get_dag_scheduler, set_dag_scheduler, DagScheduler};

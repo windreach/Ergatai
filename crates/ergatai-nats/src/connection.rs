@@ -9,8 +9,8 @@ use async_nats::jetstream::stream::{self, Config};
 use async_nats::Client;
 use tracing::{debug, info};
 
-use ergatai_error::{ErgataiError, ErgataiResult};
 use crate::server::NatsServer;
+use ergatai_error::{ErgataiError, ErgataiResult};
 
 /// NATS connection wrapper
 ///
@@ -101,10 +101,7 @@ impl NatsConnection {
             .publish(subject.to_string(), payload.into())
             .await
             .map_err(|e| {
-                ErgataiError::NatsError(format!(
-                    "JetStream publish to {} failed: {}",
-                    subject, e
-                ))
+                ErgataiError::NatsError(format!("JetStream publish to {} failed: {}", subject, e))
             })?;
         // Timeout the ack await — a stalled NATS server (network partition, slow disk,
         // leader election) should not block the caller indefinitely.
@@ -117,10 +114,7 @@ impl NatsConnection {
                 ))
             })?
             .map_err(|e| {
-                ErgataiError::NatsError(format!(
-                    "JetStream ack for {} failed: {}",
-                    subject, e
-                ))
+                ErgataiError::NatsError(format!("JetStream ack for {} failed: {}", subject, e))
             })?;
 
         debug!(
@@ -168,12 +162,15 @@ impl NatsConnection {
     /// Uses the async-nats connection state to determine if the client is connected.
     /// Returns true if the client exists and hasn't been explicitly closed.
     pub fn is_connected(&self) -> bool {
-        // async-nats Client is internally reference-counted; if we hold a valid Client,
-        // the connection is considered alive. Actual I/O failures will surface on next operation.
-        // We use connection_state() to check for explicitly closed connections.
+        // async-nats 0.38 exposes only three states: Pending (initial connect),
+        // Connected, and Disconnected (explicitly closed). We treat Pending and
+        // Connected as healthy — Pending covers the transient startup window,
+        // and async-nats handles reconnects internally without surfacing them
+        // as distinct states. Only Disconnected means truly unusable.
         matches!(
             self.client.connection_state(),
             async_nats::connection::State::Connected
+                | async_nats::connection::State::Pending
         )
     }
 

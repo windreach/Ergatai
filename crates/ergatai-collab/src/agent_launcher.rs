@@ -175,8 +175,7 @@ impl AgentLauncher {
             };
 
         // Request File Token
-        let priority =
-            ergatai_lock::conflict_arbitration::priority_to_number(&assignment.priority);
+        let priority = ergatai_lock::conflict_arbitration::priority_to_number(&assignment.priority);
         let file_token = FileToken::with_priority(
             assignment.agent_name.clone(),
             session_id.clone(),
@@ -456,8 +455,8 @@ Write your results in markdown:
         // 3. Build the agent launch command.
         //    Default: `claude` (Claude Code CLI). Users can override by setting
         //    ERGATAI_AGENT_CMD env var.
-        let agent_command = std::env::var("ERGATAI_AGENT_CMD")
-            .unwrap_or_else(|_| "claude".to_string());
+        let agent_command =
+            std::env::var("ERGATAI_AGENT_CMD").unwrap_or_else(|_| "claude".to_string());
 
         // Validate agent command — reject obvious injection patterns
         if agent_command.is_empty() {

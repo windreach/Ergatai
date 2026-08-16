@@ -3,8 +3,8 @@
 //! Allows dynamic switching between READ and WRITE modes without releasing the lock.
 //! This is more efficient than releasing and re-acquiring the lock.
 
-use ergatai_error::ErgataiError;
 use chrono::Utc;
+use ergatai_error::ErgataiError;
 use rusqlite::{params, Connection};
 use std::sync::{Arc, Mutex};
 use tracing::{debug, info, warn};

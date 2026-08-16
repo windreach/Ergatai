@@ -25,16 +25,16 @@
 //! The library is used by both the CLI (ergatai-cli) and API server (ergatai-api).
 
 // ── Business logic modules ──
-pub mod signal;
 pub mod agent_registry;
+pub mod signal;
 
 // ── Re-export extracted crates ──
-pub use ergatai_error as error;
-pub use ergatai_nats as nats;
-pub use ergatai_dag as orchestration;
-pub use ergatai_lock as file_access;
 pub use ergatai_agent as agent;
 pub use ergatai_collab as cross_agent;
+pub use ergatai_dag as orchestration;
+pub use ergatai_error as error;
+pub use ergatai_lock as file_access;
+pub use ergatai_nats as nats;
 
 // ── Re-export tmux from cross_agent (lives in ergatai-collab) ──
 pub use ergatai_collab::tmux;

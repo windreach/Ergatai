@@ -4,8 +4,8 @@
 //! of long-running tasks.
 
 use super::lock_manager::TransactionGuard;
-use ergatai_error::ErgataiError;
 use chrono::{Duration, Utc};
+use ergatai_error::ErgataiError;
 use rusqlite::{params, Connection};
 use std::sync::{Arc, Mutex};
 use tracing::info;

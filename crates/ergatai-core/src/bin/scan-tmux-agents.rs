@@ -16,8 +16,8 @@ async fn main() -> anyhow::Result<()> {
     println!("=================================\n");
 
     // Create tmux manager — session name from env or default
-    let session = std::env::var("ERGATAI_TMUX_SESSION")
-        .unwrap_or_else(|_| "ergatai-opencode".to_string());
+    let session =
+        std::env::var("ERGATAI_TMUX_SESSION").unwrap_or_else(|_| "ergatai-opencode".to_string());
     let manager = Arc::new(TmuxManager::new(&session));
 
     // Check tmux availability
@@ -43,8 +43,10 @@ async fn main() -> anyhow::Result<()> {
     println!("3. Registered agents:");
     let agents = manager.list_agents().await;
     for agent in agents {
-        println!("   - {} (pane: {}, command: {})",
-                 agent.agent_id, agent.pane, agent.command);
+        println!(
+            "   - {} (pane: {}, command: {})",
+            agent.agent_id, agent.pane, agent.command
+        );
     }
     println!();
 

@@ -11,8 +11,8 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter("ergatai=info")
         .init();
 
-    let session = std::env::var("ERGATAI_TMUX_SESSION")
-        .unwrap_or_else(|_| "ergatai-opencode".to_string());
+    let session =
+        std::env::var("ERGATAI_TMUX_SESSION").unwrap_or_else(|_| "ergatai-opencode".to_string());
 
     println!("Cleaning up tmux session: {}", session);
 

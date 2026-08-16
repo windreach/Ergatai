@@ -16,9 +16,7 @@ use tracing::{debug, info, warn};
 use ergatai_error::{ErgataiError, ErgataiResult};
 
 use crate::backend::AgentRuntimeBackend;
-use crate::types::{
-    AgentHandle, BackendCapabilities, WaitResult, WorkspaceHandle, WorkspaceSpec,
-};
+use crate::types::{AgentHandle, BackendCapabilities, WaitResult, WorkspaceHandle, WorkspaceSpec};
 
 /// Poll interval for checking process liveness.
 const EXIT_POLL_INTERVAL: Duration = Duration::from_secs(1);
@@ -56,13 +54,15 @@ impl AgentRuntimeBackend for DirectProcessBackend {
     }
 
     async fn initialize(&self) -> ErgataiResult<()> {
-        tokio::fs::create_dir_all(&self.work_dir_base).await.map_err(|e| {
-            ErgataiError::internal(format!(
-                "Failed to create work dir base {}: {}",
-                self.work_dir_base.display(),
-                e
-            ))
-        })?;
+        tokio::fs::create_dir_all(&self.work_dir_base)
+            .await
+            .map_err(|e| {
+                ErgataiError::internal(format!(
+                    "Failed to create work dir base {}: {}",
+                    self.work_dir_base.display(),
+                    e
+                ))
+            })?;
         info!(
             path = %self.work_dir_base.display(),
             "DirectProcessBackend initialized"
@@ -72,13 +72,15 @@ impl AgentRuntimeBackend for DirectProcessBackend {
 
     async fn create_workspace(&self, spec: WorkspaceSpec) -> ErgataiResult<WorkspaceHandle> {
         let workspace_dir = self.work_dir_base.join(&spec.id);
-        tokio::fs::create_dir_all(&workspace_dir).await.map_err(|e| {
-            ErgataiError::internal(format!(
-                "Failed to create workspace dir {}: {}",
-                workspace_dir.display(),
-                e
-            ))
-        })?;
+        tokio::fs::create_dir_all(&workspace_dir)
+            .await
+            .map_err(|e| {
+                ErgataiError::internal(format!(
+                    "Failed to create workspace dir {}: {}",
+                    workspace_dir.display(),
+                    e
+                ))
+            })?;
 
         let mut metadata = HashMap::new();
         metadata.insert(
@@ -129,9 +131,9 @@ impl AgentRuntimeBackend for DirectProcessBackend {
                 ErgataiError::internal(format!("Failed to spawn process '{}': {}", program, e))
             })?;
 
-        let pid = child.id().ok_or_else(|| {
-            ErgataiError::internal("Failed to get PID from spawned process")
-        })?;
+        let pid = child
+            .id()
+            .ok_or_else(|| ErgataiError::internal("Failed to get PID from spawned process"))?;
 
         if let Some(instr) = instruction {
             if let Some(mut stdin) = child.stdin.take() {
@@ -224,7 +226,10 @@ impl AgentRuntimeBackend for DirectProcessBackend {
                 }
                 tokio::time::sleep(Duration::from_millis(200)).await;
             }
-            warn!(pid = pid, "Agent process did not exit within 5s after SIGTERM");
+            warn!(
+                pid = pid,
+                "Agent process did not exit within 5s after SIGTERM"
+            );
         }
 
         Ok(())
@@ -291,9 +296,11 @@ impl AgentRuntimeBackend for DirectProcessBackend {
                 ))
             })?;
 
-        while let Some(entry) = entries.next_entry().await.map_err(|e| {
-            ErgataiError::internal(format!("Failed to read dir entry: {}", e))
-        })? {
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .map_err(|e| ErgataiError::internal(format!("Failed to read dir entry: {}", e)))?
+        {
             if entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false) {
                 let id = entry.file_name().to_string_lossy().to_string();
                 let mut metadata = HashMap::new();
@@ -321,7 +328,10 @@ impl AgentRuntimeBackend for DirectProcessBackend {
         info!(dir = work_dir, "Cleaning up workspace directory");
 
         tokio::fs::remove_dir_all(work_dir).await.map_err(|e| {
-            ErgataiError::internal(format!("Failed to remove workspace dir {}: {}", work_dir, e))
+            ErgataiError::internal(format!(
+                "Failed to remove workspace dir {}: {}",
+                work_dir, e
+            ))
         })?;
 
         Ok(())
@@ -334,7 +344,10 @@ impl AgentRuntimeBackend for DirectProcessBackend {
                 warn!(error = %e, workspace = ws.id, "Failed to cleanup workspace during shutdown");
             }
         }
-        info!(count = workspaces.len(), "DirectProcessBackend shutdown complete");
+        info!(
+            count = workspaces.len(),
+            "DirectProcessBackend shutdown complete"
+        );
         Ok(())
     }
 }

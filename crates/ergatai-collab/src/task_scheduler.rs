@@ -4,8 +4,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use ergatai_error::{ErgataiError, ErgataiResult};
 use anyhow::Context;
+use ergatai_error::{ErgataiError, ErgataiResult};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
@@ -428,11 +428,8 @@ impl TaskScheduler {
             use futures_util::StreamExt;
             loop {
                 // Use timeout so we periodically yield and can be aborted cleanly.
-                let next = tokio::time::timeout(
-                    std::time::Duration::from_secs(5),
-                    messages.next(),
-                )
-                .await;
+                let next =
+                    tokio::time::timeout(std::time::Duration::from_secs(5), messages.next()).await;
 
                 match next {
                     // Timeout — no message within 5s, loop and check for abort
@@ -450,7 +447,8 @@ impl TaskScheduler {
                             &js_msg.payload,
                         ) {
                             Ok(payload) => {
-                                let seq = js_msg.info().ok().map(|i| i.stream_sequence).unwrap_or(0);
+                                let seq =
+                                    js_msg.info().ok().map(|i| i.stream_sequence).unwrap_or(0);
                                 tracing::info!(
                                     task_id = %payload.task_id,
                                     agent = %payload.target_agent,
@@ -467,7 +465,9 @@ impl TaskScheduler {
                                     Err(e) => {
                                         tracing::error!(error = %e, "Failed to handle task — naking for redelivery");
                                         if let Err(nak_err) = js_msg
-                                            .ack_with(async_nats::jetstream::message::AckKind::Nak(None))
+                                            .ack_with(async_nats::jetstream::message::AckKind::Nak(
+                                                None,
+                                            ))
                                             .await
                                         {
                                             tracing::warn!(error = %nak_err, "Failed to nak task");
@@ -504,7 +504,10 @@ impl TaskScheduler {
     ///
     /// Writes the inline plan content to a file (for agent readability),
     /// then processes it through the normal scheduling pipeline.
-    async fn handle_nats_task(&self, payload: ergatai_nats::TaskSubmitPayload) -> ErgataiResult<()> {
+    async fn handle_nats_task(
+        &self,
+        payload: ergatai_nats::TaskSubmitPayload,
+    ) -> ErgataiResult<()> {
         use std::time::{SystemTime, UNIX_EPOCH};
 
         // Validate plan_file path: must reside within <project_root>/.ergatai/.dag-plans/
@@ -624,7 +627,12 @@ impl TaskScheduler {
 /// The consumer is durable (`task_submissions`) and resumes from the last ack on restart.
 async fn init_task_submission_consumer(
     connection: &ergatai_nats::NatsConnection,
-) -> ErgataiResult<futures_util::stream::BoxStream<'static, Result<async_nats::jetstream::Message, Box<dyn std::error::Error + Send + Sync>>>> {
+) -> ErgataiResult<
+    futures_util::stream::BoxStream<
+        'static,
+        Result<async_nats::jetstream::Message, Box<dyn std::error::Error + Send + Sync>>,
+    >,
+> {
     use async_nats::jetstream::consumer::{pull, AckPolicy, DeliverPolicy};
     use futures_util::StreamExt;
 
@@ -657,9 +665,10 @@ async fn init_task_submission_consumer(
             ErgataiError::NatsError(format!("Failed to create task submission consumer: {}", e))
         })?;
 
-    let messages = consumer.messages().await.map_err(|e| {
-        ErgataiError::NatsError(format!("Failed to get message stream: {}", e))
-    })?;
+    let messages = consumer
+        .messages()
+        .await
+        .map_err(|e| ErgataiError::NatsError(format!("Failed to get message stream: {}", e)))?;
 
     Ok(Box::pin(messages.map(|r| {
         r.map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)

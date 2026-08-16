@@ -71,7 +71,10 @@ pub fn start_message_delivery_consumer(
             }
         };
 
-        info!("Message delivery consumer running (stream: {})", AGENT_MESSAGES_STREAM);
+        info!(
+            "Message delivery consumer running (stream: {})",
+            AGENT_MESSAGES_STREAM
+        );
 
         // Process messages until cancelled or stream error
         process_messages(messages, peer_registry, cancel).await;
@@ -85,16 +88,18 @@ pub fn start_message_delivery_consumer(
 /// Returns a boxed message stream to avoid naming the private `pull::Consumer` type.
 async fn init_pull_consumer(
     connection: &NatsConnection,
-) -> ErgataiResult<futures::stream::BoxStream<'static, Result<async_nats::jetstream::Message, Box<dyn std::error::Error + Send + Sync>>>> {
+) -> ErgataiResult<
+    futures::stream::BoxStream<
+        'static,
+        Result<async_nats::jetstream::Message, Box<dyn std::error::Error + Send + Sync>>,
+    >,
+> {
     let stream = connection
         .jetstream()
         .get_stream(AGENT_MESSAGES_STREAM)
         .await
         .map_err(|e| {
-            ErgataiError::NatsError(format!(
-                "Stream {} not found: {}",
-                AGENT_MESSAGES_STREAM, e
-            ))
+            ErgataiError::NatsError(format!("Stream {} not found: {}", AGENT_MESSAGES_STREAM, e))
         })?;
 
     // Durable pull consumer with explicit ack.
@@ -113,17 +118,18 @@ async fn init_pull_consumer(
     let consumer = stream
         .get_or_create_consumer(CONSUMER_NAME, consumer_config)
         .await
-        .map_err(|e| {
-            ErgataiError::NatsError(format!("Failed to create consumer: {}", e))
-        })?;
+        .map_err(|e| ErgataiError::NatsError(format!("Failed to create consumer: {}", e)))?;
 
-    let messages = consumer.messages().await.map_err(|e| {
-        ErgataiError::NatsError(format!("Failed to get message stream: {}", e))
-    })?;
+    let messages = consumer
+        .messages()
+        .await
+        .map_err(|e| ErgataiError::NatsError(format!("Failed to get message stream: {}", e)))?;
 
     // Map the specific async_nats error type to Box<dyn Error + Send + Sync>
     // so we don't have to name the private error kind type.
-    Ok(Box::pin(messages.map(|r| r.map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>))))
+    Ok(Box::pin(messages.map(|r| {
+        r.map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+    })))
 }
 
 /// Main message processing loop.
@@ -131,57 +137,47 @@ async fn init_pull_consumer(
 /// Pulls messages from the stream, attempts delivery via AgentRuntime then MCP,
 /// and acks/naks based on the result.
 async fn process_messages(
-    mut messages: futures::stream::BoxStream<'static, Result<async_nats::jetstream::Message, Box<dyn std::error::Error + Send + Sync>>>,
+    mut messages: futures::stream::BoxStream<
+        'static,
+        Result<async_nats::jetstream::Message, Box<dyn std::error::Error + Send + Sync>>,
+    >,
     peer_registry: PeerRegistry,
     cancel: tokio_util::sync::CancellationToken,
 ) {
     loop {
-        // Use timeout to allow periodic cancellation checks
-        let message = tokio::time::timeout(Duration::from_secs(5), messages.next()).await;
-
-        match message {
-            // Timeout — no message within 5s, loop to check cancellation
-            Err(_) => {
-                if cancel.is_cancelled() {
-                    info!("Message delivery consumer cancelled (idle timeout)");
-                    break;
-                }
-                continue;
-            }
-
-            // Stream closed
-            Ok(None) => {
-                warn!("Message stream closed, consumer exiting");
+        // Use tokio::select! to race messages against cancellation — no polling interval,
+        // immediate shutdown when cancel is triggered.
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                info!("Message delivery consumer cancelled");
                 break;
             }
-
-            // Message received
-            Ok(Some(Ok(msg))) => {
-                if cancel.is_cancelled() {
-                    // Nak so it's redelivered after shutdown
-                    if let Err(e) = msg.ack_with(AckKind::Nak(None)).await {
-                        warn!("Failed to nak message during shutdown: {}", e);
+            msg = messages.next() => {
+                match msg {
+                    // Stream closed
+                    None => {
+                        warn!("Message stream closed, consumer exiting");
+                        break;
                     }
-                    break;
+
+                    // Message received
+                    Some(Ok(msg)) => {
+                        handle_message(&msg, &peer_registry).await;
+                    }
+
+                    // Transport error
+                    Some(Err(e)) => {
+                        warn!(error = %e, "Error receiving message from stream");
+                        // Continue — transient errors shouldn't kill the consumer
+                    }
                 }
-
-                handle_message(&msg, &peer_registry).await;
-            }
-
-            // Transport error
-            Ok(Some(Err(e))) => {
-                warn!(error = %e, "Error receiving message from stream");
-                // Continue — transient errors shouldn't kill the consumer
             }
         }
     }
 }
 
 /// Handle a single message: deserialize, deliver, ack/nak.
-async fn handle_message(
-    msg: &async_nats::jetstream::Message,
-    peer_registry: &PeerRegistry,
-) {
+async fn handle_message(msg: &async_nats::jetstream::Message, peer_registry: &PeerRegistry) {
     // Deserialize the payload
     let payload: AgentMessagePayload = match serde_json::from_slice(&msg.payload) {
         Ok(p) => p,
@@ -237,7 +233,11 @@ async fn handle_message(
     // but has a direct MCP connection
     match send_mcp_notification(to, &payload, peer_registry).await {
         Ok(()) => {
-            info!(from = from, to = to, "Message delivered via MCP notification");
+            info!(
+                from = from,
+                to = to,
+                "Message delivered via MCP notification"
+            );
             if let Err(e) = msg.ack().await {
                 warn!("Failed to ack MCP delivery: {}", e);
             }
@@ -288,14 +288,16 @@ async fn send_mcp_notification(
     let notification =
         rmcp::model::CustomNotification::new("ergatai/message", Some(notification_payload));
 
-    peer.send_notification(rmcp::model::ServerNotification::CustomNotification(notification))
-        .await
-        .map_err(|e| {
-            ErgataiError::internal(format!(
-                "MCP notification to {} failed: {}",
-                target_agent_id, e
-            ))
-        })?;
+    peer.send_notification(rmcp::model::ServerNotification::CustomNotification(
+        notification,
+    ))
+    .await
+    .map_err(|e| {
+        ErgataiError::internal(format!(
+            "MCP notification to {} failed: {}",
+            target_agent_id, e
+        ))
+    })?;
 
     Ok(())
 }

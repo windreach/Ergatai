@@ -45,9 +45,9 @@ pub fn init_agent_runtime(
     backend: Arc<dyn AgentRuntimeBackend>,
 ) -> ErgataiResult<Arc<AgentRuntime>> {
     let runtime = Arc::new(AgentRuntime::new(backend));
-    AGENT_RUNTIME.set(runtime.clone()).map_err(|_| {
-        ErgataiError::internal("AgentRuntime already initialized".to_string())
-    })?;
+    AGENT_RUNTIME
+        .set(runtime.clone())
+        .map_err(|_| ErgataiError::internal("AgentRuntime already initialized".to_string()))?;
     Ok(runtime)
 }
 
@@ -125,11 +125,7 @@ impl AgentRuntime {
     /// Inject a message into a running agent.
     ///
     /// Tries backend injection first, falls back to MCP notification.
-    pub async fn inject_message(
-        &self,
-        agent_id: &str,
-        message: &str,
-    ) -> ErgataiResult<()> {
+    pub async fn inject_message(&self, agent_id: &str, message: &str) -> ErgataiResult<()> {
         let info = {
             let registry = self.registry.read().await;
             registry
@@ -141,7 +137,10 @@ impl AgentRuntime {
         // Try backend injection
         match self.backend.inject_message(&info.handle, message).await {
             Ok(()) => {
-                debug!(agent_id = agent_id, "Message delivered via backend injection");
+                debug!(
+                    agent_id = agent_id,
+                    "Message delivered via backend injection"
+                );
                 return Ok(());
             }
             Err(e) => {
@@ -215,11 +214,7 @@ impl AgentRuntime {
     }
 
     /// Set the task ID for a runtime agent (for DAG tracking).
-    pub async fn set_task_id(
-        &self,
-        agent_id: &str,
-        task_id: String,
-    ) -> ErgataiResult<()> {
+    pub async fn set_task_id(&self, agent_id: &str, task_id: String) -> ErgataiResult<()> {
         let mut registry = self.registry.write().await;
         let info = registry
             .get_mut(agent_id)
@@ -229,11 +224,7 @@ impl AgentRuntime {
     }
 
     /// Update agent state.
-    pub async fn set_agent_state(
-        &self,
-        agent_id: &str,
-        state: AgentState,
-    ) -> ErgataiResult<()> {
+    pub async fn set_agent_state(&self, agent_id: &str, state: AgentState) -> ErgataiResult<()> {
         let mut registry = self.registry.write().await;
         let info = registry
             .get_mut(agent_id)
@@ -299,7 +290,11 @@ impl AgentRuntime {
                     info!(agent_id = agent_id, code = code, "Agent exited");
                 }
                 Ok(crate::types::WaitResult::Signaled { signal }) => {
-                    warn!(agent_id = agent_id, signal = signal, "Agent killed by signal");
+                    warn!(
+                        agent_id = agent_id,
+                        signal = signal,
+                        "Agent killed by signal"
+                    );
                 }
                 Ok(crate::types::WaitResult::Timeout) => {
                     warn!(agent_id = agent_id, "Agent monitor timed out (unexpected)");

@@ -16,11 +16,11 @@ use async_nats::jetstream::consumer::{pull, AckPolicy, DeliverPolicy};
 use futures_util::StreamExt;
 use tracing::{debug, error, info, warn};
 
-use ergatai_error::{ErgataiError, ErgataiResult};
 use crate::lock_manager::FileLockManager;
 use crate::lock_waiter::{
     LockCancelRequest, LockGrantedNotification, LockReleaseNotification, LockWaitRequest,
 };
+use ergatai_error::{ErgataiError, ErgataiResult};
 use ergatai_nats::connection::NatsConnection;
 
 /// Consumer for lock waiting queue

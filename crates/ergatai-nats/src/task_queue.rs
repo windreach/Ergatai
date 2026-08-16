@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-use ergatai_error::{ErgataiError, ErgataiResult};
 use crate::connection::NatsConnection;
+use ergatai_error::{ErgataiError, ErgataiResult};
 
 /// Default ack wait time (5 minutes)
 const ACK_WAIT_SECS: u64 = 300;

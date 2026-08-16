@@ -8,8 +8,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use ergatai_error::{ErgataiError, ErgataiResult};
 use ergatai_dag::context::DagContext;
+use ergatai_error::{ErgataiError, ErgataiResult};
 use tokio::sync::Mutex;
 
 use super::task_scheduler::{global_scheduler, TaskScheduler};
@@ -200,11 +200,8 @@ impl DagScheduler {
 
             use futures_util::StreamExt;
             loop {
-                let next = tokio::time::timeout(
-                    std::time::Duration::from_secs(5),
-                    messages.next(),
-                )
-                .await;
+                let next =
+                    tokio::time::timeout(std::time::Duration::from_secs(5), messages.next()).await;
 
                 match next {
                     Err(_) => continue, // idle timeout — loop for abort check
@@ -494,7 +491,8 @@ impl DagScheduler {
                     if let Err(e) = graph.update_status(node_id, TaskStatus::Running) {
                         tracing::warn!(
                             "Failed to update node {} status to Running after successful retry: {}",
-                            node_id, e
+                            node_id,
+                            e
                         );
                     }
                 }
@@ -504,7 +502,8 @@ impl DagScheduler {
                     if let Err(status_err) = graph.update_status(node_id, TaskStatus::Failed) {
                         tracing::warn!(
                             "Failed to update node {} status to Failed: {}",
-                            node_id, status_err
+                            node_id,
+                            status_err
                         );
                     }
                     drop(graph);
@@ -520,7 +519,8 @@ impl DagScheduler {
                 if let Err(e) = graph.update_status(node_id, TaskStatus::Failed) {
                     tracing::warn!(
                         "Failed to defensively set node {} status to Failed: {}",
-                        node_id, e
+                        node_id,
+                        e
                     );
                 }
             }
@@ -646,7 +646,12 @@ impl DagScheduler {
 /// The consumer is durable (`dag_events`) and resumes from the last ack on restart.
 async fn init_dag_event_consumer(
     connection: &ergatai_nats::NatsConnection,
-) -> ErgataiResult<futures_util::stream::BoxStream<'static, Result<async_nats::jetstream::Message, Box<dyn std::error::Error + Send + Sync>>>> {
+) -> ErgataiResult<
+    futures_util::stream::BoxStream<
+        'static,
+        Result<async_nats::jetstream::Message, Box<dyn std::error::Error + Send + Sync>>,
+    >,
+> {
     use async_nats::jetstream::consumer::{pull, AckPolicy, DeliverPolicy};
     use futures_util::StreamExt;
 
@@ -679,9 +684,10 @@ async fn init_dag_event_consumer(
             ErgataiError::NatsError(format!("Failed to create DAG event consumer: {}", e))
         })?;
 
-    let messages = consumer.messages().await.map_err(|e| {
-        ErgataiError::NatsError(format!("Failed to get message stream: {}", e))
-    })?;
+    let messages = consumer
+        .messages()
+        .await
+        .map_err(|e| ErgataiError::NatsError(format!("Failed to get message stream: {}", e)))?;
 
     Ok(Box::pin(messages.map(|r| {
         r.map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
@@ -695,15 +701,14 @@ async fn init_dag_event_consumer(
 /// - `ergatai.dag.complete.*`      → deserialize DagCompletePayload, log (no action yet)
 ///
 /// Acks on success; naks on handler error; acks malformed messages to discard.
-async fn handle_dag_event(
-    js_msg: &async_nats::jetstream::Message,
-    scheduler: &DagScheduler,
-) {
+async fn handle_dag_event(js_msg: &async_nats::jetstream::Message, scheduler: &DagScheduler) {
     let subject = js_msg.subject.as_str();
 
     // ── node_complete.* ──
     if subject.starts_with("ergatai.dag.node_complete.") {
-        let payload: ergatai_nats::NodeCompletePayload = match serde_json::from_slice(&js_msg.payload) {
+        let payload: ergatai_nats::NodeCompletePayload = match serde_json::from_slice(
+            &js_msg.payload,
+        ) {
             Ok(p) => p,
             Err(e) => {
                 tracing::warn!(error = %e, subject = subject, "Malformed node_complete — acking to discard");
@@ -715,10 +720,15 @@ async fn handle_dag_event(
         tracing::info!(node_id = %payload.node_id, "Received JetStream node_complete event");
 
         if !payload.outputs.is_empty() {
-            scheduler.record_outputs(&payload.node_id, payload.outputs).await;
+            scheduler
+                .record_outputs(&payload.node_id, payload.outputs)
+                .await;
         }
 
-        match scheduler.on_node_completed(&payload.node_id, payload.result_file).await {
+        match scheduler
+            .on_node_completed(&payload.node_id, payload.result_file)
+            .await
+        {
             Ok(newly_submitted) => {
                 tracing::info!(
                     node_id = %payload.node_id,
@@ -729,7 +739,9 @@ async fn handle_dag_event(
             }
             Err(e) => {
                 tracing::error!(node_id = %payload.node_id, error = %e, "Failed to process node_complete — naking");
-                let _ = js_msg.ack_with(async_nats::jetstream::message::AckKind::Nak(None)).await;
+                let _ = js_msg
+                    .ack_with(async_nats::jetstream::message::AckKind::Nak(None))
+                    .await;
             }
         }
         return;
@@ -737,7 +749,8 @@ async fn handle_dag_event(
 
     // ── node_failed.* ──
     if subject.starts_with("ergatai.dag.node_failed.") {
-        let payload: ergatai_nats::NodeFailedPayload = match serde_json::from_slice(&js_msg.payload) {
+        let payload: ergatai_nats::NodeFailedPayload = match serde_json::from_slice(&js_msg.payload)
+        {
             Ok(p) => p,
             Err(e) => {
                 tracing::warn!(error = %e, subject = subject, "Malformed node_failed — acking to discard");
@@ -748,14 +761,19 @@ async fn handle_dag_event(
 
         tracing::info!(node_id = %payload.node_id, error = %payload.error, "Received JetStream node_failed event");
 
-        match scheduler.on_node_failed(&payload.node_id, &payload.error).await {
+        match scheduler
+            .on_node_failed(&payload.node_id, &payload.error)
+            .await
+        {
             Ok(()) => {
                 tracing::info!(node_id = %payload.node_id, "Processed node_failed");
                 let _ = js_msg.ack().await;
             }
             Err(e) => {
                 tracing::error!(node_id = %payload.node_id, error = %e, "Failed to process node_failed — naking");
-                let _ = js_msg.ack_with(async_nats::jetstream::message::AckKind::Nak(None)).await;
+                let _ = js_msg
+                    .ack_with(async_nats::jetstream::message::AckKind::Nak(None))
+                    .await;
             }
         }
         return;
@@ -782,7 +800,10 @@ async fn handle_dag_event(
     }
 
     // ── Unknown subject under ergatai.dag.> — ack to discard ──
-    tracing::warn!(subject = subject, "Unhandled DAG event subject — acking to discard");
+    tracing::warn!(
+        subject = subject,
+        "Unhandled DAG event subject — acking to discard"
+    );
     let _ = js_msg.ack().await;
 }
 

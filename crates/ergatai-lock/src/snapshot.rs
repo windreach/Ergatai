@@ -31,8 +31,8 @@
 //!   Return historical content
 //! ```
 
-use ergatai_error::ErgataiError;
 use chrono::Utc;
+use ergatai_error::ErgataiError;
 use git2::{Oid, Repository};
 use std::fs;
 use std::path::{Path, PathBuf};

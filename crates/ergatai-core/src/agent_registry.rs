@@ -4,11 +4,11 @@
 //! The registry is shared globally via `agent_registry()` to allow components
 //! like AgentLauncher to look up agent information.
 
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use tokio::sync::RwLock;
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 
 /// Global agent registry instance.
 ///
@@ -132,7 +132,10 @@ impl AgentRegistry {
     /// Get active agents count
     pub async fn active_count(&self) -> usize {
         let agents = self.agents.read().await;
-        agents.values().filter(|r| r.info.status == AgentStatus::Active).count()
+        agents
+            .values()
+            .filter(|r| r.info.status == AgentStatus::Active)
+            .count()
     }
 
     /// Clean up stale agents (no heartbeat for N seconds)

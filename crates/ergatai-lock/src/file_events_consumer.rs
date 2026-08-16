@@ -10,8 +10,8 @@ use async_nats::jetstream::consumer::{pull, AckPolicy, DeliverPolicy, PullConsum
 use futures_util::StreamExt;
 use tracing::{debug, error, info, warn};
 
-use ergatai_error::{ErgataiError, ErgataiResult};
 use crate::lock_manager::FileLockManager;
+use ergatai_error::{ErgataiError, ErgataiResult};
 use ergatai_nats::connection::NatsConnection;
 use ergatai_nats::events::{FileErrorPayload, FileReadyPayload};
 

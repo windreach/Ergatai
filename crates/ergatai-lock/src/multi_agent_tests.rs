@@ -11,8 +11,8 @@
 
 #[cfg(test)]
 mod tests {
-    use ergatai_error::ErgataiError;
     use crate::{FileLockManager, FileMode, FileToken, SystemToken};
+    use ergatai_error::ErgataiError;
     use std::sync::Arc;
     use tempfile::TempDir;
 

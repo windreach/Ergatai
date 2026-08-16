@@ -3,8 +3,8 @@
 //! Uses BEGIN IMMEDIATE + unique index constraints for atomicity.
 //! WAL mode enabled for concurrent read performance.
 
-use ergatai_error::ErgataiError;
 use chrono::{DateTime, Utc};
+use ergatai_error::ErgataiError;
 use futures_util::StreamExt;
 use rusqlite::{params, Connection};
 use std::collections::HashMap;
@@ -60,7 +60,10 @@ impl<'a> Drop for TransactionGuard<'a> {
         if !self.committed {
             // Best-effort rollback; log warning if it fails (connection may already be broken).
             if let Err(e) = self.conn.execute_batch("ROLLBACK") {
-                warn!("Transaction ROLLBACK failed (connection may be broken): {}", e);
+                warn!(
+                    "Transaction ROLLBACK failed (connection may be broken): {}",
+                    e
+                );
             }
         }
     }
@@ -503,22 +506,20 @@ impl FileLockManager {
                     |row| {
                         Ok(crate::conflict_arbitration::ConflictInfo {
                             file_path: normalized_path.clone(),
-                            current_holder:
-                                crate::conflict_arbitration::LockHolderInfo {
-                                    agent_id: row.get(0)?,
-                                    session_id: row.get(1)?,
-                                    token_id: row.get(2)?,
-                                    priority: row.get(4)?,
-                                    reason: row.get(3)?,
-                                },
-                            new_requester:
-                                crate::conflict_arbitration::LockHolderInfo {
-                                    agent_id: token.agent_id.clone(),
-                                    session_id: token.session_id.clone(),
-                                    token_id: token.id.as_str().to_string(),
-                                    priority: token.priority,
-                                    reason: token.reason.clone(),
-                                },
+                            current_holder: crate::conflict_arbitration::LockHolderInfo {
+                                agent_id: row.get(0)?,
+                                session_id: row.get(1)?,
+                                token_id: row.get(2)?,
+                                priority: row.get(4)?,
+                                reason: row.get(3)?,
+                            },
+                            new_requester: crate::conflict_arbitration::LockHolderInfo {
+                                agent_id: token.agent_id.clone(),
+                                session_id: token.session_id.clone(),
+                                token_id: token.id.as_str().to_string(),
+                                priority: token.priority,
+                                reason: token.reason.clone(),
+                            },
                             timestamp: chrono::Utc::now().to_rfc3339(),
                         })
                     },
@@ -889,8 +890,12 @@ impl FileLockManager {
                     "UPDATE file_locks SET status = 'EXPIRED'
                      WHERE file_path = ?1 AND mode = 'WRITE' AND status = 'ACTIVE'",
                     params![normalized_path],
-                ).map_err(|e| {
-                    ErgataiError::internal(format!("Failed to expire WRITE lock during arbitration on {}: {}", normalized_path, e))
+                )
+                .map_err(|e| {
+                    ErgataiError::internal(format!(
+                        "Failed to expire WRITE lock during arbitration on {}: {}",
+                        normalized_path, e
+                    ))
                 })?;
 
                 if let Ok(mut tracker) = self.retry_tracker.lock() {
@@ -906,7 +911,10 @@ impl FileLockManager {
 
                 // Commit the transaction to persist the EXPIRED status
                 tx.commit().map_err(|e| {
-                    ErgataiError::internal(format!("Failed to commit arbitration on {}: {}", normalized_path, e))
+                    ErgataiError::internal(format!(
+                        "Failed to commit arbitration on {}: {}",
+                        normalized_path, e
+                    ))
                 })?;
                 Ok(true) // Continue with lock acquisition
             }

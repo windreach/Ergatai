@@ -12,8 +12,8 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
-use ergatai_error::ErgataiResult;
 use crate::template::render_template;
+use ergatai_error::ErgataiResult;
 
 /// DAG execution context
 ///

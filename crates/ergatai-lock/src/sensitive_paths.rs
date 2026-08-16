@@ -31,7 +31,11 @@ pub fn check_symlink(path: &Path) -> Result<(), String> {
         }
         Err(e) => {
             // If we can't read metadata, treat as error
-            Err(format!("Cannot read metadata for {}: {}", path.display(), e))
+            Err(format!(
+                "Cannot read metadata for {}: {}",
+                path.display(),
+                e
+            ))
         }
     }
 }

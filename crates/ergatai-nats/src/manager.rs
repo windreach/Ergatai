@@ -6,11 +6,11 @@ use std::sync::OnceLock;
 use tokio::sync::RwLock;
 use tracing::info;
 
-use ergatai_error::ErgataiResult;
 use crate::agent_message_stream::all_agent_message_stream_configs;
 use crate::dag_event_stream::all_dag_event_stream_configs;
 use crate::file_access_streams::all_file_access_stream_configs;
 use crate::{NatsConnection, NatsServer};
+use ergatai_error::ErgataiResult;
 
 /// Global NATS state
 struct NatsState {
@@ -77,7 +77,7 @@ pub async fn init_nats() -> ErgataiResult<NatsConnection> {
     if state.server.is_some() || state.connection.is_some() {
         info!("Replacing stale/disconnected NATS state");
         state.connection = None; // drop old connection first (uses server)
-        state.server = None;     // drop old server (kills child process)
+        state.server = None; // drop old server (kills child process)
     }
 
     state.server = Some(server);
@@ -111,27 +111,19 @@ async fn init_jetstream_streams(connection: &NatsConnection) -> ErgataiResult<()
     for config in configs {
         let stream_name = config.name.clone();
 
-        // Try to get existing stream, create if not exists
-        match jetstream.get_stream(&stream_name).await {
+        // Use get_or_create_stream for atomic check-and-create.
+        // The previous get_stream + create_stream pattern had a TOCTOU race:
+        // two concurrent init calls could both fail get_stream and both attempt
+        // create_stream, causing one to fail with "stream already exists".
+        match jetstream.get_or_create_stream(config).await {
             Ok(_) => {
-                info!("JetStream stream '{}' already exists", stream_name);
+                info!("JetStream stream '{}' ready", stream_name);
             }
-            Err(get_err) => {
-                // Stream doesn't exist (or lookup failed) — attempt to create it.
-                match jetstream.create_stream(config).await {
-                    Ok(_) => {
-                        info!("Created JetStream stream '{}'", stream_name);
-                    }
-                    Err(create_err) => {
-                        // Propagate the error so the caller can decide how to react.
-                        // We surface both the initial lookup error and the create error
-                        // to aid diagnosis.
-                        return Err(ErgataiError::NatsError(format!(
-                            "Failed to initialize JetStream stream '{}': lookup failed: {}; create failed: {}",
-                            stream_name, get_err, create_err
-                        )));
-                    }
-                }
+            Err(e) => {
+                return Err(ErgataiError::NatsError(format!(
+                    "Failed to initialize JetStream stream '{}': {}",
+                    stream_name, e
+                )));
             }
         }
     }

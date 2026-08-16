@@ -3,8 +3,8 @@
 
 use std::path::{Path, PathBuf};
 
-use ergatai_error::{ErgataiError, ErgataiResult};
 use anyhow::Context;
+use ergatai_error::{ErgataiError, ErgataiResult};
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 

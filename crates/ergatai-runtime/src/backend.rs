@@ -10,9 +10,7 @@ use async_trait::async_trait;
 
 use ergatai_error::ErgataiResult;
 
-use crate::types::{
-    AgentHandle, BackendCapabilities, WaitResult, WorkspaceHandle, WorkspaceSpec,
-};
+use crate::types::{AgentHandle, BackendCapabilities, WaitResult, WorkspaceHandle, WorkspaceSpec};
 
 /// Pluggable execution backend for agents.
 ///

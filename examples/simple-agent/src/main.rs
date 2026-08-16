@@ -18,14 +18,12 @@
 //! ```
 
 use rmcp::{
-    ClientHandler, ServiceExt,
     model::{
-        CallToolRequestParams, ClientCapabilities, ClientInfo, CustomNotification,
-        Implementation,
+        CallToolRequestParams, ClientCapabilities, ClientInfo, CustomNotification, Implementation,
     },
     service::NotificationContext,
     transport::StreamableHttpClientTransport,
-    RoleClient,
+    ClientHandler, RoleClient, ServiceExt,
 };
 use tracing::{error, info};
 
@@ -96,8 +94,7 @@ async fn main() -> anyhow::Result<()> {
     // Init logging
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
@@ -124,7 +121,9 @@ async fn main() -> anyhow::Result<()> {
 
     match list_result {
         Ok(result) => {
-            let text = result.content.first()
+            let text = result
+                .content
+                .first()
                 .and_then(|c| c.as_text())
                 .map(|t| t.text.as_str())
                 .unwrap_or("(no output)");
@@ -132,10 +131,15 @@ async fn main() -> anyhow::Result<()> {
 
             // Parse agents to find someone to talk to
             if let Ok(agents_data) = serde_json::from_str::<serde_json::Value>(text) {
-                let agents = agents_data["agents"].as_array().cloned().unwrap_or_default();
-                let other_agents: Vec<_> = agents.iter()
+                let agents = agents_data["agents"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default();
+                let other_agents: Vec<_> = agents
+                    .iter()
                     .filter(|a| {
-                        a["agent_id"].as_str()
+                        a["agent_id"]
+                            .as_str()
                             .map(|id| !id.starts_with(&agent_id))
                             .unwrap_or(false)
                     })
@@ -155,9 +159,14 @@ async fn main() -> anyhow::Result<()> {
                     args.insert("message".into(), serde_json::json!(message));
                     args.insert("message_type".into(), serde_json::json!("request"));
 
-                    match client.call_tool(CallToolRequestParams::new("send_message").with_arguments(args)).await {
+                    match client
+                        .call_tool(CallToolRequestParams::new("send_message").with_arguments(args))
+                        .await
+                    {
                         Ok(send_result) => {
-                            let text = send_result.content.first()
+                            let text = send_result
+                                .content
+                                .first()
                                 .and_then(|c| c.as_text())
                                 .map(|t| t.text.as_str())
                                 .unwrap_or("(no output)");
@@ -183,7 +192,11 @@ async fn main() -> anyhow::Result<()> {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
         loop {
             interval.tick().await;
-            if heartbeat_client.call_tool(CallToolRequestParams::new("list_agents")).await.is_err() {
+            if heartbeat_client
+                .call_tool(CallToolRequestParams::new("list_agents"))
+                .await
+                .is_err()
+            {
                 break; // Server disconnected
             }
         }

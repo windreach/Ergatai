@@ -69,7 +69,9 @@ mod tests {
         let config = dag_events_stream_config();
         assert_eq!(config.name, DAG_EVENTS_STREAM);
         assert_eq!(config.subjects.len(), 2);
-        assert!(config.subjects.contains(&"ergatai.task.submit.*".to_string()));
+        assert!(config
+            .subjects
+            .contains(&"ergatai.task.submit.*".to_string()));
         assert!(config.subjects.contains(&"ergatai.dag.>".to_string()));
         assert_eq!(config.retention, RetentionPolicy::WorkQueue);
         assert_eq!(config.max_age, Duration::from_secs(86_400));

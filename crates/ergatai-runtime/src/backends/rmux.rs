@@ -34,15 +34,13 @@ use tracing::{debug, info, warn};
 use ergatai_error::{ErgataiError, ErgataiResult};
 
 use rmux_sdk::{
-    EnsureSession, EnsureSessionPolicy, Pane, PaneExitState, PaneStateClosedReason,
-    PaneStateEvent, PaneStateEventStream, PaneStateEventsOptions, Rmux, Session, SessionName,
-    SplitDirection, TerminalSizeSpec,
+    EnsureSession, EnsureSessionPolicy, Pane, PaneExitState, PaneStateClosedReason, PaneStateEvent,
+    PaneStateEventStream, PaneStateEventsOptions, Rmux, Session, SessionName, SplitDirection,
+    TerminalSizeSpec,
 };
 
 use crate::backend::AgentRuntimeBackend;
-use crate::types::{
-    AgentHandle, BackendCapabilities, WaitResult, WorkspaceHandle, WorkspaceSpec,
-};
+use crate::types::{AgentHandle, BackendCapabilities, WaitResult, WorkspaceHandle, WorkspaceSpec};
 
 // ── Configuration constants ──
 
@@ -384,10 +382,7 @@ impl RmuxBackend {
                     Ok(Some(_)) => continue,
                     Ok(None) => return Ok(None),
                     Err(e) => {
-                        return Err(ErgataiError::internal(format!(
-                            "state stream error: {}",
-                            e
-                        )));
+                        return Err(ErgataiError::internal(format!("state stream error: {}", e)));
                     }
                 }
             }
@@ -460,10 +455,8 @@ impl AgentRuntimeBackend for RmuxBackend {
     async fn initialize(&self) -> ErgataiResult<()> {
         let rmux = self.get_rmux().await?;
         // Verify daemon is responsive by creating and destroying a probe session
-        let probe_name =
-            SessionName::new("__ergatai_probe__").map_err(|e| {
-                ErgataiError::internal(format!("Invalid probe name: {}", e))
-            })?;
+        let probe_name = SessionName::new("__ergatai_probe__")
+            .map_err(|e| ErgataiError::internal(format!("Invalid probe name: {}", e)))?;
         let session = rmux
             .ensure_session(
                 EnsureSession::named(probe_name)
@@ -494,7 +487,11 @@ impl AgentRuntimeBackend for RmuxBackend {
         let session = self.ensure_session_handle(&rmux, &spec.id).await?;
 
         let created = session.was_created();
-        debug!(session = session_name, created = created, "rmux session ensured");
+        debug!(
+            session = session_name,
+            created = created,
+            "rmux session ensured"
+        );
 
         let mut metadata = HashMap::new();
         metadata.insert("session".to_string(), session_name.clone());
@@ -538,26 +535,23 @@ impl AgentRuntimeBackend for RmuxBackend {
                 .kill_existing(true)
                 .title(format!("agent-{}", handle.id))
                 .await
-                .map_err(|e| {
-                    ErgataiError::internal(format!("rmux shell respawn failed: {}", e))
-                })?;
+                .map_err(|e| ErgataiError::internal(format!("rmux shell respawn failed: {}", e)))?;
             pane
         } else {
             // Subsequent agents: split from the anchor pane to create a new one
             let anchor = anchors.get(&handle.id).ok_or_else(|| {
                 ErgataiError::internal("Anchor pane missing for non-first agent".to_string())
             })?;
-            let new_pane = anchor.split(SplitDirection::Right).await.map_err(|e| {
-                ErgataiError::internal(format!("rmux split failed: {}", e))
-            })?;
+            let new_pane = anchor
+                .split(SplitDirection::Right)
+                .await
+                .map_err(|e| ErgataiError::internal(format!("rmux split failed: {}", e)))?;
             new_pane
                 .shell(command)
                 .kill_existing(true)
                 .title(format!("agent-{}", handle.id))
                 .await
-                .map_err(|e| {
-                    ErgataiError::internal(format!("rmux shell spawn failed: {}", e))
-                })?;
+                .map_err(|e| ErgataiError::internal(format!("rmux shell spawn failed: {}", e)))?;
             new_pane
         };
 
@@ -607,30 +601,45 @@ impl AgentRuntimeBackend for RmuxBackend {
 
     async fn inject_message(&self, handle: &AgentHandle, message: &str) -> ErgataiResult<()> {
         let key = handle.agent_id.clone();
-        let panes = self.panes.read().await;
-        let pane = panes.get(&key).ok_or_else(|| {
-            ErgataiError::internal(format!("Pane not found for agent {}", key))
-        })?;
+        // Clone the Pane out of the map, then drop the read guard BEFORE awaiting.
+        // Pane is Clone + Send + Sync; holding the read guard across the async RPC
+        // would block start_agent/stop_agent if the daemon is slow.
+        let pane = {
+            let panes = self.panes.read().await;
+            panes
+                .get(&key)
+                .cloned()
+                .ok_or_else(|| ErgataiError::internal(format!("Pane not found for agent {}", key)))?
+        };
 
         let sanitized = Self::sanitize_message(message);
         pane.send_text(format!("{}\n", sanitized))
             .await
             .map_err(|e| ErgataiError::internal(format!("rmux send_text failed: {}", e)))?;
 
-        debug!(agent_id = key, bytes = message.len(), "Message injected via rmux");
+        debug!(
+            agent_id = key,
+            bytes = message.len(),
+            "Message injected via rmux"
+        );
         Ok(())
     }
 
     async fn capture_output(&self, handle: &AgentHandle) -> ErgataiResult<Option<String>> {
         let key = handle.agent_id.clone();
-        let panes = self.panes.read().await;
-        let pane = panes.get(&key).ok_or_else(|| {
-            ErgataiError::internal(format!("Pane not found for agent {}", key))
-        })?;
+        // Clone the Pane out, drop read guard before awaiting (same pattern as inject_message)
+        let pane = {
+            let panes = self.panes.read().await;
+            panes
+                .get(&key)
+                .cloned()
+                .ok_or_else(|| ErgataiError::internal(format!("Pane not found for agent {}", key)))?
+        };
 
-        let captured = pane.screenshot().await.map_err(|e| {
-            ErgataiError::internal(format!("rmux screenshot failed: {}", e))
-        })?;
+        let captured = pane
+            .screenshot()
+            .await
+            .map_err(|e| ErgataiError::internal(format!("rmux screenshot failed: {}", e)))?;
 
         Ok(Some(captured.text))
     }
@@ -698,10 +707,9 @@ impl AgentRuntimeBackend for RmuxBackend {
         let key = handle.agent_id.clone();
         let pane = {
             let panes = self.panes.read().await;
-            panes
-                .get(&key)
-                .cloned()
-                .ok_or_else(|| ErgataiError::internal(format!("Pane not found for agent {}", key)))?
+            panes.get(&key).cloned().ok_or_else(|| {
+                ErgataiError::internal(format!("Pane not found for agent {}", key))
+            })?
         };
 
         // Use daemon-level wait_for_exit (much better than polling):
@@ -749,10 +757,8 @@ impl AgentRuntimeBackend for RmuxBackend {
         };
 
         // Create a temporary session handle to list all sessions
-        let probe_name =
-            SessionName::new("__ergatai_list__").map_err(|e| {
-                ErgataiError::internal(format!("Invalid probe name: {}", e))
-            })?;
+        let probe_name = SessionName::new("__ergatai_list__")
+            .map_err(|e| ErgataiError::internal(format!("Invalid probe name: {}", e)))?;
         let probe_session = match rmux
             .ensure_session(
                 EnsureSession::named(probe_name)
@@ -810,9 +816,8 @@ impl AgentRuntimeBackend for RmuxBackend {
 
         info!(session = session_name_str, "Cleaning up rmux session");
 
-        let session_name = SessionName::new(&session_name_str).map_err(|e| {
-            ErgataiError::internal(format!("Invalid session name: {}", e))
-        })?;
+        let session_name = SessionName::new(&session_name_str)
+            .map_err(|e| ErgataiError::internal(format!("Invalid session name: {}", e)))?;
 
         let session = match rmux
             .ensure_session(
@@ -836,7 +841,11 @@ impl AgentRuntimeBackend for RmuxBackend {
 
         match session.kill().await {
             Ok(existed) => {
-                debug!(session = session_name_str, existed = existed, "Session killed");
+                debug!(
+                    session = session_name_str,
+                    existed = existed,
+                    "Session killed"
+                );
             }
             Err(e) => {
                 warn!(

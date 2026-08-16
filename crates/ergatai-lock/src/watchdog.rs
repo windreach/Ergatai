@@ -21,11 +21,11 @@
 //!       └── Connection drop → immediately reclaim all tokens + locks
 //! ```
 
-use ergatai_error::{ErgataiError, ErgataiResult};
 use crate::lock_manager::FileLockManager;
+use chrono::{Duration, Utc};
+use ergatai_error::{ErgataiError, ErgataiResult};
 use ergatai_nats::event_bus::EventBus;
 use ergatai_nats::events::FileErrorPayload;
-use chrono::{Duration, Utc};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;

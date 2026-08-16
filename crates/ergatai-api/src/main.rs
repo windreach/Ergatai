@@ -24,15 +24,11 @@ use axum::{
     Json, Router,
 };
 use clap::Parser;
-use serde::{Deserialize, Serialize};
-use tokio_util::sync::CancellationToken;
-use tower_governor::{
-    GovernorLayer,
-    governor::GovernorConfigBuilder,
-    key_extractor::KeyExtractor,
-};
 use ergatai_core::cross_agent::{get_dag_scheduler, set_dag_scheduler, DagScheduler};
 use ergatai_core::nats;
+use serde::{Deserialize, Serialize};
+use tokio_util::sync::CancellationToken;
+use tower_governor::{governor::GovernorConfigBuilder, key_extractor::KeyExtractor, GovernorLayer};
 
 // MCP module
 mod mcp;
@@ -74,7 +70,10 @@ struct AgentKeyExtractor;
 impl KeyExtractor for AgentKeyExtractor {
     type Key = String;
 
-    fn extract<B>(&self, req: &Request<B>) -> Result<Self::Key, tower_governor::errors::GovernorError> {
+    fn extract<B>(
+        &self,
+        req: &Request<B>,
+    ) -> Result<Self::Key, tower_governor::errors::GovernorError> {
         // Prefer per-session key for MCP traffic — each MCP session gets its own bucket.
         if let Some(session_id) = req.headers().get("mcp-session-id") {
             if let Ok(session_str) = session_id.to_str() {
@@ -87,7 +86,10 @@ impl KeyExtractor for AgentKeyExtractor {
         // `into_make_service_with_connect_info::<SocketAddr>()` — see router
         // setup below. If the extension is missing, bucket under a shared key
         // so all anonymous traffic is collectively rate-limited (not exempt).
-        if let Some(connect_info) = req.extensions().get::<axum::extract::ConnectInfo<SocketAddr>>() {
+        if let Some(connect_info) = req
+            .extensions()
+            .get::<axum::extract::ConnectInfo<SocketAddr>>()
+        {
             return Ok(format!("ip:{}", connect_info.0.ip()));
         }
         if let Some(peer_addr) = req.extensions().get::<SocketAddr>() {
@@ -206,7 +208,10 @@ async fn async_main(args: Args) -> Result<()> {
         match (&args.tls_cert, &args.tls_key) {
             (Some(cert), Some(key)) => {
                 if !cert.exists() {
-                    return Err(anyhow::anyhow!("TLS certificate file not found: {}", cert.display()));
+                    return Err(anyhow::anyhow!(
+                        "TLS certificate file not found: {}",
+                        cert.display()
+                    ));
                 }
                 if !key.exists() {
                     return Err(anyhow::anyhow!("TLS key file not found: {}", key.display()));
@@ -214,15 +219,21 @@ async fn async_main(args: Args) -> Result<()> {
                 tracing::info!("TLS enabled with certificate: {}", cert.display());
             }
             (Some(_), None) => {
-                return Err(anyhow::anyhow!("--tls-key is required when --tls-cert is provided"));
+                return Err(anyhow::anyhow!(
+                    "--tls-key is required when --tls-cert is provided"
+                ));
             }
             (None, Some(_)) => {
-                return Err(anyhow::anyhow!("--tls-cert is required when --tls-key is provided"));
+                return Err(anyhow::anyhow!(
+                    "--tls-cert is required when --tls-key is provided"
+                ));
             }
             (None, None) => unreachable!(),
         }
     } else {
-        tracing::warn!("TLS disabled - using plaintext HTTP. Provide --tls-cert and --tls-key for HTTPS.");
+        tracing::warn!(
+            "TLS disabled - using plaintext HTTP. Provide --tls-cert and --tls-key for HTTPS."
+        );
     }
 
     // Initialize MCP server with Streamable HTTP transport
@@ -285,7 +296,9 @@ async fn async_main(args: Args) -> Result<()> {
         "MCP server initialized (protocol 2025-06-18, Streamable HTTP, SSE keep-alive: {}s)",
         args.sse_keep_alive
     );
-    tracing::info!("Agent messaging: AgentRuntime injection (preferred) + MCP notification (fallback)");
+    tracing::info!(
+        "Agent messaging: AgentRuntime injection (preferred) + MCP notification (fallback)"
+    );
 
     // Start background peer reaper — detects abrupt disconnects (kill, network drop)
     // and cleans up stale agent registrations within 10 seconds.
@@ -351,7 +364,7 @@ async fn async_main(args: Args) -> Result<()> {
             .burst_size(20)
             .key_extractor(AgentKeyExtractor)
             .finish()
-            .expect("Failed to build rate limiter config")
+            .expect("Failed to build rate limiter config"),
     );
 
     let app = Router::new()
@@ -373,7 +386,9 @@ async fn async_main(args: Args) -> Result<()> {
             auth_middleware,
         ))
         // Rate limiting layer (applies to all routes)
-        .layer(GovernorLayer { config: governor_conf })
+        .layer(GovernorLayer {
+            config: governor_conf,
+        })
         .with_state(state);
 
     // Start server
@@ -435,19 +450,27 @@ async fn health_check() -> impl IntoResponse {
     } else {
         false
     };
-    checks.insert("nats_connected".to_string(), serde_json::Value::Bool(nats_connected));
+    checks.insert(
+        "nats_connected".to_string(),
+        serde_json::Value::Bool(nats_connected),
+    );
     if !nats_connected {
         all_healthy = false;
     }
 
     // Check NATS server port
     let nats_port = nats::get_nats_server_port().await;
-    checks.insert("nats_port".to_string(), serde_json::Value::Number(
-        nats_port.map(|p| p as u64).unwrap_or(0).into()
-    ));
+    checks.insert(
+        "nats_port".to_string(),
+        serde_json::Value::Number(nats_port.map(|p| p as u64).unwrap_or(0).into()),
+    );
 
     let status = if all_healthy { "healthy" } else { "unhealthy" };
-    let status_code = if all_healthy { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
+    let status_code = if all_healthy {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
 
     (
         status_code,
@@ -463,12 +486,18 @@ async fn health_check() -> impl IntoResponse {
 /// Returns 503 if any critical subsystem is down.
 async fn readiness_check() -> impl IntoResponse {
     let nats_ready = nats::is_nats_initialized().await
-        && nats::get_nats_connection().await.map(|c| c.is_connected()).unwrap_or(false);
+        && nats::get_nats_connection()
+            .await
+            .map(|c| c.is_connected())
+            .unwrap_or(false);
 
     if nats_ready {
         (StatusCode::OK, Json(serde_json::json!({"ready": true})))
     } else {
-        (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"ready": false})))
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"ready": false})),
+        )
     }
 }
 
@@ -480,13 +509,15 @@ async fn metrics_endpoint() -> impl IntoResponse {
             let output = handle.render();
             (
                 StatusCode::OK,
-                [(header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+                [(
+                    header::CONTENT_TYPE,
+                    "text/plain; version=0.0.4; charset=utf-8",
+                )],
                 output,
-            ).into_response()
+            )
+                .into_response()
         }
-        None => {
-            (StatusCode::INTERNAL_SERVER_ERROR, "Metrics not initialized").into_response()
-        }
+        None => (StatusCode::INTERNAL_SERVER_ERROR, "Metrics not initialized").into_response(),
     }
 }
 
@@ -628,7 +659,9 @@ async fn get_status() -> impl IntoResponse {
     let nats_initialized = nats::is_nats_initialized().await;
     let nats_port = nats::get_nats_server_port().await;
 
-    let active_agents = ergatai_core::agent_registry::agent_registry().active_count().await;
+    let active_agents = ergatai_core::agent_registry::agent_registry()
+        .active_count()
+        .await;
 
     // Record active agents gauge
     metrics::gauge!("active_agents").set(active_agents as f64);

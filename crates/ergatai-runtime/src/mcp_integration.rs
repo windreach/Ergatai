@@ -35,9 +35,9 @@ type SendNotificationFn = Arc<
     Box<
         dyn Fn(
                 &str,
-            ) -> std::pin::Pin<
-                Box<dyn std::future::Future<Output = ErgataiResult<()>> + Send>,
-            > + Send
+            )
+                -> std::pin::Pin<Box<dyn std::future::Future<Output = ErgataiResult<()>> + Send>>
+            + Send
             + Sync,
     >,
 >;
@@ -68,9 +68,7 @@ impl McpIntegration {
         let send_fn_erased: SendNotificationFn = Arc::new(Box::new(move |msg: &str| {
             let fut = send_fn(msg);
             Box::pin(fut)
-                as std::pin::Pin<
-                    Box<dyn std::future::Future<Output = ErgataiResult<()>> + Send>,
-                >
+                as std::pin::Pin<Box<dyn std::future::Future<Output = ErgataiResult<()>> + Send>>
         }));
 
         self.peers.write().await.insert(
@@ -80,7 +78,10 @@ impl McpIntegration {
             },
         );
 
-        debug!(mcp_agent_id = mcp_agent_id, "MCP peer registered in runtime");
+        debug!(
+            mcp_agent_id = mcp_agent_id,
+            "MCP peer registered in runtime"
+        );
     }
 
     /// Unregister a peer when an MCP agent disconnects.
@@ -93,11 +94,7 @@ impl McpIntegration {
     }
 
     /// Send a notification to an MCP agent.
-    pub async fn send_notification(
-        &self,
-        mcp_agent_id: &str,
-        message: &str,
-    ) -> ErgataiResult<()> {
+    pub async fn send_notification(&self, mcp_agent_id: &str, message: &str) -> ErgataiResult<()> {
         // Clone the send_fn out of the map, then drop the read guard BEFORE awaiting.
         // This prevents self-deadlock if the closure triggers register_peer/unregister_peer.
         let send_fn = {
