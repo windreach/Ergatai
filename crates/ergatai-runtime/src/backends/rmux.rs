@@ -34,9 +34,9 @@ use tracing::{debug, info, warn};
 use ergatai_error::{ErgataiError, ErgataiResult};
 
 use rmux_sdk::{
-    EnsureSession, EnsureSessionPolicy, Pane, PaneExitState, PaneStateClosedReason, PaneStateEvent,
-    PaneStateEventStream, PaneStateEventsOptions, Rmux, Session, SessionName, SplitDirection,
-    TerminalSizeSpec,
+    EnsureSession, EnsureSessionPolicy, Pane, PaneExitState, PaneId, PaneProcessState,
+    PaneStateClosedReason, PaneStateEvent, PaneStateEventStream, PaneStateEventsOptions,
+    RmuxEndpoint, Rmux, Session, SessionName, SplitDirection, TerminalSizeSpec,
 };
 
 use crate::backend::AgentRuntimeBackend;
@@ -81,6 +81,8 @@ pub struct RmuxBackend {
     /// Default terminal dimensions
     width: u16,
     height: u16,
+    /// Daemon endpoint (Unix socket path). `None` = platform default.
+    endpoint: RmuxEndpoint,
     /// rmux daemon connection (lazy init, wrapped in Arc for shared access)
     rmux: Arc<Mutex<Option<Arc<Rmux>>>>,
     /// Active panes keyed by agent_id
@@ -97,6 +99,7 @@ impl RmuxBackend {
             session_prefix: session_prefix.to_string(),
             width: DEFAULT_WIDTH,
             height: DEFAULT_HEIGHT,
+            endpoint: RmuxEndpoint::Default,
             rmux: Arc::new(Mutex::new(None)),
             panes: Arc::new(RwLock::new(HashMap::new())),
             anchor_panes: Arc::new(RwLock::new(HashMap::new())),
@@ -110,6 +113,23 @@ impl RmuxBackend {
         self
     }
 
+    /// Create with a custom daemon endpoint (Unix socket path).
+    ///
+    /// Use this to connect to a specific rmux daemon instance, or to
+    /// isolate multiple Ergatai instances running on the same host by
+    /// giving each its own daemon socket.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let backend = RmuxBackend::new("ergatai")
+    ///     .with_endpoint(RmuxEndpoint::UnixSocket("/tmp/ergatai-rmux.sock".into()));
+    /// ```
+    pub fn with_endpoint(mut self, endpoint: RmuxEndpoint) -> Self {
+        self.endpoint = endpoint;
+        self
+    }
+
     /// Build the full session name from prefix + workspace ID.
     fn session_name(&self, workspace_id: &str) -> String {
         let safe_id = workspace_id.replace(['|', ':', '.'], "-");
@@ -119,14 +139,19 @@ impl RmuxBackend {
     /// Get or lazily initialize the rmux daemon connection.
     ///
     /// Returns an `Arc<Rmux>` — cheap to clone, shares the daemon connection.
+    /// Uses the configured endpoint (or platform default if none set).
     async fn get_rmux(&self) -> ErgataiResult<Arc<Rmux>> {
         let mut guard = self.rmux.lock().await;
         if let Some(rmux) = guard.as_ref() {
             return Ok(rmux.clone());
         }
 
-        info!("Connecting to rmux daemon (or starting one)");
+        info!(
+            endpoint = ?self.endpoint,
+            "Connecting to rmux daemon (or starting one)"
+        );
         let rmux = Rmux::builder()
+            .endpoint(self.endpoint.clone())
             .default_timeout(RMUX_DEFAULT_TIMEOUT)
             .connect_or_start()
             .await
@@ -153,7 +178,7 @@ impl RmuxBackend {
             .ensure_session(
                 EnsureSession::named(name)
                     .policy(EnsureSessionPolicy::CreateOrReuse)
-                    .detached(true)
+                    .detached(false) // Don't detach - ensures pane(0,0) exists
                     .size(TerminalSizeSpec::new(self.width, self.height)),
             )
             .await
@@ -434,6 +459,92 @@ impl RmuxBackend {
         }
     }
 
+    // ── Daemon lifecycle ──
+
+    /// Start the rmux daemon.
+    ///
+    /// Uses `ergatai_binary::ensure_rmux_daemon()` to locate the binary
+    /// and start it in the background. If the daemon is already running,
+    /// this is a no-op.
+    ///
+    /// The daemon communicates via Unix domain socket (or Windows named pipe).
+    /// **rmux does not bind to a TCP/IP address** — there is no "IP" to
+    /// change. To isolate daemon instances, use `with_endpoint()` with a
+    /// custom Unix socket path.
+    pub fn start_daemon(&self) -> ErgataiResult<()> {
+        ergatai_binary::ensure_rmux_daemon(true)?;
+        info!("rmux daemon ensured (started if not running)");
+        Ok(())
+    }
+
+    /// Stop the rmux daemon.
+    ///
+    /// Connects to the daemon (using the configured endpoint) and sends
+    /// a shutdown request via `Rmux::shutdown()`. This is equivalent to
+    /// `rmux kill-server` on the CLI.
+    ///
+    /// After stopping, all sessions and panes managed by the daemon are
+    /// destroyed. This backend's local tracking state is also cleared.
+    pub async fn stop_daemon(&self) -> ErgataiResult<()> {
+        // Try to connect and shutdown gracefully
+        let rmux = self.get_rmux().await?;
+
+        info!("Sending shutdown request to rmux daemon");
+        // Rmux::shutdown() consumes self, so we need to work around that.
+        // We'll use the CLI command instead for a non-consuming shutdown.
+        drop(rmux);
+
+        // Use the rmux binary directly to send kill-server
+        let daemon_path = ergatai_binary::get_daemon_path().ok_or_else(|| {
+            ErgataiError::internal("rmux daemon binary path not configured".to_string())
+        })?;
+
+        let mut cmd = std::process::Command::new(&daemon_path);
+        cmd.arg("kill-server");
+
+        // Add socket path if using a custom endpoint
+        if let RmuxEndpoint::UnixSocket(ref path) = self.endpoint {
+            cmd.arg("-S").arg(path);
+        }
+
+        match cmd.output() {
+            Ok(output) => {
+                if output.status.success() {
+                    info!("rmux daemon stopped via kill-server");
+                } else {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    warn!(
+                        stderr = %stderr,
+                        "rmux kill-server returned non-zero (daemon may already be stopped)"
+                    );
+                }
+            }
+            Err(e) => {
+                warn!(error = %e, "Failed to execute rmux kill-server");
+            }
+        }
+
+        // Clear local connection state
+        *self.rmux.lock().await = None;
+        self.panes.write().await.clear();
+        self.anchor_panes.write().await.clear();
+
+        Ok(())
+    }
+
+    /// Restart the rmux daemon (stop + start).
+    ///
+    /// Useful after changing configuration or when the daemon is in a
+    /// bad state. Clears all local tracking state.
+    pub async fn restart_daemon(&self) -> ErgataiResult<()> {
+        self.stop_daemon().await?;
+        // Brief pause to let the socket file clean up
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        self.start_daemon()?;
+        info!("rmux daemon restarted");
+        Ok(())
+    }
+
     // ── Daemon status ──
 
     /// Check whether the rmux daemon binary is available on this host.
@@ -453,27 +564,538 @@ impl RmuxBackend {
         self.rmux.lock().await.is_some()
     }
 
+    /// Inject a message into any pane known to the daemon, identified by
+    /// session name and pane id.
+    ///
+    /// Unlike `inject_message()` (which requires the pane to be tracked in
+    /// `self.panes`), this method reconstructs a lightweight `Pane` handle
+    /// from the daemon on demand. This enables messaging to panes that were:
+    /// - Discovered via `daemon_info()` / `find_panes()` but not launched by this backend
+    /// - Created by another Ergatai process or manually by the user
+    /// - Survived a backend restart (daemon persists, local tracking does not)
+    ///
+    /// # Arguments
+    ///
+    /// * `session_name` — rmux session name (e.g., `"ergatai-task-123"`)
+    /// * `pane_id` — stable pane identity in `"%N"` format (e.g., `"%3"`)
+    /// * `message` — text to inject (newlines stripped, truncated to 64 KiB)
+    pub async fn inject_message_to_pane(
+        &self,
+        session_name: &str,
+        pane_id: &str,
+        message: &str,
+    ) -> ErgataiResult<()> {
+        let rmux = self.get_rmux().await?;
+
+        let sname = SessionName::new(session_name).map_err(|e| {
+            ErgataiError::internal(format!("Invalid session name '{}': {}", session_name, e))
+        })?;
+
+        let raw_id = pane_id.strip_prefix('%').ok_or_else(|| {
+            ErgataiError::internal(format!(
+                "Invalid pane_id '{}': must start with '%'",
+                pane_id
+            ))
+        })?;
+        let pid = PaneId::new(raw_id.parse::<u32>().map_err(|e| {
+            ErgataiError::internal(format!("Invalid pane_id '{}': {}", pane_id, e))
+        })?);
+
+        let pane = rmux.pane_by_id(sname, pid).await.map_err(|e| {
+            ErgataiError::internal(format!(
+                "Failed to get pane {} in session {}: {}",
+                pane_id, session_name, e
+            ))
+        })?;
+
+        let sanitized = Self::sanitize_message(message);
+        pane.send_text(format!("{}\n", sanitized))
+            .await
+            .map_err(|e| {
+                ErgataiError::internal(format!(
+                    "Failed to inject message into pane {}: {}",
+                    pane_id, e
+                ))
+            })?;
+
+        debug!(
+            session = session_name,
+            pane_id = pane_id,
+            bytes = message.len(),
+            "Message injected via daemon-discovered pane"
+        );
+        Ok(())
+    }
+
+    /// Close any pane known to the daemon, identified by session name and
+    /// pane id.
+    ///
+    /// Unlike `stop_agent()` (which requires the pane to be tracked in
+    /// `self.panes`), this method reconstructs a lightweight `Pane` handle
+    /// from the daemon on demand and closes it. This enables stopping panes
+    /// that were discovered via `daemon_info()` but not launched by this
+    /// backend, or that survived a backend restart.
+    ///
+    /// # Arguments
+    ///
+    /// * `session_name` — rmux session name (e.g., `"ergatai-task-123"`)
+    /// * `pane_id` — stable pane identity in `"%N"` format (e.g., `"%3"`)
+    pub async fn stop_pane(&self, session_name: &str, pane_id: &str) -> ErgataiResult<()> {
+        let rmux = self.get_rmux().await?;
+
+        let sname = SessionName::new(session_name).map_err(|e| {
+            ErgataiError::internal(format!("Invalid session name '{}': {}", session_name, e))
+        })?;
+
+        let raw_id = pane_id.strip_prefix('%').ok_or_else(|| {
+            ErgataiError::internal(format!(
+                "Invalid pane_id '{}': must start with '%'",
+                pane_id
+            ))
+        })?;
+        let pid = PaneId::new(raw_id.parse::<u32>().map_err(|e| {
+            ErgataiError::internal(format!("Invalid pane_id '{}': {}", pane_id, e))
+        })?);
+
+        let pane = rmux.pane_by_id(sname, pid).await.map_err(|e| {
+            ErgataiError::internal(format!(
+                "Failed to get pane {} in session {}: {}",
+                pane_id, session_name, e
+            ))
+        })?;
+
+        info!(
+            session = session_name,
+            pane_id = pane_id,
+            "Stopping daemon-discovered pane"
+        );
+
+        match pane.close().await {
+            Ok(outcome) => {
+                debug!(
+                    session = session_name,
+                    pane_id = pane_id,
+                    ?outcome,
+                    "Daemon-discovered pane closed"
+                );
+            }
+            Err(e) => {
+                warn!(
+                    session = session_name,
+                    pane_id = pane_id,
+                    error = %e,
+                    "Failed to close daemon-discovered pane (may already be closed)"
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Force-kill any pane known to the daemon.
+    ///
+    /// For rmux, `kill_pane` and `stop_pane` are the same — closing the pane
+    /// causes the daemon to send SIGKILL to the pane's foreground process.
+    pub async fn kill_pane(&self, session_name: &str, pane_id: &str) -> ErgataiResult<()> {
+        self.stop_pane(session_name, pane_id).await
+    }
+
+    /// Gracefully stop a daemon-discovered pane by sending an exit command
+    /// first, then closing the pane if the process doesn't exit on its own.
+    ///
+    /// # Flow
+    ///
+    /// 1. Send `exit_command` as text into the pane (e.g., `"/exit\n"`, `"exit\n"`)
+    ///    or a special key (e.g., `"C-c"` for Ctrl+C)
+    /// 2. Wait up to `grace_period` for the process to exit
+    /// 3. If still running after grace period, close the pane (force kill)
+    ///
+    /// # Arguments
+    ///
+    /// * `session_name` — rmux session name
+    /// * `pane_id` — stable pane identity (`"%N"` format)
+    /// * `exit_command` — text to send (e.g., `"/exit\n"`, `"exit\n"`) or a
+    ///   tmux key token (e.g., `"C-c"` for Ctrl+C, `"C-d"` for Ctrl+D)
+    /// * `grace_period` — how long to wait for clean exit before force-closing.
+    ///   Pass `None` for a 5-second default.
+    pub async fn graceful_stop_pane(
+        &self,
+        session_name: &str,
+        pane_id: &str,
+        exit_command: &str,
+        grace_period: Option<Duration>,
+    ) -> ErgataiResult<()> {
+        let rmux = self.get_rmux().await?;
+        let grace = grace_period.unwrap_or(Duration::from_secs(5));
+
+        let sname = SessionName::new(session_name).map_err(|e| {
+            ErgataiError::internal(format!("Invalid session name '{}': {}", session_name, e))
+        })?;
+
+        let raw_id = pane_id.strip_prefix('%').ok_or_else(|| {
+            ErgataiError::internal(format!("Invalid pane_id '{}': must start with '%'", pane_id))
+        })?;
+        let pid = PaneId::new(raw_id.parse::<u32>().map_err(|e| {
+            ErgataiError::internal(format!("Invalid pane_id '{}': {}", pane_id, e))
+        })?);
+
+        let pane = rmux.pane_by_id(sname, pid).await.map_err(|e| {
+            ErgataiError::internal(format!(
+                "Failed to get pane {} in session {}: {}",
+                pane_id, session_name, e
+            ))
+        })?;
+
+        // Step 1: Send exit command
+        info!(
+            session = session_name,
+            pane_id = pane_id,
+            command = exit_command,
+            "Sending graceful exit command"
+        );
+
+        // Detect if this is a tmux key token (short, no spaces, no newlines)
+        let is_key_token = exit_command.len() <= 8
+            && !exit_command.contains(' ')
+            && !exit_command.contains('\n')
+            && !exit_command.contains('\r');
+
+        if is_key_token && (exit_command.starts_with("C-") || exit_command.starts_with("M-")
+            || exit_command.eq_ignore_ascii_case("Enter")
+            || exit_command.eq_ignore_ascii_case("Escape")
+            || exit_command.eq_ignore_ascii_case("Tab")
+            || exit_command.eq_ignore_ascii_case("BSpace")
+            || exit_command.eq_ignore_ascii_case("Space"))
+        {
+            pane.send_key(exit_command).await.map_err(|e| {
+                ErgataiError::internal(format!("Failed to send key '{}': {}", exit_command, e))
+            })?;
+        } else {
+            let sanitized = Self::sanitize_message(exit_command);
+            pane.send_text(sanitized).await.map_err(|e| {
+                ErgataiError::internal(format!(
+                    "Failed to send exit command '{}': {}",
+                    exit_command, e
+                ))
+            })?;
+        }
+
+        // Step 2: Wait for the process to exit
+        match tokio::time::timeout(grace, pane.wait_for_exit()).await {
+            Ok(Ok(_)) => {
+                debug!(
+                    session = session_name,
+                    pane_id = pane_id,
+                    "Pane exited gracefully after exit command"
+                );
+                return Ok(());
+            }
+            Ok(Err(e)) => {
+                warn!(
+                    session = session_name,
+                    pane_id = pane_id,
+                    error = %e,
+                    "Error waiting for pane exit"
+                );
+            }
+            Err(_) => {
+                debug!(
+                    session = session_name,
+                    pane_id = pane_id,
+                    grace_secs = grace.as_secs(),
+                    "Pane did not exit within grace period, force-closing"
+                );
+            }
+        }
+
+        // Step 3: Force close
+        match pane.close().await {
+            Ok(outcome) => {
+                debug!(
+                    session = session_name,
+                    pane_id = pane_id,
+                    ?outcome,
+                    "Pane force-closed after grace period"
+                );
+            }
+            Err(e) => {
+                warn!(
+                    session = session_name,
+                    pane_id = pane_id,
+                    error = %e,
+                    "Failed to force-close pane"
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Gracefully stop a locally-tracked agent by sending an exit command
+    /// first, then closing the pane if the process doesn't exit on its own.
+    ///
+    /// Same flow as `graceful_stop_pane()` but uses the local pane tracking
+    /// map instead of daemon discovery.
+    pub async fn graceful_stop_agent(
+        &self,
+        handle: &AgentHandle,
+        exit_command: &str,
+        grace_period: Option<Duration>,
+    ) -> ErgataiResult<()> {
+        let key = handle.agent_id.clone();
+        let grace = grace_period.unwrap_or(Duration::from_secs(5));
+
+        let pane = {
+            let panes = self.panes.read().await;
+            panes.get(&key).cloned().ok_or_else(|| {
+                ErgataiError::internal(format!("Pane not found for agent {}", key))
+            })?
+        };
+
+        // Step 1: Send exit command
+        info!(agent_id = key, command = exit_command, "Sending graceful exit command");
+
+        let is_key_token = exit_command.len() <= 8
+            && !exit_command.contains(' ')
+            && !exit_command.contains('\n')
+            && !exit_command.contains('\r');
+
+        if is_key_token && (exit_command.starts_with("C-") || exit_command.starts_with("M-")
+            || exit_command.eq_ignore_ascii_case("Enter")
+            || exit_command.eq_ignore_ascii_case("Escape")
+            || exit_command.eq_ignore_ascii_case("Tab")
+            || exit_command.eq_ignore_ascii_case("BSpace")
+            || exit_command.eq_ignore_ascii_case("Space"))
+        {
+            pane.send_key(exit_command).await.map_err(|e| {
+                ErgataiError::internal(format!("Failed to send key '{}': {}", exit_command, e))
+            })?;
+        } else {
+            let sanitized = Self::sanitize_message(exit_command);
+            pane.send_text(sanitized).await.map_err(|e| {
+                ErgataiError::internal(format!(
+                    "Failed to send exit command '{}': {}",
+                    exit_command, e
+                ))
+            })?;
+        }
+
+        // Step 2: Wait for the process to exit
+        match tokio::time::timeout(grace, pane.wait_for_exit()).await {
+            Ok(Ok(_)) => {
+                debug!(agent_id = key, "Agent exited gracefully after exit command");
+                // Remove from local tracking
+                self.panes.write().await.remove(&key);
+                return Ok(());
+            }
+            Ok(Err(e)) => {
+                warn!(agent_id = key, error = %e, "Error waiting for agent exit");
+            }
+            Err(_) => {
+                debug!(
+                    agent_id = key,
+                    grace_secs = grace.as_secs(),
+                    "Agent did not exit within grace period, force-closing"
+                );
+            }
+        }
+
+        // Step 3: Force close
+        self.panes.write().await.remove(&key);
+        match pane.close().await {
+            Ok(outcome) => {
+                debug!(agent_id = key, ?outcome, "Agent pane force-closed");
+            }
+            Err(e) => {
+                warn!(agent_id = key, error = %e, "Failed to force-close agent pane");
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Capture the current visible terminal content of a daemon-discovered pane.
+    ///
+    /// Unlike `capture_output()` (which requires the pane to be tracked in
+    /// `self.panes`), this method reconstructs a lightweight `Pane` handle
+    /// from the daemon on demand. Returns the text content of the pane's
+    /// current visible screen (the terminal viewport, not scrollback).
+    ///
+    /// # Arguments
+    ///
+    /// * `session_name` — rmux session name (e.g., `"ergatai-task-123"`)
+    /// * `pane_id` — stable pane identity in `"%N"` format (e.g., `"%3"`)
+    pub async fn capture_pane_output(
+        &self,
+        session_name: &str,
+        pane_id: &str,
+    ) -> ErgataiResult<String> {
+        let rmux = self.get_rmux().await?;
+
+        let sname = SessionName::new(session_name).map_err(|e| {
+            ErgataiError::internal(format!("Invalid session name '{}': {}", session_name, e))
+        })?;
+
+        let raw_id = pane_id.strip_prefix('%').ok_or_else(|| {
+            ErgataiError::internal(format!(
+                "Invalid pane_id '{}': must start with '%'",
+                pane_id
+            ))
+        })?;
+        let pid = PaneId::new(raw_id.parse::<u32>().map_err(|e| {
+            ErgataiError::internal(format!("Invalid pane_id '{}': {}", pane_id, e))
+        })?);
+
+        let pane = rmux.pane_by_id(sname, pid).await.map_err(|e| {
+            ErgataiError::internal(format!(
+                "Failed to get pane {} in session {}: {}",
+                pane_id, session_name, e
+            ))
+        })?;
+
+        let captured = pane.screenshot().await.map_err(|e| {
+            ErgataiError::internal(format!(
+                "Failed to capture pane {} in session {}: {}",
+                pane_id, session_name, e
+            ))
+        })?;
+
+        debug!(
+            session = session_name,
+            pane_id = pane_id,
+            bytes = captured.text.len(),
+            "Pane output captured via daemon"
+        );
+
+        Ok(captured.text)
+    }
+
     /// Snapshot of daemon status, useful for diagnostics and the CLI
     /// `ergatai daemon status` command.
+    ///
+    /// Queries the rmux daemon for **real state** — does not rely on the
+    /// backend's local tracking maps. All data comes from daemon protocol
+    /// calls: `list_sessions()` for session enumeration and `find_panes()`
+    /// for per-pane discovery (title, command, cwd, process state).
+    ///
+    /// This means `daemon_info()` works correctly even if:
+    /// - The backend was freshly created (no local panes tracked yet)
+    /// - Another process created ergatai sessions that this backend didn't launch
+    /// - Panes were created outside the backend's awareness
     pub async fn daemon_info(&self) -> RmuxDaemonInfo {
         let binary_available = self.is_daemon_available();
         let connected = self.is_daemon_connected().await;
-        let pane_count = self.panes.read().await.len();
-        let workspace_count = self.anchor_panes.read().await.len();
+        let tracked_pane_count = self.panes.read().await.len();
+        let tracked_workspace_count = self.anchor_panes.read().await.len();
 
         let binary_path = ergatai_binary::configure_rmux_daemon().ok();
+
+        // Query real daemon state if connected — fully daemon-driven, no
+        // dependency on local self.panes or self.anchor_panes tracking.
+        let mut total_sessions: usize = 0;
+        let mut total_daemon_panes: usize = 0;
+        let mut ergatai_sessions: Vec<String> = Vec::new();
+        let mut managed_panes: Vec<ManagedPaneInfo> = Vec::new();
+
+        if connected {
+            if let Ok(rmux) = self.get_rmux().await {
+                let prefix = format!("{}-", self.session_prefix);
+
+                // 1. List all daemon sessions (single protocol call)
+                if let Ok(session_names) = rmux.list_sessions().await {
+                    total_sessions = session_names.len();
+
+                    for name in &session_names {
+                        let name_str = name.as_str().to_string();
+                        if name_str.starts_with(&prefix) {
+                            ergatai_sessions.push(name_str);
+                        }
+                    }
+                }
+
+                // 2. Discover all panes from the daemon (uses list-panes +
+                //    per-pane info/title internally — fully daemon-driven)
+                if let Ok(all_discovered) = rmux.find_panes().all().await {
+                    total_daemon_panes = all_discovered.len();
+
+                    // 3. Filter to ergatai-owned sessions and build details
+                    for dp in &all_discovered {
+                        if !dp.session_name.as_str().starts_with(&prefix) {
+                            continue;
+                        }
+
+                        let process_state = match &dp.process {
+                            PaneProcessState::Running { pid } => {
+                                if pid.is_some() {
+                                    "running"
+                                } else {
+                                    "running (pid unknown)"
+                                }
+                            }
+                            PaneProcessState::Exited => "exited",
+                            PaneProcessState::Unknown => "unknown",
+                            _ => "unknown",
+                        };
+
+                        let pid = match &dp.process {
+                            PaneProcessState::Running { pid } => *pid,
+                            _ => None,
+                        };
+
+                        // Query exit_state from daemon (cheap — info() on a
+                        // single pane re-reads the daemon's retained state)
+                        let (exit_code, exit_signal) =
+                            if dp.process == PaneProcessState::Exited {
+                                match dp.pane.info().await {
+                                    Ok(snapshot) => {
+                                        let exit = snapshot
+                                            .pane(dp.pane_id)
+                                            .and_then(|pi| pi.exit_state.as_ref());
+                                        (
+                                            exit.and_then(|e| e.code),
+                                            exit.and_then(|e| e.signal),
+                                        )
+                                    }
+                                    Err(_) => (None, None),
+                                }
+                            } else {
+                                (None, None)
+                            };
+
+                        managed_panes.push(ManagedPaneInfo {
+                            session_name: dp.session_name.as_str().to_string(),
+                            pane_id: dp.pane_id.to_string(),
+                            pane_index: dp.pane_index,
+                            command: dp.command.clone(),
+                            working_directory: dp.working_directory.clone(),
+                            process_state: process_state.to_string(),
+                            pid,
+                            exit_code,
+                            exit_signal,
+                        });
+                    }
+                }
+            }
+        }
 
         RmuxDaemonInfo {
             binary_available,
             binary_path,
             connected,
-            pane_count,
-            workspace_count,
+            tracked_pane_count,
+            tracked_workspace_count,
+            total_sessions,
+            total_daemon_panes,
+            ergatai_sessions,
+            managed_panes,
         }
     }
 }
 
 /// Snapshot of rmux daemon state — returned by `RmuxBackend::daemon_info()`.
+///
+/// Contains both local tracking state (what this backend instance manages)
+/// and real daemon state (queried from the rmux daemon on each call).
 #[derive(Debug, Clone)]
 pub struct RmuxDaemonInfo {
     /// Whether the daemon binary can be located (env var → bundled → PATH).
@@ -482,10 +1104,41 @@ pub struct RmuxDaemonInfo {
     pub binary_path: Option<std::path::PathBuf>,
     /// Whether this backend has an active daemon connection.
     pub connected: bool,
-    /// Number of pane handles currently tracked.
-    pub pane_count: usize,
-    /// Number of workspaces (sessions) tracked.
-    pub workspace_count: usize,
+    /// Number of pane handles currently tracked by this backend instance.
+    pub tracked_pane_count: usize,
+    /// Number of workspaces (sessions) tracked by this backend instance.
+    pub tracked_workspace_count: usize,
+    /// Total sessions known to the daemon (all prefixes, not just ergatai).
+    pub total_sessions: usize,
+    /// Total panes known to the daemon across all sessions.
+    pub total_daemon_panes: usize,
+    /// Session names owned by this backend (matching the session prefix).
+    pub ergatai_sessions: Vec<String>,
+    /// Per-pane details for all panes in ergatai-owned sessions.
+    pub managed_panes: Vec<ManagedPaneInfo>,
+}
+
+/// Details for a single pane managed by this backend, queried from the daemon.
+#[derive(Debug, Clone)]
+pub struct ManagedPaneInfo {
+    /// Session name this pane belongs to (e.g., "ergatai-task-123").
+    pub session_name: String,
+    /// Stable pane identity (e.g., "%3").
+    pub pane_id: String,
+    /// Pane index within its window.
+    pub pane_index: u32,
+    /// Spawned process argv recorded by the daemon (e.g., ["claude", "--resume"]).
+    pub command: Option<Vec<String>>,
+    /// Process working directory at time of the snapshot.
+    pub working_directory: Option<String>,
+    /// Process state: "running", "exited", or "unknown".
+    pub process_state: String,
+    /// OS process ID, if the daemon could resolve it and the process is running.
+    pub pid: Option<u32>,
+    /// Exit code, if the process has exited normally.
+    pub exit_code: Option<i32>,
+    /// Exit signal, if the process was killed by a signal.
+    pub exit_signal: Option<i32>,
 }
 
 #[async_trait]
@@ -659,10 +1312,9 @@ impl AgentRuntimeBackend for RmuxBackend {
         // would block start_agent/stop_agent if the daemon is slow.
         let pane = {
             let panes = self.panes.read().await;
-            panes
-                .get(&key)
-                .cloned()
-                .ok_or_else(|| ErgataiError::internal(format!("Pane not found for agent {}", key)))?
+            panes.get(&key).cloned().ok_or_else(|| {
+                ErgataiError::internal(format!("Pane not found for agent {}", key))
+            })?
         };
 
         let sanitized = Self::sanitize_message(message);
@@ -683,10 +1335,9 @@ impl AgentRuntimeBackend for RmuxBackend {
         // Clone the Pane out, drop read guard before awaiting (same pattern as inject_message)
         let pane = {
             let panes = self.panes.read().await;
-            panes
-                .get(&key)
-                .cloned()
-                .ok_or_else(|| ErgataiError::internal(format!("Pane not found for agent {}", key)))?
+            panes.get(&key).cloned().ok_or_else(|| {
+                ErgataiError::internal(format!("Pane not found for agent {}", key))
+            })?
         };
 
         let captured = pane
