@@ -631,7 +631,7 @@ mod tests {
         assert_eq!(watchdog.config.timeout_multiplier, 5);
         assert_eq!(watchdog.config.grace_period_1_secs, 45);
         assert_eq!(watchdog.config.grace_period_2_secs, 90);
-        assert_eq!(watchdog.config.task_aware, true);
+        assert!(watchdog.config.task_aware);
     }
 
     #[tokio::test]

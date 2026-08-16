@@ -1,8 +1,8 @@
 use axum::{extract::State, response::IntoResponse, Json};
-use serde::Serialize;
 use ergatai_runtime::{get_agent_runtime, RmuxBackend, RmuxDaemonInfo};
+use serde::Serialize;
 
-use crate::{AppState, nats};
+use crate::{nats, AppState};
 
 #[derive(Debug, Serialize)]
 pub struct StatusResponse {
@@ -12,9 +12,7 @@ pub struct StatusResponse {
     pub daemon_info: Option<RmuxDaemonInfo>,
 }
 
-pub async fn get_status(
-    State(_state): State<AppState>,
-) -> impl IntoResponse {
+pub async fn get_status(State(_state): State<AppState>) -> impl IntoResponse {
     let runtime = get_agent_runtime();
 
     // Basic status

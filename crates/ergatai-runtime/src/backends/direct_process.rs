@@ -24,12 +24,15 @@ const EXIT_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 // ── DirectProcessBackend ──
 
+/// Exit code slot for a process, shared between the backend and monitor tasks.
+type ExitCodeSlot = Arc<tokio::sync::Mutex<Option<i32>>>;
+
 /// Direct process execution backend (no terminal multiplexer).
 pub struct DirectProcessBackend {
     /// Base directory for workspace directories.
     work_dir_base: std::path::PathBuf,
     /// Exit code slots keyed by PID string — populated by monitor tasks when processes exit.
-    exit_codes: Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<Option<i32>>>>>>,
+    exit_codes: Arc<tokio::sync::Mutex<HashMap<String, ExitCodeSlot>>>,
 }
 
 impl DirectProcessBackend {

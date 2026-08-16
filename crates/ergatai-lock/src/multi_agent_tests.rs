@@ -1304,11 +1304,11 @@ mod tests {
             system_tokens.push(sys);
         }
 
-        for i in 0..num_agents {
+        for (i, sys) in system_tokens.iter().enumerate() {
             let token = make_file_token(
                 &format!("agent-{}", i),
                 &format!("session-{}", i),
-                &system_tokens[i].id,
+                &sys.id,
                 "**",
                 FileMode::Write,
             );
@@ -1316,9 +1316,9 @@ mod tests {
         }
 
         // Spawn threads that all race to acquire the lock
-        for i in 0..num_agents {
+        for token in &file_tokens {
             let mgr = Arc::clone(&manager);
-            let token = file_tokens[i].clone();
+            let token = token.clone();
             let barrier = Arc::clone(&barrier);
 
             let handle = thread::spawn(move || {
@@ -1451,11 +1451,11 @@ mod tests {
             system_tokens.push(sys);
         }
 
-        for i in 0..num_agents {
+        for (i, sys) in system_tokens.iter().enumerate() {
             let token = make_file_token(
                 &format!("agent-{}", i),
                 &format!("session-{}", i),
-                &system_tokens[i].id,
+                &sys.id,
                 "**",
                 FileMode::Write,
             );
@@ -1463,9 +1463,9 @@ mod tests {
         }
 
         // Spawn threads that all try to acquire locks on different files at once
-        for i in 0..num_agents {
+        for (i, token) in file_tokens.iter().enumerate() {
             let mgr = Arc::clone(&manager);
-            let token = file_tokens[i].clone();
+            let token = token.clone();
             let file_path = format!("file_{}.rs", i);
 
             // Create the file first
@@ -1517,11 +1517,11 @@ mod tests {
             system_tokens.push(sys);
         }
 
-        for i in 0..num_agents {
+        for (i, sys) in system_tokens.iter().enumerate() {
             let token = make_file_token(
                 &format!("agent-{}", i),
                 &format!("session-{}", i),
-                &system_tokens[i].id,
+                &sys.id,
                 "**",
                 FileMode::Write,
             );
@@ -1536,9 +1536,9 @@ mod tests {
 
         // All other agents try to acquire - should all fail immediately
         let mut handles = vec![];
-        for i in 1..num_agents {
+        for token in file_tokens.iter().skip(1) {
             let mgr = Arc::clone(&manager);
-            let token = file_tokens[i].clone();
+            let token = token.clone();
 
             let handle = thread::spawn(move || {
                 let rt = tokio::runtime::Runtime::new().unwrap();
@@ -1727,9 +1727,9 @@ mod tests {
         let mut handles = vec![];
 
         // Spawn all readers and writers concurrently
-        for i in 0..(num_readers + num_writers) {
+        for token in &file_tokens {
             let mgr = Arc::clone(&manager);
-            let token = file_tokens[i].clone();
+            let token = token.clone();
 
             let handle = thread::spawn(move || {
                 let rt = tokio::runtime::Runtime::new().unwrap();

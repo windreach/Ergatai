@@ -818,7 +818,7 @@ mod tests {
         let report = manager.generate_security_report(7).unwrap();
         assert_eq!(report.stats.total_acquisitions, 5);
         assert_eq!(report.stats.total_conflicts, 15);
-        assert!(report.suspicious_activities.len() > 0);
+        assert!(!report.suspicious_activities.is_empty());
         assert_eq!(report.top_agents.len(), 2);
     }
 

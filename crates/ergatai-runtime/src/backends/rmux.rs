@@ -36,8 +36,8 @@ use ergatai_error::{ErgataiError, ErgataiResult};
 
 use rmux_sdk::{
     EnsureSession, EnsureSessionPolicy, Pane, PaneExitState, PaneId, PaneProcessState,
-    PaneStateClosedReason, PaneStateEvent, PaneStateEventStream, PaneStateEventsOptions,
-    RmuxEndpoint, Rmux, Session, SessionName, SplitDirection, TerminalSizeSpec,
+    PaneStateClosedReason, PaneStateEvent, PaneStateEventStream, PaneStateEventsOptions, Rmux,
+    RmuxEndpoint, Session, SessionName, SplitDirection, TerminalSizeSpec,
 };
 
 use crate::backend::AgentRuntimeBackend;
@@ -734,7 +734,10 @@ impl RmuxBackend {
         })?;
 
         let raw_id = pane_id.strip_prefix('%').ok_or_else(|| {
-            ErgataiError::internal(format!("Invalid pane_id '{}': must start with '%'", pane_id))
+            ErgataiError::internal(format!(
+                "Invalid pane_id '{}': must start with '%'",
+                pane_id
+            ))
         })?;
         let pid = PaneId::new(raw_id.parse::<u32>().map_err(|e| {
             ErgataiError::internal(format!("Invalid pane_id '{}': {}", pane_id, e))
@@ -761,12 +764,14 @@ impl RmuxBackend {
             && !exit_command.contains('\n')
             && !exit_command.contains('\r');
 
-        if is_key_token && (exit_command.starts_with("C-") || exit_command.starts_with("M-")
-            || exit_command.eq_ignore_ascii_case("Enter")
-            || exit_command.eq_ignore_ascii_case("Escape")
-            || exit_command.eq_ignore_ascii_case("Tab")
-            || exit_command.eq_ignore_ascii_case("BSpace")
-            || exit_command.eq_ignore_ascii_case("Space"))
+        if is_key_token
+            && (exit_command.starts_with("C-")
+                || exit_command.starts_with("M-")
+                || exit_command.eq_ignore_ascii_case("Enter")
+                || exit_command.eq_ignore_ascii_case("Escape")
+                || exit_command.eq_ignore_ascii_case("Tab")
+                || exit_command.eq_ignore_ascii_case("BSpace")
+                || exit_command.eq_ignore_ascii_case("Space"))
         {
             pane.send_key(exit_command).await.map_err(|e| {
                 ErgataiError::internal(format!("Failed to send key '{}': {}", exit_command, e))
@@ -854,19 +859,25 @@ impl RmuxBackend {
         };
 
         // Step 1: Send exit command
-        info!(agent_id = key, command = exit_command, "Sending graceful exit command");
+        info!(
+            agent_id = key,
+            command = exit_command,
+            "Sending graceful exit command"
+        );
 
         let is_key_token = exit_command.len() <= 8
             && !exit_command.contains(' ')
             && !exit_command.contains('\n')
             && !exit_command.contains('\r');
 
-        if is_key_token && (exit_command.starts_with("C-") || exit_command.starts_with("M-")
-            || exit_command.eq_ignore_ascii_case("Enter")
-            || exit_command.eq_ignore_ascii_case("Escape")
-            || exit_command.eq_ignore_ascii_case("Tab")
-            || exit_command.eq_ignore_ascii_case("BSpace")
-            || exit_command.eq_ignore_ascii_case("Space"))
+        if is_key_token
+            && (exit_command.starts_with("C-")
+                || exit_command.starts_with("M-")
+                || exit_command.eq_ignore_ascii_case("Enter")
+                || exit_command.eq_ignore_ascii_case("Escape")
+                || exit_command.eq_ignore_ascii_case("Tab")
+                || exit_command.eq_ignore_ascii_case("BSpace")
+                || exit_command.eq_ignore_ascii_case("Space"))
         {
             pane.send_key(exit_command).await.map_err(|e| {
                 ErgataiError::internal(format!("Failed to send key '{}': {}", exit_command, e))
@@ -1045,23 +1056,19 @@ impl RmuxBackend {
 
                         // Query exit_state from daemon (cheap — info() on a
                         // single pane re-reads the daemon's retained state)
-                        let (exit_code, exit_signal) =
-                            if dp.process == PaneProcessState::Exited {
-                                match dp.pane.info().await {
-                                    Ok(snapshot) => {
-                                        let exit = snapshot
-                                            .pane(dp.pane_id)
-                                            .and_then(|pi| pi.exit_state.as_ref());
-                                        (
-                                            exit.and_then(|e| e.code),
-                                            exit.and_then(|e| e.signal),
-                                        )
-                                    }
-                                    Err(_) => (None, None),
+                        let (exit_code, exit_signal) = if dp.process == PaneProcessState::Exited {
+                            match dp.pane.info().await {
+                                Ok(snapshot) => {
+                                    let exit = snapshot
+                                        .pane(dp.pane_id)
+                                        .and_then(|pi| pi.exit_state.as_ref());
+                                    (exit.and_then(|e| e.code), exit.and_then(|e| e.signal))
                                 }
-                            } else {
-                                (None, None)
-                            };
+                                Err(_) => (None, None),
+                            }
+                        } else {
+                            (None, None)
+                        };
 
                         managed_panes.push(ManagedPaneInfo {
                             session_name: dp.session_name.as_str().to_string(),
@@ -1387,7 +1394,7 @@ impl AgentRuntimeBackend for RmuxBackend {
         let key = handle.agent_id.clone();
         info!(agent_id = key, "Stopping agent (closing rmux pane)");
 
-        // Remove pane from registry
+        // Try local tracking first (fast path)
         let pane = self.panes.write().await.remove(&key);
 
         if let Some(pane) = pane {
@@ -1403,6 +1410,58 @@ impl AgentRuntimeBackend for RmuxBackend {
                     );
                 }
             }
+            return Ok(());
+        }
+
+        // Fallback: local tracking missed — try daemon-driven cleanup.
+        // This handles the case where Ergatai restarted but the daemon still
+        // has the session/pane, or the pane was never tracked locally.
+        let session_name = handle
+            .workspace
+            .metadata
+            .get("session")
+            .cloned()
+            .unwrap_or_else(|| self.session_name(&handle.workspace.id));
+
+        warn!(
+            agent_id = key,
+            session = session_name,
+            "Pane not in local tracking, falling back to daemon-driven cleanup"
+        );
+
+        // Find and close all running panes in this workspace's session
+        let info = self.daemon_info().await;
+        let mut closed_any = false;
+
+        for mp in &info.managed_panes {
+            if mp.session_name == session_name && mp.process_state == "running" {
+                match self.stop_pane(&mp.session_name, &mp.pane_id).await {
+                    Ok(()) => {
+                        debug!(
+                            agent_id = key,
+                            pane_id = mp.pane_id,
+                            "Daemon-driven pane closed during fallback"
+                        );
+                        closed_any = true;
+                    }
+                    Err(e) => {
+                        warn!(
+                            agent_id = key,
+                            pane_id = mp.pane_id,
+                            error = %e,
+                            "Failed to close daemon-discovered pane during fallback"
+                        );
+                    }
+                }
+            }
+        }
+
+        if !closed_any {
+            debug!(
+                agent_id = key,
+                session = session_name,
+                "No running panes found in session (already cleaned up or never existed)"
+            );
         }
 
         Ok(())

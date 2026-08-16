@@ -1,8 +1,8 @@
 //! NATS server binary locator
 
-use std::path::PathBuf;
-use ergatai_error::ErgataiResult;
 use crate::finder::BinaryLocator;
+use ergatai_error::ErgataiResult;
+use std::path::PathBuf;
 
 static NATS_LOCATOR: BinaryLocator = BinaryLocator {
     name: "nats-server",

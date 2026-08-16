@@ -1,12 +1,12 @@
-use std::collections::HashMap;
 use axum::{
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
     Json,
 };
+use ergatai_runtime::{get_agent_runtime, ResourceLimits, WorkspaceSpec};
 use serde::{Deserialize, Serialize};
-use ergatai_runtime::{WorkspaceSpec, ResourceLimits, get_agent_runtime};
+use std::collections::HashMap;
 
 use crate::AppState;
 
@@ -42,9 +42,7 @@ pub struct ErrorResponse {
     pub error: String,
 }
 
-pub async fn list_agents(
-    State(_state): State<AppState>,
-) -> impl IntoResponse {
+pub async fn list_agents(State(_state): State<AppState>) -> impl IntoResponse {
     let runtime = get_agent_runtime();
     let agents = runtime.list_agents().await;
 
@@ -81,14 +79,14 @@ pub async fn spawn_agent(
         .launch_agent(spec, &req.command, req.instruction.as_deref())
         .await
     {
-        Ok(agent_id) => (
-            StatusCode::CREATED,
-            Json(SpawnAgentResponse { agent_id }),
-        )
-            .into_response(),
+        Ok(agent_id) => {
+            (StatusCode::CREATED, Json(SpawnAgentResponse { agent_id })).into_response()
+        }
         Err(e) => (
             StatusCode::BAD_REQUEST,
-            Json(ErrorResponse { error: e.to_string() }),
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
         )
             .into_response(),
     }
@@ -104,7 +102,9 @@ pub async fn kill_agent(
         Ok(_) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => (
             StatusCode::NOT_FOUND,
-            Json(ErrorResponse { error: e.to_string() }),
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
         )
             .into_response(),
     }
@@ -121,7 +121,9 @@ pub async fn send_message(
         Ok(_) => StatusCode::OK.into_response(),
         Err(e) => (
             StatusCode::BAD_REQUEST,
-            Json(ErrorResponse { error: e.to_string() }),
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
         )
             .into_response(),
     }

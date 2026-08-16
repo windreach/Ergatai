@@ -658,7 +658,7 @@ async fn init_dag_event_consumer(
         "ergatai.dag.>",
     )
     .await
-    .map_err(|e| ErgataiError::NatsError(e))
+    .map_err(ErgataiError::NatsError)
 }
 
 /// Handle a single DAG event by subject-prefix dispatch.

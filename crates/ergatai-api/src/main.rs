@@ -14,7 +14,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use anyhow::Result;
-use tokio::sync::broadcast;
 use axum::{
     body::Body,
     extract::State,
@@ -28,12 +27,13 @@ use clap::Parser;
 use ergatai_core::cross_agent::{get_dag_scheduler, set_dag_scheduler, DagScheduler};
 use ergatai_core::nats;
 use serde::{Deserialize, Serialize};
+use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use tower_governor::{governor::GovernorConfigBuilder, key_extractor::KeyExtractor, GovernorLayer};
 
 // MCP module
-mod mcp;
 mod api;
+mod mcp;
 use mcp::{create_mcp_service, start_message_delivery_consumer, start_peer_reaper};
 
 /// Shared application state available to all handlers.
@@ -47,6 +47,7 @@ struct AppState {
     /// an `Authorization: Bearer <token>` header.
     api_token: Option<String>,
     /// Broadcast channel for WebSocket event broadcasting (CLI status monitoring).
+    #[allow(dead_code)] // Reserved for future WebSocket event push
     event_tx: Arc<broadcast::Sender<serde_json::Value>>,
 }
 
@@ -407,13 +408,22 @@ async fn async_main(args: Args) -> Result<()> {
         .route("/metrics", get(metrics_endpoint))
         // Workspace management
         .route("/api/v1/workspaces", get(api::workspaces::list_workspaces))
-        .route("/api/v1/workspaces", post(api::workspaces::create_workspace))
-        .route("/api/v1/workspaces/:id", delete(api::workspaces::delete_workspace))
+        .route(
+            "/api/v1/workspaces",
+            post(api::workspaces::create_workspace),
+        )
+        .route(
+            "/api/v1/workspaces/:id",
+            delete(api::workspaces::delete_workspace),
+        )
         // Agent management
         .route("/api/v1/agents", get(api::agents::list_agents))
         .route("/api/v1/agents", post(api::agents::spawn_agent))
         .route("/api/v1/agents/:id", delete(api::agents::kill_agent))
-        .route("/api/v1/agents/:id/message", post(api::agents::send_message))
+        .route(
+            "/api/v1/agents/:id/message",
+            post(api::agents::send_message),
+        )
         // Status
         .route("/api/v1/status", get(api::status::get_status))
         // DAG (existing)

@@ -1,8 +1,8 @@
-use clap::{Parser, Subcommand};
 use anyhow::Result;
+use clap::{Parser, Subcommand};
 
-mod commands;
 mod client;
+mod commands;
 mod output;
 
 #[derive(Parser)]

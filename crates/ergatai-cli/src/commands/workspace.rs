@@ -1,7 +1,7 @@
-use anyhow::Result;
 use crate::client::http::ErgataiClient;
 use crate::output::formatter;
 use crate::WorkspaceAction;
+use anyhow::Result;
 
 pub async fn handle(action: WorkspaceAction, api_url: &str, token: Option<&str>) -> Result<()> {
     let client = ErgataiClient::new(api_url, token);

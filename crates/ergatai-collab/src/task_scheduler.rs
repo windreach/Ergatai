@@ -639,7 +639,7 @@ async fn init_task_submission_consumer(
         "ergatai.task.submit.*",
     )
     .await
-    .map_err(|e| ErgataiError::NatsError(e))
+    .map_err(ErgataiError::NatsError)
 }
 
 /// Global scheduler instance

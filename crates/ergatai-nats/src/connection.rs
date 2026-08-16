@@ -166,8 +166,7 @@ impl NatsConnection {
     pub fn is_connected(&self) -> bool {
         matches!(
             self.client.connection_state(),
-            async_nats::connection::State::Connected
-                | async_nats::connection::State::Pending
+            async_nats::connection::State::Connected | async_nats::connection::State::Pending
         )
     }
 

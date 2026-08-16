@@ -1,12 +1,12 @@
-use std::collections::HashMap;
 use axum::{
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
     Json,
 };
+use ergatai_runtime::{get_agent_runtime, ResourceLimits, WorkspaceSpec};
 use serde::{Deserialize, Serialize};
-use ergatai_runtime::{WorkspaceSpec, ResourceLimits, get_agent_runtime};
+use std::collections::HashMap;
 
 use crate::AppState;
 
@@ -29,9 +29,7 @@ pub struct ErrorResponse {
     pub error: String,
 }
 
-pub async fn list_workspaces(
-    State(_state): State<AppState>,
-) -> impl IntoResponse {
+pub async fn list_workspaces(State(_state): State<AppState>) -> impl IntoResponse {
     let runtime = get_agent_runtime();
     match runtime.backend().list_workspaces().await {
         Ok(workspaces) => {
@@ -47,7 +45,9 @@ pub async fn list_workspaces(
         }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse { error: e.to_string() }),
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
         )
             .into_response(),
     }
@@ -80,7 +80,9 @@ pub async fn create_workspace(
         }
         Err(e) => (
             StatusCode::BAD_REQUEST,
-            Json(ErrorResponse { error: e.to_string() }),
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
         )
             .into_response(),
     }
@@ -98,7 +100,9 @@ pub async fn delete_workspace(
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse { error: e.to_string() }),
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
             )
                 .into_response()
         }
@@ -121,7 +125,9 @@ pub async fn delete_workspace(
         Ok(_) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse { error: e.to_string() }),
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
         )
             .into_response(),
     }

@@ -107,11 +107,17 @@ impl NatsServer {
                         }
                         Ok(None) => {
                             // Process is running - now wait for it to be ready to accept connections
-                            info!(port = port, "nats-server process started, waiting for readiness...");
+                            info!(
+                                port = port,
+                                "nats-server process started, waiting for readiness..."
+                            );
 
                             match Self::wait_for_ready(port).await {
                                 Ok(()) => {
-                                    info!(port = port, "nats-server is ready to accept connections");
+                                    info!(
+                                        port = port,
+                                        "nats-server is ready to accept connections"
+                                    );
                                     return Ok(Self {
                                         child: Some(child),
                                         port,
@@ -285,9 +291,7 @@ static SHARED_TEST_SERVER: Mutex<Option<&'static NatsServer>> = Mutex::new(None)
 /// prevents Drop from being called.
 pub fn cleanup_test_servers() {
     use std::process::Command;
-    let _ = Command::new("pkill")
-        .args(&["-9", "nats-server"])
-        .output();
+    let _ = Command::new("pkill").args(["-9", "nats-server"]).output();
 }
 
 /// Get a shared nats-server for testing.

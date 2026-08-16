@@ -676,7 +676,7 @@ impl Drop for TmuxManager {
             // Try to clean up the tmux session synchronously
             // Use std::process::Command since we're in a synchronous Drop context
             let result = std::process::Command::new("tmux")
-                .args(&["kill-session", "-t", &self.default_session])
+                .args(["kill-session", "-t", &self.default_session])
                 .output();
 
             match result {
