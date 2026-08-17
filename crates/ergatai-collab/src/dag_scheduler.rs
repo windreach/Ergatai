@@ -1037,7 +1037,7 @@ mod tests {
 
         let ctx = scheduler.context();
         let ctx = ctx.lock().await;
-        assert_eq!(ctx.get_global("greeting").as_deref(), Some("hello"));
+        assert_eq!(ctx.get_global("greeting"), Some("hello"));
         let outputs = ctx.get_node_outputs("n1");
         assert!(outputs.is_some());
         assert_eq!(
@@ -1281,7 +1281,7 @@ mod tests {
         assert!(!loaded.is_complete().await);
         let ctx = loaded.context();
         let ctx = ctx.lock().await;
-        assert_eq!(ctx.get_global("k").as_deref(), Some("v"));
+        assert_eq!(ctx.get_global("k"), Some("v"));
     }
 
     #[tokio::test]

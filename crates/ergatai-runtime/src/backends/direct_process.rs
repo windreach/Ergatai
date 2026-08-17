@@ -500,7 +500,7 @@ mod tests {
         let handle = backend.create_workspace(spec).await.unwrap();
         assert_eq!(handle.id, "ws-1");
         assert_eq!(handle.backend, "direct-process");
-        assert!(handle.metadata.get("work_dir").is_some());
+        assert!(handle.metadata.contains_key("work_dir"));
         let work_dir = handle.metadata.get("work_dir").unwrap();
         assert!(work_dir.ends_with("ws-1"));
     }

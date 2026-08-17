@@ -341,7 +341,7 @@ mod tests {
 
     #[test]
     fn test_agent_state_variants() {
-        let states = vec![
+        let states = [
             AgentState::Starting,
             AgentState::Running,
             AgentState::Stopping,
@@ -433,7 +433,7 @@ mod tests {
         };
         let json = serde_json::to_string(&caps).unwrap();
         let decoded: BackendCapabilities = serde_json::from_str(&json).unwrap();
-        assert_eq!(decoded.supports_message_injection, true);
+        assert!(decoded.supports_message_injection);
         assert_eq!(decoded.max_concurrent_agents, Some(5));
     }
 

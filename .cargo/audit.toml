@@ -1,0 +1,19 @@
+# cargo-audit configuration
+# See: https://github.com/RustSec/rustsec/tree/main/cargo-audit
+
+[advisories]
+ignore = [
+    # TODO: Upgrade async-nats from 0.38 to 0.50+ to resolve these.
+    # rustls-webpki 0.102.8 is a transitive dependency of async-nats 0.38.
+    # The fix (>=0.103.12) requires a semver-incompatible upgrade of rustls-webpki,
+    # which in turn requires upgrading async-nats across 5 crates.
+
+    # RUSTSEC-2026-0099: Name constraints accepted for wildcard certificates
+    # RUSTSEC-2026-0098: Name constraints for URI names incorrectly accepted
+    # RUSTSEC-2026-0049: CRLs not considered authoritative by Distribution Point
+    # RUSTSEC-2026-0104: Reachable panic in CRL parsing
+    "RUSTSEC-2026-0099",
+    "RUSTSEC-2026-0098",
+    "RUSTSEC-2026-0049",
+    "RUSTSEC-2026-0104",
+]
