@@ -20,6 +20,8 @@ ergatai-error = { path = "../ergatai-error" }
 ergatai-runtime = { path = "../ergatai-runtime" }
 # Binary locator (NATS, rmux daemon)
 ergatai-binary = { path = "../ergatai-binary" }
+# File access control (locks, tokens)
+ergatai-lock = { path = "../ergatai-lock" }
 
 # NATS client (for message forwarding)
 async-nats.workspace = true
@@ -44,7 +46,7 @@ tracing-subscriber.workspace = true
 clap.workspace = true
 
 # MCP protocol (rmcp SDK)
-rmcp = { version = "3", features = ["server", "transport-streamable-http-server", "macros"] }
+rmcp = { version = "3", features = ["server", "transport-streamable-http-server", "macros", "elicitation"] }
 schemars = "1.0"
 tokio-util = "0.7"
 

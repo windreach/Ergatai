@@ -34,6 +34,7 @@ use tower_governor::{governor::GovernorConfigBuilder, key_extractor::KeyExtracto
 // MCP module
 mod api;
 mod mcp;
+use mcp::conversation::{ConversationConfig, ConversationManager};
 use mcp::{create_mcp_service, start_message_delivery_consumer, start_peer_reaper};
 
 /// Shared application state available to all handlers.
@@ -370,11 +371,41 @@ async fn async_main(args: Args) -> Result<()> {
         }
     }
 
-    let mcp_service = create_mcp_service(
+    // Create MCP services for each agent instance (agent-1, agent-2, agent-3)
+    // Each service has its own URL path (/mcp/agent-1, /mcp/agent-2, /mcp/agent-3)
+    // This allows ergatai to bind MCP connections to specific rmux panes
+    let mcp_service_1 = create_mcp_service(
         mcp_registry.clone(),
         peer_registry.clone(),
+        Arc::new(ConversationManager::new(ConversationConfig::default())),
         mcp_cancellation_token.clone(),
         args.sse_keep_alive,
+        Some("agent-1".to_string()),
+    );
+    let mcp_service_2 = create_mcp_service(
+        mcp_registry.clone(),
+        peer_registry.clone(),
+        Arc::new(ConversationManager::new(ConversationConfig::default())),
+        mcp_cancellation_token.clone(),
+        args.sse_keep_alive,
+        Some("agent-2".to_string()),
+    );
+    let mcp_service_3 = create_mcp_service(
+        mcp_registry.clone(),
+        peer_registry.clone(),
+        Arc::new(ConversationManager::new(ConversationConfig::default())),
+        mcp_cancellation_token.clone(),
+        args.sse_keep_alive,
+        Some("agent-3".to_string()),
+    );
+    // Fallback service without agent identifier (for backwards compatibility)
+    let mcp_service_default = create_mcp_service(
+        mcp_registry.clone(),
+        peer_registry.clone(),
+        Arc::new(ConversationManager::new(ConversationConfig::default())),
+        mcp_cancellation_token.clone(),
+        args.sse_keep_alive,
+        None,
     );
     tracing::info!(
         "MCP server initialized (protocol 2025-06-18, Streamable HTTP, SSE keep-alive: {}s)",
@@ -427,6 +458,24 @@ async fn async_main(args: Args) -> Result<()> {
                     }
                 }
             });
+
+            // Initialize file access control system for multi-agent file locking
+            // Uses NATS for cross-agent approval flow when conflicts arise
+            let project_root = match std::env::current_dir() {
+                Ok(dir) => dir,
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to get current directory, using '.' as fallback: {}",
+                        e
+                    );
+                    PathBuf::from(".")
+                }
+            };
+            if let Err(e) = ergatai_lock::init_file_access("default", &project_root).await {
+                tracing::warn!("File access control initialization failed: {}", e);
+            } else {
+                tracing::info!("✅ File access control initialized (multi-agent file locking)");
+            }
         }
         Err(e) => {
             tracing::error!("❌ Failed to initialize NATS: {}", e);
@@ -474,8 +523,11 @@ async fn async_main(args: Args) -> Result<()> {
         // DAG (existing)
         .route("/api/v1/dag", post(submit_dag))
         .route("/api/v1/dag/status", get(dag_status))
-        // MCP Streamable HTTP endpoint (POST/GET/DELETE /mcp)
-        .nest_service("/mcp", mcp_service)
+        // MCP Streamable HTTP endpoints (per-agent paths for correct binding)
+        .nest_service("/mcp/agent-1", mcp_service_1)
+        .nest_service("/mcp/agent-2", mcp_service_2)
+        .nest_service("/mcp/agent-3", mcp_service_3)
+        .nest_service("/mcp", mcp_service_default)
         // Auth middleware (exempts /health and /ready)
         .layer(middleware::from_fn_with_state(
             state.clone(),

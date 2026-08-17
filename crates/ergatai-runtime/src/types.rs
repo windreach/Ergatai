@@ -147,7 +147,7 @@ pub struct BackendCapabilities {
 /// Agent information tracked by the runtime facade.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentInfo {
-    /// Unique agent ID (runtime-generated)
+    /// Unique agent ID (runtime-generated, e.g., "%198" for rmux panes)
     pub agent_id: String,
 
     /// Workspace ID this agent belongs to
@@ -164,6 +164,11 @@ pub struct AgentInfo {
 
     /// When this agent was created
     pub created_at: chrono::DateTime<chrono::Utc>,
+
+    /// Associated MCP agent ID (e.g., "opencode@abcd1234").
+    /// Set when an MCP client connects and is bound to this runtime agent.
+    /// Enables resolving MCP IDs to runtime IDs for message injection.
+    pub mcp_agent_id: Option<String>,
 }
 
 #[cfg(test)]
@@ -455,6 +460,7 @@ mod tests {
             state: AgentState::Running,
             task_id: None,
             created_at: chrono::Utc::now(),
+            mcp_agent_id: None,
         };
         assert_eq!(info.agent_id, "agent-1");
         assert_eq!(info.workspace_id, "ws-1");
@@ -480,6 +486,7 @@ mod tests {
             state: AgentState::Starting,
             task_id: Some("task-42".to_string()),
             created_at: chrono::Utc::now(),
+            mcp_agent_id: None,
         };
         assert_eq!(info.task_id, Some("task-42".to_string()));
     }

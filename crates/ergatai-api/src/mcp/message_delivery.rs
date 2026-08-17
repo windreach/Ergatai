@@ -250,20 +250,35 @@ async fn handle_message(msg: &async_nats::jetstream::Message) {
         }
     }
 
+    // ── Resolve sender MCP ID → runtime ID for logging ──
+    let runtime = get_agent_runtime();
+
+    // The message content is already formatted by the MCP server (server.rs)
+    // with instruction + JSON payload. Just deliver it as-is.
+    let formatted_message = payload.content.as_str();
+
     debug!(
         from = from,
         to = to,
+        message_len = formatted_message.len(),
+        message_preview = &formatted_message[..formatted_message.len().min(200)],
         "Delivering agent message via NATS consumer"
     );
-
-    // Format the message for display in the target agent's pane
-    let formatted_message = format!("Message from {}: {}", from, payload.content);
 
     // ── Deliver via AgentRuntime injection (rmux/tmux send_text) ──
     // Uses the terminal multiplexer backend to inject text directly into the
     // target agent's pane, simulating keyboard input.
-    let runtime = get_agent_runtime();
-    match runtime.inject_message(to, &formatted_message).await {
+
+    // Resolve MCP agent ID to runtime agent ID for logging
+    let runtime_id = runtime.resolve_agent_id(to).await;
+    info!(
+        from = from,
+        to = to,
+        runtime_id = ?runtime_id,
+        "Delivering message: MCP target → runtime resolution"
+    );
+
+    match runtime.inject_message(to, formatted_message).await {
         Ok(()) => {
             info!(
                 from = from,

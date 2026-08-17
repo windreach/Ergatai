@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use rmcp::{elicit_safe, service::ElicitationError};
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
@@ -25,6 +26,8 @@ use tracing::{info, warn};
 use ergatai_core::agent_registry::AgentRegistry;
 use ergatai_runtime::get_agent_runtime;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use super::conversation::ConversationManager;
 
 /// Shared registry of MCP peer handles for pushing notifications to agents.
 /// Key: agent_id (e.g., "opencode@abcd1234")
@@ -45,6 +48,11 @@ pub struct ErgataiMcpServer {
     peer_registry: PeerRegistry,
     /// Per-session agent ID (set during initialize, used in send_message)
     session_agent_id: Arc<RwLock<Option<String>>>,
+    /// Conversation manager for loop prevention (AutoGen-style)
+    conversation_manager: Arc<ConversationManager>,
+    /// Agent identifier from URL path (e.g., "agent-1", "agent-2")
+    /// Used to bind MCP connections to specific rmux panes
+    agent_identifier: Option<String>,
 }
 
 impl std::fmt::Debug for ErgataiMcpServer {
@@ -55,12 +63,19 @@ impl std::fmt::Debug for ErgataiMcpServer {
 
 impl ErgataiMcpServer {
     /// Create a new server instance (called per-session by the factory)
-    pub fn new(registry: Arc<AgentRegistry>, peer_registry: PeerRegistry) -> Self {
+    pub fn new(
+        registry: Arc<AgentRegistry>,
+        peer_registry: PeerRegistry,
+        conversation_manager: Arc<ConversationManager>,
+        agent_identifier: Option<String>,
+    ) -> Self {
         Self {
             tool_router: Self::tool_router(),
             registry,
             peer_registry,
             session_agent_id: Arc::new(RwLock::new(None)),
+            conversation_manager,
+            agent_identifier,
         }
     }
 }
@@ -147,6 +162,47 @@ struct CheckDagStatusParams {
     dag_id: String,
 }
 
+// ── File Access Control parameter types ──
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct RequestFileAccessParams {
+    /// File path to access (absolute or relative to project root)
+    file_path: String,
+    /// Access mode: "READ" or "WRITE"
+    mode: String,
+    /// Reason for requesting access
+    reason: Option<String>,
+    /// Glob pattern scope (e.g., "src/**" or specific file)
+    #[serde(default = "default_scope")]
+    scope: String,
+}
+
+fn default_scope() -> String {
+    "**".to_string()
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ReleaseFileAccessParams {
+    /// File path to release
+    file_path: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ListActiveLocksParams {
+    /// Filter by agent ID (optional)
+    agent_id: Option<String>,
+}
+
+// ── MCP Elicitation types for user approval ──
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct ApprovalResponse {
+    /// User's approval decision: "yes" or "no"
+    decision: String,
+}
+
+elicit_safe!(ApprovalResponse);
+
 // ── Tool implementations ──
 
 #[tool_router]
@@ -157,32 +213,41 @@ impl ErgataiMcpServer {
         &self,
         params: Parameters<ListAgentsParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let include_capabilities = params.0.include_capabilities.unwrap_or(false);
-        let agents = self.registry.list_agents().await;
+        let _include_capabilities = params.0.include_capabilities.unwrap_or(false);
 
-        let agents_json: Vec<serde_json::Value> = agents
+        // Get runtime agents (discovered via rmux) instead of just MCP agents
+        let runtime = get_agent_runtime();
+        let runtime_agents = runtime.list_agents().await;
+
+        // Get the calling agent's ID to mark is_self
+        let my_agent_id = self.session_agent_id.read().await.clone();
+
+        let agents_json: Vec<serde_json::Value> = runtime_agents
             .iter()
-            .map(|agent| {
-                let mut agent_json = serde_json::json!({
-                    "agent_id": agent.agent_id,
-                    "status": agent.status,
-                    "connected_at": agent.connected_at,
-                    "last_heartbeat": agent.last_heartbeat,
+            .map(|info| {
+                let is_self = my_agent_id.as_ref().is_some_and(|id| {
+                    // Check both runtime ID and MCP ID
+                    id == &info.agent_id
+                        || info
+                            .mcp_agent_id
+                            .as_ref()
+                            .is_some_and(|mcp_id| mcp_id == id)
                 });
 
-                if include_capabilities {
-                    if let Some(caps) = &agent.capabilities {
-                        agent_json["capabilities"] = serde_json::json!(caps);
-                    }
-                }
-
-                agent_json
+                serde_json::json!({
+                    "agent_id": info.agent_id,
+                    "mcp_agent_id": info.mcp_agent_id,
+                    "workspace_id": info.workspace_id,
+                    "status": if info.mcp_agent_id.is_some() { "active" } else { "discovered" },
+                    "is_self": is_self,
+                    "ergatai_agent_id": info.handle.metadata.get("ergatai_agent_id"),
+                })
             })
             .collect();
 
         let result = serde_json::json!({
             "agents": agents_json,
-            "total": agents.len()
+            "total": agents_json.len()
         });
 
         Ok(CallToolResult::success(vec![ContentBlock::text(
@@ -240,16 +305,6 @@ impl ErgataiMcpServer {
                     .map(|a| a.agent_id.clone())
             });
 
-        let resolved_agent_id = match matching_agent {
-            Some(id) => id,
-            None => {
-                return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
-                    "Agent {} not found. Agent must connect via MCP or be running in tmux.",
-                    target_agent_id
-                ))]));
-            }
-        };
-
         // Get the sender agent ID
         let from_agent = self
             .session_agent_id
@@ -258,6 +313,55 @@ impl ErgataiMcpServer {
             .clone()
             .unwrap_or_else(|| "unknown-mcp-client".to_string());
 
+        let resolved_agent_id = match matching_agent {
+            Some(id) => {
+                info!(
+                    from_agent = %from_agent,
+                    target_agent_id = %target_agent_id,
+                    resolved_agent_id = %id,
+                    "Message routing: resolved target agent ID"
+                );
+                id
+            }
+            None => {
+                return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                    "Agent {} not found. Agent must connect via MCP or be running in tmux.",
+                    target_agent_id
+                ))]));
+            }
+        };
+
+        // Server-side safety net: reject self-messages.
+        // Both IDs must be resolved to runtime IDs before comparing —
+        // from_agent is an MCP ID (e.g. "opencode@abcd") while resolved_agent_id
+        // is a runtime ID (e.g. "%312"). Without resolution the check never fires.
+        let from_runtime_id = runtime.resolve_agent_id(&from_agent).await;
+        if from_runtime_id.as_deref() == Some(&resolved_agent_id) {
+            return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                "Cannot send message to yourself. Agent '{}' cannot target itself.",
+                from_agent
+            ))]));
+        }
+
+        // ── Conversation loop prevention (AutoGen-style) ──
+        // Check max_turns, max_consecutive_auto_reply, max_execution_time, and TERMINATE keyword.
+        if let Err(e) = self
+            .conversation_manager
+            .check_and_record(&from_agent, &resolved_agent_id, message)
+            .await
+        {
+            warn!(
+                from = %from_agent,
+                to = %resolved_agent_id,
+                error = %e,
+                "Conversation loop prevention blocked message"
+            );
+            return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                "Message blocked by conversation loop prevention: {}",
+                e
+            ))]));
+        }
+
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -265,11 +369,20 @@ impl ErgataiMcpServer {
 
         // ── Primary path: publish to NATS JetStream (reliable) ──
         if let Some(conn) = ergatai_nats::get_nats_connection().await {
+            // Resolve sender MCP ID → runtime ID for the reply target
+            let sender_display = runtime
+                .resolve_agent_id(&from_agent)
+                .await
+                .unwrap_or_else(|| from_agent.clone());
+
+            // Format message with instruction + JSON payload at MCP call time
+            let formatted_content = Self::format_agent_message(&sender_display, message);
+
             let bus = ergatai_nats::EventBus::new(conn);
             let payload = ergatai_nats::AgentMessagePayload {
                 from_agent: from_agent.clone(),
                 to_agent: resolved_agent_id.clone(),
-                content: message.to_string(),
+                content: formatted_content,
                 thread_id: None,
                 timestamp,
                 metadata: std::collections::HashMap::new(),
@@ -431,17 +544,418 @@ impl ErgataiMcpServer {
         }
     }
 
+    // ── File Access Control Tools ──
+
+    /// Request file access lock for reading or writing
+    #[tool(
+        description = "Request file access lock. Use this before reading or writing files in multi-agent mode. Returns a lock token if approved."
+    )]
+    async fn request_file_access(
+        &self,
+        params: Parameters<RequestFileAccessParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let file_path = &params.0.file_path;
+        let mode_str = params.0.mode.to_uppercase();
+        let reason = params.0.reason.clone();
+        let scope = params.0.scope.clone();
+
+        // Get agent info from session
+        let agent_id = self
+            .session_agent_id
+            .read()
+            .await
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string());
+
+        info!(
+            agent_id = %agent_id,
+            file_path = %file_path,
+            mode = %mode_str,
+            "File access request via MCP"
+        );
+
+        // Parse mode
+        let mode = match mode_str.as_str() {
+            "READ" => ergatai_lock::FileMode::Read,
+            "WRITE" => ergatai_lock::FileMode::Write,
+            "ADMIN" => ergatai_lock::FileMode::Admin,
+            _ => {
+                return Err(ErrorData::invalid_params(
+                    format!("Invalid mode '{}'. Must be READ, WRITE, or ADMIN", mode_str),
+                    None,
+                ));
+            }
+        };
+
+        // Try to get lock manager (may not be initialized)
+        let lock_manager = match ergatai_lock::get_lock_manager("default").await {
+            Ok(lm) => lm,
+            Err(e) => {
+                // File lock not initialized - return success with note
+                // In single-agent mode, file locks are not needed
+                return Ok(CallToolResult::success(vec![ContentBlock::text(
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "status": "granted",
+                        "file_path": file_path,
+                        "mode": mode_str,
+                        "note": "File lock system not active (single-agent mode). Access granted directly.",
+                        "warning": format!("Lock manager not available: {}", e)
+                    }))
+                    .unwrap_or_default(),
+                )]));
+            }
+        };
+
+        // Create a file token for this request
+        let session_id = format!("mcp-{}", agent_id);
+        let system_token_id = ergatai_lock::TokenId::new();
+
+        let file_token = ergatai_lock::FileToken::new(
+            agent_id.clone(),
+            session_id.clone(),
+            system_token_id,
+            scope.clone(),
+            mode,
+            reason.clone(),
+            "mcp-request".to_string(),
+            3600, // 1 hour TTL
+            60,   // heartbeat every 60s
+        );
+
+        // Register the file token
+        if let Err(e) = lock_manager.register_file_token(&file_token) {
+            warn!("Failed to register file token: {}", e);
+        }
+
+        // Try to acquire the lock
+        match lock_manager.acquire_lock(&file_token, file_path).await {
+            Ok(()) => {
+                info!(
+                    agent_id = %agent_id,
+                    file_path = %file_path,
+                    token_id = %file_token.id,
+                    "File lock acquired successfully"
+                );
+
+                Ok(CallToolResult::success(vec![ContentBlock::text(
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "status": "granted",
+                        "file_path": file_path,
+                        "mode": mode_str,
+                        "token_id": file_token.id.as_str(),
+                        "scope": scope,
+                        "expires_at": file_token.expires_at.to_rfc3339(),
+                        "note": "File lock acquired. Remember to release when done."
+                    }))
+                    .unwrap_or_default(),
+                )]))
+            }
+            Err(e) => {
+                // Lock acquisition failed (conflict) - try MCP elicitation for user approval
+                warn!(
+                    agent_id = %agent_id,
+                    file_path = %file_path,
+                    error = %e,
+                    "File lock conflict detected, requesting user approval via elicitation"
+                );
+
+                // Try to get the peer for this session and send elicitation
+                {
+                    if let Some(peer) = self.peer_registry.read().await.get(&agent_id).cloned() {
+                        let approval_message = format!(
+                            "🔒 File Access Conflict\n\n\
+                             Agent wants to {} file: {}\n\
+                             Reason: {}\n\
+                             Conflict: {}\n\n\
+                             Approve this access?",
+                            mode_str,
+                            file_path,
+                            reason.as_deref().unwrap_or("not specified"),
+                            e
+                        );
+
+                        match peer.elicit::<ApprovalResponse>(&approval_message).await {
+                            Ok(Some(response)) if response.decision.to_lowercase() == "yes" => {
+                                info!(
+                                    agent_id = %agent_id,
+                                    file_path = %file_path,
+                                    "User approved file access via elicitation"
+                                );
+                                // User approved - grant access directly (bypass lock)
+                                return Ok(CallToolResult::success(vec![ContentBlock::text(
+                                    serde_json::to_string_pretty(&serde_json::json!({
+                                        "status": "granted",
+                                        "file_path": file_path,
+                                        "mode": mode_str,
+                                        "approval": "user_approved",
+                                        "note": "Access granted by user approval despite conflict."
+                                    }))
+                                    .unwrap_or_default(),
+                                )]));
+                            }
+                            Ok(Some(_)) => {
+                                // User declined
+                                info!(
+                                    agent_id = %agent_id,
+                                    file_path = %file_path,
+                                    "User denied file access via elicitation"
+                                );
+                            }
+                            Ok(None) => {
+                                // No response (cancelled)
+                                warn!(
+                                    agent_id = %agent_id,
+                                    file_path = %file_path,
+                                    "User cancelled file access approval"
+                                );
+                            }
+                            Err(ElicitationError::CapabilityNotSupported) => {
+                                // Client doesn't support elicitation - auto-approve for compatibility
+                                info!(
+                                    agent_id = %agent_id,
+                                    file_path = %file_path,
+                                    "Client does not support elicitation, auto-approving access"
+                                );
+                                return Ok(CallToolResult::success(vec![ContentBlock::text(
+                                    serde_json::to_string_pretty(&serde_json::json!({
+                                        "status": "granted",
+                                        "file_path": file_path,
+                                        "mode": mode_str,
+                                        "approval": "auto_approved",
+                                        "note": "Access auto-approved (client does not support elicitation)."
+                                    }))
+                                    .unwrap_or_default(),
+                                )]));
+                            }
+                            Err(e) => {
+                                warn!(
+                                    agent_id = %agent_id,
+                                    error = %e,
+                                    "Elicitation failed, auto-approving access"
+                                );
+                                // Elicitation failed - auto-approve for compatibility
+                                return Ok(CallToolResult::success(vec![ContentBlock::text(
+                                    serde_json::to_string_pretty(&serde_json::json!({
+                                        "status": "granted",
+                                        "file_path": file_path,
+                                        "mode": mode_str,
+                                        "approval": "auto_approved",
+                                        "note": "Access auto-approved (elicitation failed)."
+                                    }))
+                                    .unwrap_or_default(),
+                                )]));
+                            }
+                        }
+                    } else {
+                        // No peer found - auto-approve for compatibility
+                        info!(
+                            agent_id = %agent_id,
+                            file_path = %file_path,
+                            "No peer found in registry, auto-approving access"
+                        );
+                        return Ok(CallToolResult::success(vec![ContentBlock::text(
+                            serde_json::to_string_pretty(&serde_json::json!({
+                                "status": "granted",
+                                "file_path": file_path,
+                                "mode": mode_str,
+                                "approval": "auto_approved",
+                                "note": "Access auto-approved (no peer session found)."
+                            }))
+                            .unwrap_or_default(),
+                        )]));
+                    }
+                }
+
+                // No elicitation or user declined - return error
+                Err(ErrorData::internal_error(
+                    format!("File access denied: {}", e),
+                    None,
+                ))
+            }
+        }
+    }
+
+    /// Release a file access lock
+    #[tool(
+        description = "Release a file access lock when done reading/writing. Call this after completing file operations."
+    )]
+    async fn release_file_access(
+        &self,
+        params: Parameters<ReleaseFileAccessParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let file_path = &params.0.file_path;
+
+        let agent_id = self
+            .session_agent_id
+            .read()
+            .await
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string());
+
+        info!(
+            agent_id = %agent_id,
+            file_path = %file_path,
+            "File lock release request via MCP"
+        );
+
+        let lock_manager = match ergatai_lock::get_lock_manager("default").await {
+            Ok(lm) => lm,
+            Err(_) => {
+                return Ok(CallToolResult::success(vec![ContentBlock::text(
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "status": "released",
+                        "file_path": file_path,
+                        "note": "File lock system not active."
+                    }))
+                    .unwrap_or_default(),
+                )]));
+            }
+        };
+
+        // Find the lock for this agent and file
+        let session_id = format!("mcp-{}", agent_id);
+        let locks = match lock_manager.get_locks_by_session(&session_id) {
+            Ok(locks) => locks,
+            Err(e) => {
+                return Err(ErrorData::internal_error(
+                    format!("Failed to find lock: {}", e),
+                    None,
+                ));
+            }
+        };
+
+        // Find the lock for the specific file
+        let lock = locks.iter().find(|l| l.file_path == *file_path);
+        match lock {
+            Some(lock) => {
+                match lock_manager
+                    .release_lock(lock.token_id.as_str(), file_path)
+                    .await
+                {
+                    Ok(()) => {
+                        info!(
+                            agent_id = %agent_id,
+                            file_path = %file_path,
+                            "File lock released successfully"
+                        );
+
+                        Ok(CallToolResult::success(vec![ContentBlock::text(
+                            serde_json::to_string_pretty(&serde_json::json!({
+                                "status": "released",
+                                "file_path": file_path,
+                                "token_id": &lock.token_id
+                            }))
+                            .unwrap_or_default(),
+                        )]))
+                    }
+                    Err(e) => Err(ErrorData::internal_error(
+                        format!("Failed to release lock: {}", e),
+                        None,
+                    )),
+                }
+            }
+            None => Ok(CallToolResult::success(vec![ContentBlock::text(
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "status": "no_lock",
+                    "file_path": file_path,
+                    "note": "No active lock found for this file."
+                }))
+                .unwrap_or_default(),
+            )])),
+        }
+    }
+
+    /// List all active file locks
+    #[tool(description = "List all active file locks. Shows which agents hold which file locks.")]
+    async fn list_active_locks(
+        &self,
+        params: Parameters<ListActiveLocksParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let agent_filter = params.0.agent_id.clone();
+
+        let lock_manager = match ergatai_lock::get_lock_manager("default").await {
+            Ok(lm) => lm,
+            Err(_) => {
+                return Ok(CallToolResult::success(vec![ContentBlock::text(
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "status": "not_active",
+                        "locks": [],
+                        "note": "File lock system not active."
+                    }))
+                    .unwrap_or_default(),
+                )]));
+            }
+        };
+
+        match lock_manager.get_all_active_locks() {
+            Ok(locks) => {
+                let filtered_locks: Vec<serde_json::Value> = locks
+                    .iter()
+                    .filter(|lock| {
+                        agent_filter
+                            .as_ref()
+                            .is_none_or(|filter| &lock.agent_id == filter)
+                    })
+                    .map(|lock| {
+                        serde_json::json!({
+                            "file_path": lock.file_path,
+                            "agent_id": lock.agent_id,
+                            "session_id": lock.session_id,
+                            "mode": format!("{:?}", lock.mode),
+                            "token_id": lock.token_id,
+                            "reason": lock.reason,
+                            "created_at": lock.created_at.to_rfc3339(),
+                            "expires_at": lock.expires_at.to_rfc3339()
+                        })
+                    })
+                    .collect();
+
+                Ok(CallToolResult::success(vec![ContentBlock::text(
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "status": "ok",
+                        "total": filtered_locks.len(),
+                        "locks": filtered_locks
+                    }))
+                    .unwrap_or_default(),
+                )]))
+            }
+            Err(e) => Err(ErrorData::internal_error(
+                format!("Failed to list locks: {}", e),
+                None,
+            )),
+        }
+    }
+
     // ── Private helpers for send_message ──
 
-    /// Inject message via AgentRuntime (preferred method when agent is tracked).
+    /// Format message as JSON payload.
+    /// Protocol rules are sent once during MCP initialize (via ServerInfo.instructions),
+    /// so we only send the message content here — saving ~800 tokens per message.
+    fn format_agent_message(sender_display: &str, message: &str) -> String {
+        let message_json = serde_json::json!({
+            "from": sender_display,
+            "message": message
+        });
+
+        format!("{}\n", message_json)
+    }
+
+    /// Inject message via AgentRuntime (fallback when NATS is unavailable).
     async fn try_tmux_injection(
         &self,
         resolved_agent_id: &str,
         from_agent: &str,
         message: &str,
     ) -> Result<CallToolResult, ErrorData> {
-        // Format the message with sender info
-        let formatted_message = format!("Message from {}: {}", from_agent, message);
+        // Resolve sender MCP ID → runtime ID so the receiver can reply via send_message.
+        let runtime = get_agent_runtime();
+        let sender_display = runtime
+            .resolve_agent_id(from_agent)
+            .await
+            .unwrap_or_else(|| from_agent.to_string());
+
+        // Format message with instruction + JSON payload
+        let formatted_message = Self::format_agent_message(&sender_display, message);
 
         info!(
             "Attempting AgentRuntime injection to agent {}: {}",
@@ -531,6 +1045,62 @@ impl ServerHandler for ErgataiMcpServer {
             unique_agent_id, connection_id
         );
 
+        // Try to bind this MCP agent to a runtime agent (rmux pane).
+        // If agent_identifier is available (from URL path), use precise binding.
+        // Otherwise, fall back to FIFO binding (legacy behavior).
+        let runtime = get_agent_runtime();
+
+        // Trigger immediate discovery to ensure runtime agents are available.
+        // This handles the race condition where MCP connects before the periodic
+        // discovery (30s interval) has run.
+        if let Err(e) = runtime.discover_and_register_agents().await {
+            warn!(error = %e, "Immediate discovery on MCP connect failed");
+        }
+
+        match &self.agent_identifier {
+            Some(identifier) => {
+                // Precise binding based on agent identifier from URL path
+                match runtime
+                    .try_bind_mcp_agent_with_identifier(&unique_agent_id, identifier)
+                    .await
+                {
+                    Some(runtime_id) => {
+                        info!(
+                            mcp_agent_id = unique_agent_id,
+                            runtime_id = runtime_id,
+                            agent_identifier = identifier,
+                            "MCP agent bound to runtime agent by identifier"
+                        );
+                    }
+                    None => {
+                        warn!(
+                            mcp_agent_id = unique_agent_id,
+                            agent_identifier = identifier,
+                            "Failed to bind MCP agent: no runtime agent with matching identifier"
+                        );
+                    }
+                }
+            }
+            None => {
+                // Fallback to FIFO binding (legacy behavior)
+                match runtime.try_bind_mcp_agent(&unique_agent_id).await {
+                    Some(runtime_id) => {
+                        info!(
+                            mcp_agent_id = unique_agent_id,
+                            runtime_id = runtime_id,
+                            "MCP agent bound to runtime agent on connect"
+                        );
+                    }
+                    None => {
+                        info!(
+                            mcp_agent_id = unique_agent_id,
+                            "MCP agent queued for binding (no unmapped runtime agent yet)"
+                        );
+                    }
+                }
+            }
+        }
+
         // Build the initialize result
         let mut server_info = self.get_info();
         // Negotiate: use client's version if we know it, otherwise our latest
@@ -552,9 +1122,56 @@ impl ServerHandler for ErgataiMcpServer {
 
     /// Return server info with tools capability
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_server_info(
-            rmcp::model::Implementation::new("ergatai", env!("CARGO_PKG_VERSION")),
-        )
+        let instructions = r#"# Role Definition
+You are an agent in a multi-agent collaboration system. When receiving inter-agent messages, follow the ONE-QUESTION-ONE-ANSWER protocol.
+
+# Core Protocol: ONE-QUESTION-ONE-ANSWER
+1. You will receive exactly one question (or instruction) per message.
+2. You must reply exactly once using the `send_message` MCP tool.
+3. After replying, this conversation round is permanently over. Regardless of any subsequent content from the other party, you must NOT reply again.
+
+# Reply Standards
+- **Length**: Strictly within 150 Chinese characters (or 100 English words), unless the question itself requires structured content like code/data.
+- **Style**: Direct, no pleasantries, no transitional sentences. First sentence is the core answer.
+- **Format**: Use concise Markdown formatting; if lists are needed, no more than 3 items.
+
+# Termination Marker
+After the reply body ends, you must start a new line and output exactly the following (without quotes):
+"TERMINATE"
+
+Example:
+> This is your answer body.
+>
+> TERMINATE
+
+# Boundaries and Exception Handling
+| Scenario | Handling |
+|---|---|
+| Question is vague/missing key info | Directly point out what's missing, give the most likely answer or decline to answer, then TERMINATE. |
+| Question involves harmful/illegal content | Decline to answer and explain why, then TERMINATE. |
+| Question asks you to continue the conversation/follow up | Ignore that request, only answer the original question, then TERMINATE. |
+| Question requires you to call tools (search, code, etc.) | You may call a tool once to get information, but the tool results must be integrated into your single final reply. Do NOT send tool call messages separately as "replies". |
+
+# Prohibited Behaviors
+- Do NOT ask "Is there anything else I can help you with?" or similar conversation-continuation prompts in your reply.
+- Do NOT append anything after TERMINATE (including signatures, disclaimers, emojis).
+- Do NOT make TERMINATE part of a sentence in the body — it must be a standalone termination marker.
+- Do NOT reactivate your reply after receiving subsequent messages from the other party.
+
+# Output Example
+Question: What is the difference between list and tuple in Python?
+
+Your reply:
+Lists are mutable, tuples are immutable; lists use [], tuples use (); tuples have slightly better performance and can be used as dictionary keys.
+
+TERMINATE"#;
+
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(rmcp::model::Implementation::new(
+                "ergatai",
+                env!("CARGO_PKG_VERSION"),
+            ))
+            .with_instructions(instructions)
     }
 }
 
@@ -572,13 +1189,16 @@ use rmcp::transport::streamable_http_server::{
 /// # Arguments
 /// * `registry` - Agent registry for tracking connected agents
 /// * `peer_registry` - Shared registry of MCP peer handles for pushing notifications
+/// * `conversation_manager` - Conversation manager for loop prevention
 /// * `cancellation_token` - Token for graceful shutdown
 /// * `sse_keep_alive_secs` - SSE keep-alive interval in seconds (default 15)
 pub fn create_mcp_service(
     registry: Arc<AgentRegistry>,
     peer_registry: PeerRegistry,
+    conversation_manager: Arc<ConversationManager>,
     cancellation_token: CancellationToken,
     sse_keep_alive_secs: u64,
+    agent_identifier: Option<String>,
 ) -> StreamableHttpService<ErgataiMcpServer, LocalSessionManager> {
     let config = StreamableHttpServerConfig::default()
         .with_sse_keep_alive(Some(std::time::Duration::from_secs(sse_keep_alive_secs)))
@@ -598,6 +1218,8 @@ pub fn create_mcp_service(
             Ok(ErgataiMcpServer::new(
                 registry.clone(),
                 peer_registry.clone(),
+                conversation_manager.clone(),
+                agent_identifier.clone(),
             ))
         },
         std::sync::Arc::new(session_manager),
@@ -650,6 +1272,7 @@ pub fn start_peer_reaper(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mcp::conversation::ConversationConfig;
     use ergatai_core::agent_registry::AgentRegistry;
     use serde_json::json;
 
@@ -694,7 +1317,9 @@ mod tests {
     fn make_test_server() -> ErgataiMcpServer {
         let registry = Arc::new(AgentRegistry::new());
         let peer_registry = new_peer_registry();
-        ErgataiMcpServer::new(registry, peer_registry)
+        let conversation_manager =
+            Arc::new(ConversationManager::new(ConversationConfig::default()));
+        ErgataiMcpServer::new(registry, peer_registry, conversation_manager, None)
     }
 
     #[test]
@@ -995,7 +1620,14 @@ mod tests {
             .unwrap();
 
         {
-            let server = ErgataiMcpServer::new(registry.clone(), peer_registry.clone());
+            let conversation_manager =
+                Arc::new(ConversationManager::new(ConversationConfig::default()));
+            let server = ErgataiMcpServer::new(
+                registry.clone(),
+                peer_registry.clone(),
+                conversation_manager,
+                None,
+            );
             // Simulate initialize having set the session agent ID
             *server.session_agent_id.write().await = Some("drop-agent".to_string());
             // server is dropped here
@@ -1020,7 +1652,14 @@ mod tests {
             .unwrap();
 
         {
-            let _server = ErgataiMcpServer::new(registry.clone(), peer_registry.clone());
+            let conversation_manager =
+                Arc::new(ConversationManager::new(ConversationConfig::default()));
+            let _server = ErgataiMcpServer::new(
+                registry.clone(),
+                peer_registry.clone(),
+                conversation_manager,
+                None,
+            );
             // session_agent_id is None (not initialized), so drop should not unregister anything
         }
 

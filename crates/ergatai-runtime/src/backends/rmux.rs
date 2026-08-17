@@ -220,6 +220,31 @@ impl RmuxBackend {
             .find_map(|entry| entry.strip_prefix(&prefix).map(|v| v.to_string()))
     }
 
+    /// Find an environment variable from a child process named "opencode".
+    ///
+    /// The startup script (bash) exec's opencode, so the bash process becomes
+    /// the parent. We scan /proc/{pid}/task/{pid}/children to find the opencode
+    /// process and read its environment.
+    fn find_opencode_child_environ(pid: u32, var_name: &str) -> Option<String> {
+        // Read the children PIDs from /proc/{pid}/task/{pid}/children
+        let children_path = format!("/proc/{}/task/{}/children", pid, pid);
+        let children_data = std::fs::read_to_string(&children_path).ok()?;
+
+        for child_pid_str in children_data.split_whitespace() {
+            if let Ok(child_pid) = child_pid_str.parse::<u32>() {
+                // Check if this child is named "opencode"
+                let comm_path = format!("/proc/{}/comm", child_pid);
+                if let Ok(comm) = std::fs::read_to_string(&comm_path) {
+                    if comm.trim() == "opencode" {
+                        // Found opencode process, read the env var
+                        return Self::read_proc_environ(child_pid, var_name);
+                    }
+                }
+            }
+        }
+        None
+    }
+
     // ── Advanced rmux-specific capabilities (not on trait) ──
 
     /// Wait until specific text appears in the agent's visible terminal output.
@@ -624,14 +649,17 @@ impl RmuxBackend {
         })?;
 
         let sanitized = Self::sanitize_message(message);
-        pane.send_text(format!("{}\n", sanitized))
-            .await
-            .map_err(|e| {
-                ErgataiError::internal(format!(
-                    "Failed to inject message into pane {}: {}",
-                    pane_id, e
-                ))
-            })?;
+        // Send text first, then Enter as a separate key event (same as inject_message)
+        pane.send_text(sanitized).await.map_err(|e| {
+            ErgataiError::internal(format!(
+                "Failed to inject message into pane {}: {}",
+                pane_id, e
+            ))
+        })?;
+
+        pane.send_key("Enter").await.map_err(|e| {
+            ErgataiError::internal(format!("Failed to send Enter to pane {}: {}", pane_id, e))
+        })?;
 
         debug!(
             session = session_name,
@@ -1269,6 +1297,25 @@ impl AgentRuntimeBackend for RmuxBackend {
             // This gives us the deterministic pane identifier (e.g., "%15").
             let rmux_pane = child_pid.and_then(|pid| Self::read_proc_environ(pid, "RMUX_PANE"));
 
+            // Try to read ERGATAI_AGENT_ID from the pane's descendant processes.
+            // The startup script sets ERGATAI_AGENT_ID, then exec's opencode.
+            // We need to find the opencode process (child of bash) to read this env var.
+            let ergatai_agent_id = child_pid.and_then(|pid| {
+                // First try the direct child (bash process)
+                if let Some(id) = Self::read_proc_environ(pid, "ERGATAI_AGENT_ID") {
+                    tracing::info!(pid = pid, agent_id = %id, "Found ERGATAI_AGENT_ID in direct child");
+                    return Some(id);
+                }
+                // If not found, look for opencode child process
+                let result = Self::find_opencode_child_environ(pid, "ERGATAI_AGENT_ID");
+                if let Some(ref id) = result {
+                    tracing::info!(parent_pid = pid, agent_id = %id, "Found ERGATAI_AGENT_ID in opencode child");
+                } else {
+                    tracing::info!(parent_pid = pid, "ERGATAI_AGENT_ID not found in any child process");
+                }
+                result
+            });
+
             // Use the deterministic RMUX_PANE identifier (e.g., "%15") as agent_id.
             // Fall back to pane_id (e.g., "%0") if RMUX_PANE can't be read from /proc.
             // This ensures the same pane always gets the same agent_id across scans,
@@ -1280,6 +1327,9 @@ impl AgentRuntimeBackend for RmuxBackend {
             metadata.insert("pane_id".to_string(), pane_id.clone());
             if let Some(ref rp) = rmux_pane {
                 metadata.insert("rmux_pane".to_string(), rp.clone());
+            }
+            if let Some(ref eai) = ergatai_agent_id {
+                metadata.insert("ergatai_agent_id".to_string(), eai.clone());
             }
 
             info!(
@@ -1433,12 +1483,13 @@ impl AgentRuntimeBackend for RmuxBackend {
         if let Some(instr) = instruction {
             tokio::time::sleep(INSTRUCTION_DELAY).await;
             let sanitized = Self::sanitize_message(instr);
-            agent_pane
-                .send_text(format!("{}\n", sanitized))
-                .await
-                .map_err(|e| {
-                    ErgataiError::internal(format!("rmux instruction injection failed: {}", e))
-                })?;
+            // Send text first, then Enter as a separate key event
+            agent_pane.send_text(sanitized).await.map_err(|e| {
+                ErgataiError::internal(format!("rmux instruction injection failed: {}", e))
+            })?;
+            agent_pane.send_key("Enter").await.map_err(|e| {
+                ErgataiError::internal(format!("rmux instruction Enter failed: {}", e))
+            })?;
             info!(
                 workspace = handle.id,
                 bytes = instr.len(),
@@ -1475,9 +1526,34 @@ impl AgentRuntimeBackend for RmuxBackend {
         };
 
         let sanitized = Self::sanitize_message(message);
-        pane.send_text(format!("{}\n", sanitized))
+
+        tracing::info!(
+            agent_id = %key,
+            original_len = message.len(),
+            sanitized_len = sanitized.len(),
+            message_preview = &sanitized[..sanitized.len().min(150)],
+            "Injecting message via rmux"
+        );
+
+        // Send text first (literal typing, no Enter), then send Enter as a
+        // separate key event. This matches the old TmuxManager behaviour
+        // (`send-keys -l text` + `send-keys Enter`) and ensures the TUI
+        // interprets the Enter as a submit action rather than pasting a
+        // newline character into a multi-line input field.
+        pane.send_text(&sanitized)
             .await
             .map_err(|e| ErgataiError::internal(format!("rmux send_text failed: {}", e)))?;
+
+        // Delay to let the terminal process the text before sending Enter.
+        // Terminal injection is inherently unreliable - the terminal might be busy,
+        // in a special state, or still processing previous input. 500ms gives most
+        // terminals enough time to settle.
+        // If issues persist, consider adding retry logic or a more reliable delivery mechanism.
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+        pane.send_key("Enter")
+            .await
+            .map_err(|e| ErgataiError::internal(format!("rmux send_key Enter failed: {}", e)))?;
 
         debug!(
             agent_id = key,

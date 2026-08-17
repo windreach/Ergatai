@@ -3,6 +3,7 @@
 //! Implements the MCP server for agent communication using rmcp SDK.
 //! Supports MCP protocol 2025-06-18 with Streamable HTTP transport.
 
+pub mod conversation;
 pub mod message_delivery;
 pub mod server;
 

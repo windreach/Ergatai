@@ -1600,8 +1600,9 @@ impl FileLockManager {
         Ok(result)
     }
 
-    /// Test helper: Get all active file locks
-    #[cfg(test)]
+    /// Get all active file locks
+    ///
+    /// Returns a list of all currently active file locks across all agents.
     pub fn get_all_active_locks(&self) -> Result<Vec<FileLock>, ErgataiError> {
         let conn = self
             .conn

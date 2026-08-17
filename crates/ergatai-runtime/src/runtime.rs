@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, error, info, warn};
 
 use ergatai_error::{ErgataiError, ErgataiResult};
@@ -58,6 +58,19 @@ pub fn init_agent_runtime(
 pub struct AgentRuntime {
     backend: Arc<dyn AgentRuntimeBackend>,
     registry: Arc<RwLock<HashMap<String, AgentInfo>>>,
+    /// Reverse index: MCP agent ID → runtime agent ID.
+    /// Enables resolving MCP IDs (e.g., "opencode@abcd1234") to runtime IDs
+    /// (e.g., "%198") for message injection.
+    mcp_index: Arc<RwLock<HashMap<String, String>>>,
+    /// Queue of MCP agent IDs waiting to be bound to a runtime agent.
+    /// Stores (mcp_agent_id, agent_identifier) tuples for precise binding.
+    /// Populated when an MCP agent connects before rmux discovery finds panes.
+    /// Drained after each successful discovery cycle.
+    pending_mcp: Arc<RwLock<Vec<(String, String)>>>,
+    /// Mutex to serialize binding operations.
+    /// Ensures that even if multiple MCP agents connect concurrently,
+    /// they are bound sequentially in creation-time order.
+    binding_mutex: Arc<Mutex<()>>,
 }
 
 impl AgentRuntime {
@@ -66,6 +79,9 @@ impl AgentRuntime {
         Self {
             backend,
             registry: Arc::new(RwLock::new(HashMap::new())),
+            mcp_index: Arc::new(RwLock::new(HashMap::new())),
+            pending_mcp: Arc::new(RwLock::new(Vec::new())),
+            binding_mutex: Arc::new(Mutex::new(())),
         }
     }
 
@@ -104,6 +120,7 @@ impl AgentRuntime {
             state: AgentState::Running,
             task_id: None,
             created_at: chrono::Utc::now(),
+            mcp_agent_id: None,
         };
 
         self.registry.write().await.insert(agent_id.clone(), info);
@@ -116,14 +133,21 @@ impl AgentRuntime {
     /// Inject a message into a running agent.
     ///
     /// Uses the backend (rmux) to inject text directly into the agent's pane.
-    /// Lookup is by `agent_id` key only.
+    /// Supports both runtime IDs (e.g., "%198") and MCP IDs (e.g., "opencode@abcd1234")
+    /// — MCP IDs are resolved to runtime IDs via the `mcp_index` mapping.
     pub async fn inject_message(&self, agent_id: &str, message: &str) -> ErgataiResult<()> {
+        // Resolve MCP ID to runtime ID if needed
+        let runtime_id = self
+            .resolve_agent_id(agent_id)
+            .await
+            .ok_or_else(|| ErgataiError::internal(format!("Agent {} not found", agent_id)))?;
+
         let info = {
             let registry = self.registry.read().await;
             registry
-                .get(agent_id)
+                .get(&runtime_id)
                 .cloned()
-                .ok_or_else(|| ErgataiError::internal(format!("Agent {} not found", agent_id)))?
+                .ok_or_else(|| ErgataiError::internal(format!("Agent {} not found", runtime_id)))?
         };
 
         // Deliver via backend injection (rmux send_text)
@@ -192,6 +216,7 @@ impl AgentRuntime {
             state: AgentState::Running,
             task_id: None,
             created_at: chrono::Utc::now(),
+            mcp_agent_id: None,
         };
         self.registry.write().await.insert(agent_id.clone(), info);
         debug!(agent_id = agent_id, "Registered discovered agent");
@@ -222,6 +247,7 @@ impl AgentRuntime {
                     state: AgentState::Running,
                     task_id: None,
                     created_at: chrono::Utc::now(),
+                    mcp_agent_id: None,
                 }
             });
         }
@@ -230,7 +256,303 @@ impl AgentRuntime {
         if count > 0 {
             info!(count = count, "Discovered and registered new agents");
         }
+
+        // After discovery, try to bind pending MCP agents to newly discovered runtime agents
+        if count > 0 {
+            self.drain_pending_bindings().await;
+        }
+
         Ok(count)
+    }
+
+    // ── MCP-to-Runtime agent ID binding ──
+
+    /// Try to bind an MCP agent ID to an unmapped runtime agent.
+    ///
+    /// Uses FIFO strategy: finds the first runtime agent without an MCP binding
+    /// and associates it with the given MCP ID. If no unmapped runtime agent
+    /// exists, the MCP ID is added to the pending queue for later binding
+    /// (when rmux discovery finds new panes).
+    ///
+    /// Returns the runtime agent ID if binding succeeded, or `None` if queued.
+    pub async fn try_bind_mcp_agent(&self, mcp_agent_id: &str) -> Option<String> {
+        // Acquire binding lock to serialize binding operations
+        // This ensures that even with concurrent MCP connections,
+        // bindings happen sequentially in creation-time order
+        let _guard = self.binding_mutex.lock().await;
+
+        // Check if already bound
+        {
+            let index = self.mcp_index.read().await;
+            if let Some(runtime_id) = index.get(mcp_agent_id) {
+                debug!(
+                    mcp_agent_id = mcp_agent_id,
+                    runtime_id = runtime_id,
+                    "MCP agent already bound"
+                );
+                return Some(runtime_id.clone());
+            }
+        }
+
+        // Sequential binding algorithm:
+        // Find the FIRST unbound runtime agent (by discovery order)
+        // This assumes panes are opened one at a time and MCP connects shortly after
+        let mut registry = self.registry.write().await;
+        let mut unbound_agents: Vec<_> = registry
+            .values()
+            .filter(|info| info.mcp_agent_id.is_none())
+            .collect();
+
+        if unbound_agents.is_empty() {
+            // No unmapped runtime agent — add to pending queue
+            drop(registry);
+            let mut pending = self.pending_mcp.write().await;
+            if !pending.iter().any(|(id, _)| id == mcp_agent_id) {
+                pending.push((mcp_agent_id.to_string(), String::new()));
+                info!(
+                    mcp_agent_id = mcp_agent_id,
+                    pending_count = pending.len(),
+                    "No unmapped runtime agent, queued MCP agent for later binding"
+                );
+            }
+            return None;
+        }
+
+        // Sort by creation time (earliest first) - sequential binding
+        // The first unbound agent should match the first MCP connection
+        unbound_agents.sort_by_key(|a| a.created_at);
+
+        // Bind to the earliest unbound agent
+        let matched_agent = unbound_agents.into_iter().next()?;
+        let runtime_id = matched_agent.agent_id.clone();
+
+        // Update the registry — agent may have been removed between sort and bind
+        if let Some(info) = registry.get_mut(&runtime_id) {
+            info.mcp_agent_id = Some(mcp_agent_id.to_string());
+        } else {
+            warn!(
+                runtime_id = %runtime_id,
+                mcp_agent_id = mcp_agent_id,
+                "Agent disappeared during binding, aborting"
+            );
+            return None;
+        }
+
+        // Update the reverse index
+        drop(registry);
+        self.mcp_index
+            .write()
+            .await
+            .insert(mcp_agent_id.to_string(), runtime_id.clone());
+
+        info!(
+            mcp_agent_id = mcp_agent_id,
+            runtime_id = runtime_id,
+            "Bound MCP agent to runtime agent (sequential algorithm with lock)"
+        );
+        Some(runtime_id)
+    }
+
+    /// Try to bind an MCP agent ID to a runtime agent using agent_identifier.
+    ///
+    /// This method matches MCP connections to runtime agents based on the
+    /// ERGATAI_AGENT_ID environment variable set in startup scripts.
+    /// Returns the runtime agent ID if binding succeeded.
+    pub async fn try_bind_mcp_agent_with_identifier(
+        &self,
+        mcp_agent_id: &str,
+        agent_identifier: &str,
+    ) -> Option<String> {
+        let _guard = self.binding_mutex.lock().await;
+
+        // Check if already bound
+        {
+            let index = self.mcp_index.read().await;
+            if let Some(runtime_id) = index.get(mcp_agent_id) {
+                debug!(
+                    mcp_agent_id = mcp_agent_id,
+                    runtime_id = runtime_id,
+                    "MCP agent already bound"
+                );
+                return Some(runtime_id.clone());
+            }
+        }
+
+        // Find runtime agent with matching ergatai_agent_id
+        let registry = self.registry.read().await;
+        let matched_agent = registry.values().find(|info| {
+            info.handle
+                .metadata
+                .get("ergatai_agent_id")
+                .map(|id| id == agent_identifier)
+                .unwrap_or(false)
+        });
+
+        let matched_agent = match matched_agent {
+            Some(agent) => agent,
+            None => {
+                // No matching runtime agent found yet - add to pending queue
+                // for later binding when discovery completes
+                let mut pq = self.pending_mcp.write().await;
+                if !pq.iter().any(|(id, _)| id == mcp_agent_id) {
+                    info!(
+                        mcp_agent_id = mcp_agent_id,
+                        agent_identifier = agent_identifier,
+                        "No runtime agent found yet, added to pending queue"
+                    );
+                    pq.push((mcp_agent_id.to_string(), agent_identifier.to_string()));
+                } else {
+                    debug!(
+                        mcp_agent_id = mcp_agent_id,
+                        agent_identifier = agent_identifier,
+                        "Already in pending queue"
+                    );
+                }
+                return None;
+            }
+        };
+
+        let runtime_id = matched_agent.agent_id.clone();
+        drop(registry);
+
+        // Update the registry
+        {
+            let mut registry = self.registry.write().await;
+            if let Some(info) = registry.get_mut(&runtime_id) {
+                info.mcp_agent_id = Some(mcp_agent_id.to_string());
+            }
+        }
+
+        // Update the reverse index
+        self.mcp_index
+            .write()
+            .await
+            .insert(mcp_agent_id.to_string(), runtime_id.clone());
+
+        info!(
+            mcp_agent_id = mcp_agent_id,
+            runtime_id = runtime_id,
+            agent_identifier = agent_identifier,
+            "Bound MCP agent to runtime agent by identifier"
+        );
+        Some(runtime_id)
+    }
+
+    /// Drain the pending MCP queue by binding pending agents to newly discovered
+    /// runtime agents. Called after `discover_and_register_agents` finds new agents.
+    async fn drain_pending_bindings(&self) {
+        let pending: Vec<(String, String)> = {
+            let mut pq = self.pending_mcp.write().await;
+            std::mem::take(&mut *pq)
+        };
+
+        if pending.is_empty() {
+            return;
+        }
+
+        info!(
+            pending_count = pending.len(),
+            "Draining pending MCP bindings"
+        );
+
+        let mut registry = self.registry.write().await;
+        let mut index = self.mcp_index.write().await;
+        let mut bound = 0;
+        let mut requeued = Vec::new();
+
+        for (mcp_id, agent_identifier) in pending {
+            // Skip if already bound (could happen if bound between queue and drain)
+            if index.contains_key(&mcp_id) {
+                continue;
+            }
+
+            // Find unbound runtime agents
+            let mut unbound_agents: Vec<_> = registry
+                .values()
+                .filter(|info| info.mcp_agent_id.is_none())
+                .collect();
+
+            if unbound_agents.is_empty() {
+                // Still no unmapped agent — re-queue
+                requeued.push((mcp_id, agent_identifier));
+                continue;
+            }
+
+            // Match by identifier if available, otherwise use FIFO
+            let matched_agent = if !agent_identifier.is_empty() {
+                // Find agent with matching ergatai_agent_id
+                unbound_agents.into_iter().find(|info| {
+                    info.handle
+                        .metadata
+                        .get("ergatai_agent_id")
+                        .map(|id| id == &agent_identifier)
+                        .unwrap_or(false)
+                })
+            } else {
+                // FIFO: sort by creation time and take earliest
+                unbound_agents.sort_by_key(|a| a.created_at);
+                unbound_agents.into_iter().next()
+            };
+
+            let matched_agent = match matched_agent {
+                Some(agent) => agent,
+                None => {
+                    // No matching agent found — re-queue
+                    requeued.push((mcp_id, agent_identifier));
+                    continue;
+                }
+            };
+
+            let runtime_id = matched_agent.agent_id.clone();
+
+            if let Some(info) = registry.get_mut(&runtime_id) {
+                info.mcp_agent_id = Some(mcp_id.clone());
+            }
+            index.insert(mcp_id.clone(), runtime_id.clone());
+
+            info!(
+                mcp_agent_id = mcp_id,
+                runtime_id = runtime_id,
+                agent_identifier = agent_identifier,
+                "Bound pending MCP agent to runtime agent"
+            );
+            bound += 1;
+        }
+
+        // Put back any that couldn't be bound
+        if !requeued.is_empty() {
+            let mut pq = self.pending_mcp.write().await;
+            pq.extend(requeued);
+        }
+
+        if bound > 0 {
+            info!(bound = bound, "Drained pending MCP bindings");
+        }
+    }
+
+    /// Resolve any agent ID (MCP ID or runtime ID) to a runtime agent ID.
+    ///
+    /// First checks if the ID is a direct runtime ID, then checks the MCP index.
+    pub async fn resolve_agent_id(&self, agent_id: &str) -> Option<String> {
+        // Direct match in registry
+        {
+            let registry = self.registry.read().await;
+            if registry.contains_key(agent_id) {
+                return Some(agent_id.to_string());
+            }
+        }
+
+        // MCP ID lookup
+        let index = self.mcp_index.read().await;
+        index.get(agent_id).cloned()
+    }
+
+    /// Get the MCP agent ID associated with a runtime agent.
+    pub async fn get_mcp_agent_id(&self, runtime_id: &str) -> Option<String> {
+        let registry = self.registry.read().await;
+        registry
+            .get(runtime_id)
+            .and_then(|info| info.mcp_agent_id.clone())
     }
 
     /// Update agent state.

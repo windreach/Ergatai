@@ -793,6 +793,7 @@ dependencies = [
  "ergatai-binary",
  "ergatai-core",
  "ergatai-error",
+ "ergatai-lock",
  "ergatai-nats",
  "ergatai-runtime",
  "futures",
@@ -2672,6 +2673,7 @@ dependencies = [
  "tokio-util",
  "tower-service",
  "tracing",
+ "url",
  "uuid",
 ]
 
