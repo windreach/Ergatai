@@ -373,11 +373,18 @@ async fn async_main(args: Args) -> Result<()> {
 
     // Create MCP services for each agent instance (agent-1, agent-2, agent-3)
     // Each service has its own URL path (/mcp/agent-1, /mcp/agent-2, /mcp/agent-3)
-    // This allows ergatai to bind MCP connections to specific rmux panes
+    // This allows ergatai to bind MCP connections to specific rmux panes.
+    //
+    // IMPORTANT: A single ConversationManager is shared across ALL services.
+    // The token-based turn model requires both sides of a conversation to share state:
+    // when agent-1 sends to agent-2, the token transfers to agent-2 in the shared manager,
+    // so agent-2's reply (through /mcp/agent-2) is correctly allowed. Using per-service
+    // managers would desynchronize token state and block legitimate replies.
+    let conversation_manager = Arc::new(ConversationManager::new(ConversationConfig::default()));
     let mcp_service_1 = create_mcp_service(
         mcp_registry.clone(),
         peer_registry.clone(),
-        Arc::new(ConversationManager::new(ConversationConfig::default())),
+        conversation_manager.clone(),
         mcp_cancellation_token.clone(),
         args.sse_keep_alive,
         Some("agent-1".to_string()),
@@ -385,7 +392,7 @@ async fn async_main(args: Args) -> Result<()> {
     let mcp_service_2 = create_mcp_service(
         mcp_registry.clone(),
         peer_registry.clone(),
-        Arc::new(ConversationManager::new(ConversationConfig::default())),
+        conversation_manager.clone(),
         mcp_cancellation_token.clone(),
         args.sse_keep_alive,
         Some("agent-2".to_string()),
@@ -393,7 +400,7 @@ async fn async_main(args: Args) -> Result<()> {
     let mcp_service_3 = create_mcp_service(
         mcp_registry.clone(),
         peer_registry.clone(),
-        Arc::new(ConversationManager::new(ConversationConfig::default())),
+        conversation_manager.clone(),
         mcp_cancellation_token.clone(),
         args.sse_keep_alive,
         Some("agent-3".to_string()),
@@ -402,7 +409,7 @@ async fn async_main(args: Args) -> Result<()> {
     let mcp_service_default = create_mcp_service(
         mcp_registry.clone(),
         peer_registry.clone(),
-        Arc::new(ConversationManager::new(ConversationConfig::default())),
+        conversation_manager.clone(),
         mcp_cancellation_token.clone(),
         args.sse_keep_alive,
         None,

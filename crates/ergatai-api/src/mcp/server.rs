@@ -622,9 +622,20 @@ impl ErgataiMcpServer {
             60,   // heartbeat every 60s
         );
 
-        // Register the file token
+        // Register the file token — fail early if registration fails so the lock
+        // state stays consistent (otherwise acquire_lock would proceed without
+        // a registered token, and subsequent release/list operations would be broken).
         if let Err(e) = lock_manager.register_file_token(&file_token) {
-            warn!("Failed to register file token: {}", e);
+            warn!(
+                agent_id = %agent_id,
+                file_path = %file_path,
+                error = %e,
+                "Failed to register file token, denying access"
+            );
+            return Err(ErrorData::internal_error(
+                format!("Failed to register file access token: {}", e),
+                None,
+            ));
         }
 
         // Try to acquire the lock
@@ -710,59 +721,35 @@ impl ErgataiMcpServer {
                                 );
                             }
                             Err(ElicitationError::CapabilityNotSupported) => {
-                                // Client doesn't support elicitation - auto-approve for compatibility
-                                info!(
-                                    agent_id = %agent_id,
-                                    file_path = %file_path,
-                                    "Client does not support elicitation, auto-approving access"
-                                );
-                                return Ok(CallToolResult::success(vec![ContentBlock::text(
-                                    serde_json::to_string_pretty(&serde_json::json!({
-                                        "status": "granted",
-                                        "file_path": file_path,
-                                        "mode": mode_str,
-                                        "approval": "auto_approved",
-                                        "note": "Access auto-approved (client does not support elicitation)."
-                                    }))
-                                    .unwrap_or_default(),
-                                )]));
-                            }
-                            Err(e) => {
+                                // Client doesn't support elicitation — deny rather than auto-approve.
+                                // Auto-approving here would let any agent bypass file locks by connecting
+                                // with a client that doesn't implement elicitation. The user/admin can
+                                // manually grant access or upgrade the client.
                                 warn!(
                                     agent_id = %agent_id,
-                                    error = %e,
-                                    "Elicitation failed, auto-approving access"
+                                    file_path = %file_path,
+                                    "Client does not support elicitation, denying file access (conflict unresolved)"
                                 );
-                                // Elicitation failed - auto-approve for compatibility
-                                return Ok(CallToolResult::success(vec![ContentBlock::text(
-                                    serde_json::to_string_pretty(&serde_json::json!({
-                                        "status": "granted",
-                                        "file_path": file_path,
-                                        "mode": mode_str,
-                                        "approval": "auto_approved",
-                                        "note": "Access auto-approved (elicitation failed)."
-                                    }))
-                                    .unwrap_or_default(),
-                                )]));
+                            }
+                            Err(e) => {
+                                // Elicitation failed — deny rather than auto-approve.
+                                // Silently granting on failure defeats the purpose of the lock system.
+                                warn!(
+                                    agent_id = %agent_id,
+                                    file_path = %file_path,
+                                    error = %e,
+                                    "Elicitation failed, denying file access (conflict unresolved)"
+                                );
                             }
                         }
                     } else {
-                        // No peer found - auto-approve for compatibility
-                        info!(
+                        // No peer found — deny rather than auto-approve.
+                        // A missing peer session is not a valid reason to bypass file locks.
+                        warn!(
                             agent_id = %agent_id,
                             file_path = %file_path,
-                            "No peer found in registry, auto-approving access"
+                            "No peer found in registry, denying file access (conflict unresolved)"
                         );
-                        return Ok(CallToolResult::success(vec![ContentBlock::text(
-                            serde_json::to_string_pretty(&serde_json::json!({
-                                "status": "granted",
-                                "file_path": file_path,
-                                "mode": mode_str,
-                                "approval": "auto_approved",
-                                "note": "Access auto-approved (no peer session found)."
-                            }))
-                            .unwrap_or_default(),
-                        )]));
                     }
                 }
 

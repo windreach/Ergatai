@@ -261,7 +261,7 @@ async fn handle_message(msg: &async_nats::jetstream::Message) {
         from = from,
         to = to,
         message_len = formatted_message.len(),
-        message_preview = &formatted_message[..formatted_message.len().min(200)],
+        message_preview = formatted_message.get(..200).unwrap_or(formatted_message),
         "Delivering agent message via NATS consumer"
     );
 

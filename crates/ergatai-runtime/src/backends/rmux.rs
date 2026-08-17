@@ -1531,7 +1531,7 @@ impl AgentRuntimeBackend for RmuxBackend {
             agent_id = %key,
             original_len = message.len(),
             sanitized_len = sanitized.len(),
-            message_preview = &sanitized[..sanitized.len().min(150)],
+            message_preview = sanitized.get(..150).unwrap_or(&sanitized),
             "Injecting message via rmux"
         );
 
@@ -1546,10 +1546,11 @@ impl AgentRuntimeBackend for RmuxBackend {
 
         // Delay to let the terminal process the text before sending Enter.
         // Terminal injection is inherently unreliable - the terminal might be busy,
-        // in a special state, or still processing previous input. 500ms gives most
-        // terminals enough time to settle.
-        // If issues persist, consider adding retry logic or a more reliable delivery mechanism.
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        // in a special state, or still processing previous input. 100ms is enough for
+        // most terminals to settle without adding noticeable latency to multi-agent
+        // conversations. If issues persist, consider adding retry logic or a more
+        // reliable delivery mechanism (e.g., waiting for a terminal-ready signal).
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         pane.send_key("Enter")
             .await
