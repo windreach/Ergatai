@@ -62,7 +62,7 @@ unicode-width = "0.2"
 rusqlite = { version = "0.31", features = ["bundled"] }
 
 # NATS
-async-nats = "0.38"
+async-nats = "0.50"
 
 # Syntax highlighting & diff
 syntect = "5.2"
