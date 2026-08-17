@@ -523,12 +523,9 @@ mod tests {
         // A → B, A → C, B → D, C → D
         let graph = TaskGraph::new(vec![
             TaskNode::new("a", "agent", "A"),
-            TaskNode::new("b", "agent", "B")
-                .with_dependencies(vec!["a".into()]),
-            TaskNode::new("c", "agent", "C")
-                .with_dependencies(vec!["a".into()]),
-            TaskNode::new("d", "agent", "D")
-                .with_dependencies(vec!["b".into(), "c".into()]),
+            TaskNode::new("b", "agent", "B").with_dependencies(vec!["a".into()]),
+            TaskNode::new("c", "agent", "C").with_dependencies(vec!["a".into()]),
+            TaskNode::new("d", "agent", "D").with_dependencies(vec!["b".into(), "c".into()]),
         ]);
         assert!(graph.validate().is_ok());
         assert_eq!(graph.ready_tasks().len(), 1); // only "a" is ready
@@ -538,10 +535,8 @@ mod tests {
     fn test_cycle_detection_simple() {
         // A → B, B → A
         let graph = TaskGraph::new(vec![
-            TaskNode::new("a", "agent", "A")
-                .with_dependencies(vec!["b".into()]),
-            TaskNode::new("b", "agent", "B")
-                .with_dependencies(vec!["a".into()]),
+            TaskNode::new("a", "agent", "A").with_dependencies(vec!["b".into()]),
+            TaskNode::new("b", "agent", "B").with_dependencies(vec!["a".into()]),
         ]);
         assert!(graph.validate().is_err());
     }
@@ -549,8 +544,7 @@ mod tests {
     #[test]
     fn test_cycle_detection_self_loop() {
         let graph = TaskGraph::new(vec![
-            TaskNode::new("a", "agent", "A")
-                .with_dependencies(vec!["a".into()]),
+            TaskNode::new("a", "agent", "A").with_dependencies(vec!["a".into()])
         ]);
         assert!(graph.validate().is_err());
     }
@@ -621,7 +615,9 @@ mod tests {
     #[test]
     fn test_set_result() {
         let mut graph = sample_graph();
-        graph.set_result("n1", "/path/to/result".to_string()).unwrap();
+        graph
+            .set_result("n1", "/path/to/result".to_string())
+            .unwrap();
         let node = graph.find_node("n1").unwrap();
         assert_eq!(node.status, TaskStatus::Completed);
         assert_eq!(node.result_path, Some("/path/to/result".to_string()));
@@ -687,8 +683,12 @@ mod tests {
             TaskNode::new("c2", "agent", "Child 2").with_dependencies(vec!["r1".into()]),
             TaskNode::new("c3", "agent", "Child 3").with_dependencies(vec!["r2".into()]),
             TaskNode::new("c4", "agent", "Child 4").with_dependencies(vec!["r2".into()]),
-            TaskNode::new("final", "agent", "Final")
-                .with_dependencies(vec!["c1".into(), "c2".into(), "c3".into(), "c4".into()]),
+            TaskNode::new("final", "agent", "Final").with_dependencies(vec![
+                "c1".into(),
+                "c2".into(),
+                "c3".into(),
+                "c4".into(),
+            ]),
         ]);
         assert!(graph.validate().is_ok());
         assert_eq!(graph.nodes.len(), 7);

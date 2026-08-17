@@ -293,10 +293,7 @@ mod tests {
         let client = ErgataiClient::new("http://localhost:3000", None);
         let id = "agent-789";
         let url = format!("{}/api/v1/agents/{}/message", client.base_url, id);
-        assert_eq!(
-            url,
-            "http://localhost:3000/api/v1/agents/agent-789/message"
-        );
+        assert_eq!(url, "http://localhost:3000/api/v1/agents/agent-789/message");
     }
 
     #[test]
@@ -384,7 +381,8 @@ mod tests {
 
     #[test]
     fn test_status_response_deserialization() {
-        let json = r#"{"nats_initialized":true,"nats_port":4222,"active_agents":3,"daemon_info":null}"#;
+        let json =
+            r#"{"nats_initialized":true,"nats_port":4222,"active_agents":3,"daemon_info":null}"#;
         let resp: StatusResponse = serde_json::from_str(json).unwrap();
         assert!(resp.nats_initialized);
         assert_eq!(resp.nats_port, Some(4222));

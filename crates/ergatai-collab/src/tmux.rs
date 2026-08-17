@@ -469,73 +469,127 @@ impl TmuxManager {
         Ok(())
     }
 
-    /// Scan tmux session for existing panes and register them as agents.
+    /// Scan ALL tmux sessions for existing panes and register them as agents.
+    ///
+    /// Dynamically discovers all tmux sessions (not just `default_session`),
+    /// so agents in any session can receive messages regardless of session name.
     ///
     /// Uses `|` as the format delimiter to avoid conflicts with colons that
     /// may appear in command paths. Panes already registered are skipped.
     pub async fn scan_and_register_panes(&self) -> Result<Vec<String>> {
-        info!(
-            "Scanning tmux session for existing panes: {}",
-            self.default_session
-        );
+        info!("Scanning ALL tmux sessions for existing panes");
 
-        let format = format!(
-            "#{{pane_id}}{}#{{pane_current_command}}{}#{{pane_pid}}",
-            PANE_FORMAT_DELIMITER, PANE_FORMAT_DELIMITER
-        );
-
-        let output = run_tmux_cmd(&["list-panes", "-t", &self.default_session, "-F", &format])
+        // Step 1: List all tmux sessions
+        let sessions_output = run_tmux_cmd(&["list-sessions", "-F", "#{session_name}"])
             .await
-            .context("Failed to list panes")?;
+            .context("Failed to list tmux sessions")?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("Failed to list panes: {}", stderr.trim());
+        if !sessions_output.status.success() {
+            let stderr = String::from_utf8_lossy(&sessions_output.stderr);
+            anyhow::bail!("Failed to list tmux sessions: {}", stderr.trim());
         }
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        let sessions: Vec<String> = String::from_utf8_lossy(&sessions_output.stdout)
+            .lines()
+            .map(|l| l.to_string())
+            .collect();
+
+        if sessions.is_empty() {
+            info!("No tmux sessions found");
+            return Ok(Vec::new());
+        }
+
+        // Step 2: For each session, list panes with session_name in the format
+        // so we can store the correct session per pane.
+        let format = format!(
+            "#{{pane_id}}{}#{{session_name}}{}#{{pane_current_command}}{}#{{pane_pid}}",
+            PANE_FORMAT_DELIMITER, PANE_FORMAT_DELIMITER, PANE_FORMAT_DELIMITER
+        );
+
         let mut registered = Vec::new();
 
-        // Hold the write lock for the entire scan-and-insert to prevent
-        // concurrent registrations from creating duplicates.
-        let mut agents = self.agents.write().await;
+        // Collect all pane data WITHOUT holding the write lock.
+        // This prevents blocking concurrent reads (inject_message, list_agents, etc.)
+        // during the potentially slow tmux subprocess calls.
+        let mut panes_to_register: Vec<(String, TmuxAgent)> = Vec::new();
 
-        for line in stdout.lines() {
-            // Use splitn(3, '|') so commands containing '|' are not split further
-            let parts: Vec<&str> = line.splitn(3, PANE_FORMAT_DELIMITER).collect();
-            if parts.len() < 3 {
-                debug!("Skipping malformed pane line: {:?}", line);
+        for session_name in &sessions {
+            let output =
+                match run_tmux_cmd(&["list-panes", "-t", session_name, "-F", &format]).await {
+                    Ok(o) => o,
+                    Err(e) => {
+                        warn!(
+                            session = session_name,
+                            error = %e,
+                            "Failed to list panes for session, skipping"
+                        );
+                        continue;
+                    }
+                };
+
+            if !output.status.success() {
+                debug!(
+                    session = session_name,
+                    "list-panes failed (session may have been removed)"
+                );
                 continue;
             }
 
-            let pane_id = parts[0];
-            let command = parts[1];
-            let pid = parts[2];
+            let stdout = String::from_utf8_lossy(&output.stdout);
 
-            let agent_id = format!("pane_{}", pane_id.replace('%', ""));
+            for line in stdout.lines() {
+                // Use splitn(4, '|') so commands containing '|' are not split further
+                let parts: Vec<&str> = line.splitn(4, PANE_FORMAT_DELIMITER).collect();
+                if parts.len() < 4 {
+                    debug!("Skipping malformed pane line: {:?}", line);
+                    continue;
+                }
 
-            if agents.contains_key(&agent_id) {
-                continue;
+                let pane_id = parts[0];
+                let pane_session = parts[1];
+                let command = parts[2];
+                let pid = parts[3];
+
+                let agent_id = format!("pane_{}", pane_id.replace('%', ""));
+
+                let agent = TmuxAgent {
+                    agent_id: agent_id.clone(),
+                    session: pane_session.to_string(),
+                    pane: pane_id.to_string(),
+                    command: command.to_string(),
+                    mapped_to_mcp: None,
+                };
+
+                info!(
+                    agent_id = agent_id,
+                    session = pane_session,
+                    command = command,
+                    pid = pid,
+                    "Discovered tmux pane (will register below)"
+                );
+
+                panes_to_register.push((agent_id, agent));
             }
-
-            let agent = TmuxAgent {
-                agent_id: agent_id.clone(),
-                session: self.default_session.clone(),
-                pane: pane_id.to_string(),
-                command: command.to_string(),
-                mapped_to_mcp: None,
-            };
-
-            agents.insert(agent_id.clone(), agent);
-            registered.push(agent_id.clone());
-
-            info!(
-                "Registered tmux pane as agent: {} (cmd: {}, pid: {})",
-                agent_id, command, pid
-            );
         }
 
-        info!("Scanned and registered {} new agents", registered.len());
+        // Now briefly acquire the write lock to insert all discovered panes at once.
+        // The lock is held only for HashMap insertions — no I/O.
+        {
+            let mut agents = self.agents.write().await;
+            for (agent_id, agent) in panes_to_register {
+                if agents.contains_key(&agent_id) {
+                    continue; // skip already-registered panes
+                }
+                agents.insert(agent_id.clone(), agent);
+                registered.push(agent_id);
+            }
+        }
+
+        info!(
+            "Scanned {} sessions, registered {} new agents",
+            sessions.len(),
+            registered.len()
+        );
         Ok(registered)
     }
 

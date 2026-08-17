@@ -790,7 +790,10 @@ mod tests {
         let mut seen = std::collections::HashSet::new();
         for _ in 0..1000 {
             let id = TokenId::new();
-            assert!(seen.insert(id.as_str().to_string()), "duplicate TokenId generated");
+            assert!(
+                seen.insert(id.as_str().to_string()),
+                "duplicate TokenId generated"
+            );
         }
     }
 

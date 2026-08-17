@@ -47,15 +47,11 @@ pub mod backends;
 // Runtime facade
 pub mod runtime;
 
-// MCP integration
-pub mod mcp_integration;
-
 // Re-export primary API
 pub use backend::AgentRuntimeBackend;
 pub use backends::direct_process::DirectProcessBackend;
 pub use backends::local_pty::LocalPtyBackend;
 pub use backends::rmux::{ManagedPaneInfo, RmuxBackend, RmuxDaemonInfo};
-pub use mcp_integration::McpIntegration;
 pub use rmux_sdk::RmuxEndpoint;
 pub use runtime::{get_agent_runtime, init_agent_runtime, AgentRuntime};
 pub use types::{

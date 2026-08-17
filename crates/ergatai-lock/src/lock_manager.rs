@@ -1525,7 +1525,10 @@ impl FileLockManager {
     /// Useful for querying audit log entries after lock operations without
     /// requiring a separate connection.
     pub fn audit_manager(&self) -> AuditManager {
-        AuditManager::new(Arc::clone(&self.conn))
+        AuditManager::new(
+            Arc::clone(&self.conn),
+            self.project_root.to_string_lossy().to_string(),
+        )
     }
 
     /// Test helper: Set heartbeat to a past time for testing timeout scenarios
@@ -3523,7 +3526,10 @@ mod tests {
         assert!(manager.is_file_locked("other.txt").unwrap());
 
         // Release one doesn't affect the other
-        manager.release_lock(token_a.id.as_str(), "test.txt").await.unwrap();
+        manager
+            .release_lock(token_a.id.as_str(), "test.txt")
+            .await
+            .unwrap();
         assert!(!manager.is_file_locked("test.txt").unwrap());
         assert!(manager.is_file_locked("other.txt").unwrap());
     }
@@ -3537,7 +3543,11 @@ mod tests {
 
         // Create 10 files
         for i in 0..10 {
-            std::fs::write(manager.project_root.join(format!("file_{i}.txt")), "content").unwrap();
+            std::fs::write(
+                manager.project_root.join(format!("file_{i}.txt")),
+                "content",
+            )
+            .unwrap();
         }
 
         let manager = Arc::new(manager);
@@ -3570,7 +3580,9 @@ mod tests {
                 let file_path = format!("file_{i}.txt");
                 mgr.acquire_lock(&file_token, &file_path).await.unwrap();
                 assert!(mgr.is_file_locked(&file_path).unwrap());
-                mgr.release_lock(file_token.id.as_str(), &file_path).await.unwrap();
+                mgr.release_lock(file_token.id.as_str(), &file_path)
+                    .await
+                    .unwrap();
                 assert!(!mgr.is_file_locked(&file_path).unwrap());
             });
         }
@@ -3583,7 +3595,9 @@ mod tests {
     #[tokio::test]
     async fn test_record_violation_and_audit() {
         let (manager, _temp) = create_test_manager();
-        manager.record_violation("test.txt", "WRITE_WITHOUT_LOCK").unwrap();
+        manager
+            .record_violation("test.txt", "WRITE_WITHOUT_LOCK")
+            .unwrap();
 
         let conn = manager.conn.lock().unwrap();
         let count: i32 = conn
@@ -3624,7 +3638,9 @@ mod tests {
         manager.acquire_lock(&token, "test.txt").await.unwrap();
 
         // Set heartbeat to the past
-        manager.set_heartbeat_past(system_token.id.as_str(), 100).unwrap();
+        manager
+            .set_heartbeat_past(system_token.id.as_str(), 100)
+            .unwrap();
 
         // Update heartbeat should succeed and refresh the timestamp
         manager.update_heartbeat(system_token.id.as_str()).unwrap();

@@ -162,9 +162,6 @@ pub struct AgentInfo {
     /// Optional task ID (for DAG orchestration)
     pub task_id: Option<String>,
 
-    /// Optional MCP agent ID (for MCP-connected agents)
-    pub mcp_agent_id: Option<String>,
-
     /// When this agent was created
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
@@ -292,7 +289,10 @@ mod tests {
             backend: "local-pty".to_string(),
             metadata,
         };
-        assert_eq!(handle.metadata.get("session"), Some(&"ergatai-abc".to_string()));
+        assert_eq!(
+            handle.metadata.get("session"),
+            Some(&"ergatai-abc".to_string())
+        );
     }
 
     #[test]
@@ -454,18 +454,16 @@ mod tests {
             },
             state: AgentState::Running,
             task_id: None,
-            mcp_agent_id: None,
             created_at: chrono::Utc::now(),
         };
         assert_eq!(info.agent_id, "agent-1");
         assert_eq!(info.workspace_id, "ws-1");
         assert_eq!(info.state, AgentState::Running);
         assert!(info.task_id.is_none());
-        assert!(info.mcp_agent_id.is_none());
     }
 
     #[test]
-    fn test_agent_info_with_task_and_mcp() {
+    fn test_agent_info_with_task() {
         let info = AgentInfo {
             agent_id: "agent-1".to_string(),
             workspace_id: "ws-1".to_string(),
@@ -481,10 +479,8 @@ mod tests {
             },
             state: AgentState::Starting,
             task_id: Some("task-42".to_string()),
-            mcp_agent_id: Some("mcp-agent-7".to_string()),
             created_at: chrono::Utc::now(),
         };
         assert_eq!(info.task_id, Some("task-42".to_string()));
-        assert_eq!(info.mcp_agent_id, Some("mcp-agent-7".to_string()));
     }
 }

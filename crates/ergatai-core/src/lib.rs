@@ -155,10 +155,7 @@ mod tests {
     #[test]
     fn test_resources_path_with_relative_path() {
         set_resources_path(PathBuf::from("./relative/path"));
-        assert_eq!(
-            get_resources_path(),
-            Some(PathBuf::from("./relative/path"))
-        );
+        assert_eq!(get_resources_path(), Some(PathBuf::from("./relative/path")));
         reset_resources_path();
     }
 

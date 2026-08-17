@@ -8,8 +8,8 @@
 //! ## Agent - Sub-task
 //! ### Agent - Sub-sub-task
 
-use ergatai_error::{ErgataiError, ErgataiResult};
 use crate::tree_topology::{TaskNode, TaskStatus, TaskTree};
+use ergatai_error::{ErgataiError, ErgataiResult};
 
 /// Parse a Markdown outline into a TaskTree
 ///
@@ -41,13 +41,17 @@ pub fn parse_markdown_tree(content: &str) -> ErgataiResult<TaskTree> {
     }
 
     if root_nodes.is_empty() {
-        return Err(ErgataiError::InvalidArgument("No tasks found in markdown outline".to_string()));
+        return Err(ErgataiError::InvalidArgument(
+            "No tasks found in markdown outline".to_string(),
+        ));
     }
 
     // If only one root node, use it directly
     // Otherwise, create a virtual root
     let root = if root_nodes.len() == 1 {
-        root_nodes.pop().expect("len == 1 guarantees pop() returns Some")
+        root_nodes
+            .pop()
+            .expect("len == 1 guarantees pop() returns Some")
     } else {
         TaskNode {
             id: "root".to_string(),
@@ -68,7 +72,10 @@ pub fn parse_markdown_tree(content: &str) -> ErgataiResult<TaskTree> {
 fn parse_heading(line: &str) -> ErgataiResult<(usize, String)> {
     let level = line.chars().take_while(|c| *c == '#').count();
     if level == 0 {
-        return Err(ErgataiError::InvalidArgument(format!("Invalid heading: {}", line)));
+        return Err(ErgataiError::InvalidArgument(format!(
+            "Invalid heading: {}",
+            line
+        )));
     }
 
     let task_text = line
@@ -80,7 +87,10 @@ fn parse_heading(line: &str) -> ErgataiResult<(usize, String)> {
         .to_string();
 
     if task_text.is_empty() {
-        return Err(ErgataiError::InvalidArgument(format!("Empty heading: {}", line)));
+        return Err(ErgataiError::InvalidArgument(format!(
+            "Empty heading: {}",
+            line
+        )));
     }
 
     Ok((level, task_text))

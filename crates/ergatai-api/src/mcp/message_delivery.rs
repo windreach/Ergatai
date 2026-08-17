@@ -1,13 +1,11 @@
 //! Message delivery consumer — reliable agent message delivery via NATS JetStream
 //!
 //! Pulls messages from the `AGENT_MESSAGES` JetStream stream and delivers each
-//! to the target agent via (in order):
-//! 1. **AgentRuntime injection** — preferred, uses backend (tmux) or MCP fallback
-//! 2. **MCP custom notification** — fallback when backend injection unavailable
+//! to the target agent via AgentRuntime injection (rmux/tmux send_text).
 //!
 //! ## Reliability semantics
 //!
-//! - Message is **ack'd** only after successful delivery (runtime or MCP)
+//! - Message is **ack'd** only after successful delivery
 //! - On delivery failure: message is **nak'd** → JetStream redelivers after `ack_wait`
 //! - After `max_deliver` attempts (set on the consumer): message is discarded
 //! - Stream retention is `WorkQueue`: ack'd messages are removed immediately
@@ -19,10 +17,9 @@
 //!   ↓ pull
 //! MessageDeliveryConsumer
 //!   ↓ deserialize AgentMessagePayload
-//!   ↓ resolve target agent (runtime or MCP peer)
-//!   ├─ AgentRuntime injection OK → ack
-//!   ├─ MCP notification OK → ack
-//!   └─ both fail → nak (JetStream retries)
+//!   ↓ AgentRuntime injection (rmux/tmux send_text)
+//!   ├─ OK → ack
+//!   └─ fail → nak (JetStream retries)
 //! ```
 
 use std::time::Duration;
@@ -38,8 +35,6 @@ use ergatai_nats::events::AgentMessagePayload;
 use ergatai_nats::AGENT_MESSAGES_STREAM;
 use ergatai_runtime::get_agent_runtime;
 
-use super::server::PeerRegistry;
-
 /// Consumer name for the message delivery pull consumer.
 /// Durable — survives consumer restarts and resumes from last ack.
 const CONSUMER_NAME: &str = "message_delivery";
@@ -51,11 +46,9 @@ const CONSUMER_NAME: &str = "message_delivery";
 ///
 /// # Arguments
 /// * `connection` — NATS connection (must be initialized with JetStream)
-/// * `peer_registry` — MCP peer registry for notification fallback
 /// * `cancel` — cancellation token for graceful shutdown
 pub fn start_message_delivery_consumer(
     connection: NatsConnection,
-    peer_registry: PeerRegistry,
     cancel: tokio_util::sync::CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -77,7 +70,7 @@ pub fn start_message_delivery_consumer(
         );
 
         // Process messages until cancelled or stream error
-        process_messages(messages, peer_registry, cancel).await;
+        process_messages(messages, cancel).await;
 
         info!("Message delivery consumer stopped");
     })
@@ -173,19 +166,21 @@ async fn init_pull_consumer_with_retry(
             }
         }
     }
-    unreachable!()
+    // If we exit the loop (e.g., cancellation), return an error instead of panicking.
+    Err(ErgataiError::NatsError(
+        "Consumer initialization loop exited unexpectedly".to_string(),
+    ))
 }
 
 /// Main message processing loop.
 ///
-/// Pulls messages from the stream, attempts delivery via AgentRuntime then MCP,
+/// Pulls messages from the stream, attempts delivery via AgentRuntime injection,
 /// and acks/naks based on the result.
 async fn process_messages(
     mut messages: futures::stream::BoxStream<
         'static,
         Result<async_nats::jetstream::Message, Box<dyn std::error::Error + Send + Sync>>,
     >,
-    peer_registry: PeerRegistry,
     cancel: tokio_util::sync::CancellationToken,
 ) {
     loop {
@@ -206,7 +201,7 @@ async fn process_messages(
 
                     // Message received
                     Some(Ok(msg)) => {
-                        handle_message(&msg, &peer_registry).await;
+                        handle_message(&msg).await;
                     }
 
                     // Transport error
@@ -221,7 +216,7 @@ async fn process_messages(
 }
 
 /// Handle a single message: deserialize, deliver, ack/nak.
-async fn handle_message(msg: &async_nats::jetstream::Message, peer_registry: &PeerRegistry) {
+async fn handle_message(msg: &async_nats::jetstream::Message) {
     // Deserialize the payload
     let payload: AgentMessagePayload = match serde_json::from_slice(&msg.payload) {
         Ok(p) => p,
@@ -264,117 +259,33 @@ async fn handle_message(msg: &async_nats::jetstream::Message, peer_registry: &Pe
     // Format the message for display in the target agent's pane
     let formatted_message = format!("Message from {}: {}", from, payload.content);
 
-    // ── Attempt 1: AgentRuntime injection (preferred) ──
-    // This tries backend injection (tmux) first, then falls back to MCP notification
+    // ── Deliver via AgentRuntime injection (rmux/tmux send_text) ──
+    // Uses the terminal multiplexer backend to inject text directly into the
+    // target agent's pane, simulating keyboard input.
     let runtime = get_agent_runtime();
     match runtime.inject_message(to, &formatted_message).await {
         Ok(()) => {
-            info!(from = from, to = to, "Message delivered via AgentRuntime");
-            if let Err(e) = msg.ack().await {
-                warn!("Failed to ack runtime delivery: {}", e);
-            }
-            return;
-        }
-        Err(e) => {
-            debug!(
-                from = from,
-                to = to,
-                error = %e,
-                "AgentRuntime injection failed, trying direct MCP notification"
-            );
-        }
-    }
-
-    // ── Attempt 2: Direct MCP custom notification (fallback) ──
-    // This is used when the target agent is not tracked by AgentRuntime
-    // but has a direct MCP connection. Wrapped in a timeout to prevent
-    // blocking the consumer beyond ack_wait (30s) if the peer is slow.
-    let delivery_timeout = Duration::from_secs(10);
-    match tokio::time::timeout(
-        delivery_timeout,
-        send_mcp_notification(to, &payload, peer_registry),
-    )
-    .await
-    {
-        Ok(Ok(())) => {
             info!(
                 from = from,
                 to = to,
-                "Message delivered via MCP notification"
+                "Message delivered via AgentRuntime injection"
             );
             if let Err(e) = msg.ack().await {
-                warn!("Failed to ack MCP delivery: {}", e);
+                warn!("Failed to ack delivery: {}", e);
             }
         }
-        Ok(Err(e)) => {
+        Err(e) => {
             warn!(
                 from = from,
                 to = to,
                 error = %e,
-                "Both delivery methods failed — naking for retry"
+                "AgentRuntime injection failed — naking for retry"
             );
             if let Err(nak_err) = msg.ack_with(AckKind::Nak(None)).await {
                 error!("Failed to nak message: {}", nak_err);
             }
         }
-        Err(_) => {
-            warn!(
-                from = from,
-                to = to,
-                timeout_secs = delivery_timeout.as_secs(),
-                "MCP notification timed out — naking for retry"
-            );
-            if let Err(nak_err) = msg.ack_with(AckKind::Nak(None)).await {
-                error!("Failed to nak message after timeout: {}", nak_err);
-            }
-        }
     }
-}
-
-/// Send MCP custom notification to the target agent.
-async fn send_mcp_notification(
-    target_agent_id: &str,
-    payload: &AgentMessagePayload,
-    peer_registry: &PeerRegistry,
-) -> ErgataiResult<()> {
-    let peer = {
-        let peers = peer_registry.read().await;
-        peers.get(target_agent_id).cloned()
-    };
-
-    let peer = match peer {
-        Some(p) => p,
-        None => {
-            return Err(ErgataiError::internal(format!(
-                "Agent {} has no active MCP connection",
-                target_agent_id
-            )));
-        }
-    };
-
-    let notification_payload = serde_json::json!({
-        "from_agent": payload.from_agent,
-        "to_agent": payload.to_agent,
-        "content": payload.content,
-        "message_type": "request",
-        "timestamp": payload.timestamp,
-    });
-
-    let notification =
-        rmcp::model::CustomNotification::new("ergatai/message", Some(notification_payload));
-
-    peer.send_notification(rmcp::model::ServerNotification::CustomNotification(
-        notification,
-    ))
-    .await
-    .map_err(|e| {
-        ErgataiError::internal(format!(
-            "MCP notification to {} failed: {}",
-            target_agent_id, e
-        ))
-    })?;
-
-    Ok(())
 }
 
 // ── Tests ──
@@ -421,15 +332,6 @@ mod tests {
     }
 
     #[test]
-    fn test_delivery_timeout_is_ten_seconds() {
-        // The MCP notification fallback uses a 10s timeout (well under the 30s ack_wait).
-        let delivery_timeout = Duration::from_secs(10);
-        assert_eq!(delivery_timeout.as_secs(), 10);
-        // Verify it's less than ack_wait to prevent ack deadline blowout
-        assert!(delivery_timeout < Duration::from_secs(30));
-    }
-
-    #[test]
     fn test_retry_delay_starts_at_500ms() {
         // init_pull_consumer_with_retry starts with delay = 500ms
         let initial_delay = Duration::from_millis(500);
@@ -450,10 +352,7 @@ mod tests {
 
         let expected = vec![500, 1000, 2000, 4000, 8000, 16000, 30000, 30000];
         for &exp_ms in &expected {
-            assert_eq!(
-                delay.as_millis() as u64, exp_ms,
-                "delay sequence mismatch"
-            );
+            assert_eq!(delay.as_millis() as u64, exp_ms, "delay sequence mismatch");
             delay = (delay * 2).min(max_delay);
         }
         // After reaching the cap, further doublings stay at cap

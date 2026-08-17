@@ -1,445 +1,201 @@
-# CLAUDE.md
+# CLAUDE.md — Ergatai
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+多 agent 协作中间件。将独立运行的 AI 编码助手（如 OpenCode）组织成协作团队，通过 rmux pane 注入实现消息投递。
 
 ---
 
-## What is this?
+## 通信数据流（核心）
 
-**Ergatai** - A multi-agent collaboration middleware for AI-assisted software engineering. Transforms individual AI coding assistants into a coordinated engineering team with parallel task execution, safe concurrent file access, and DAG-based workflow orchestration.
-
-**Pure Rust implementation** using **tmux injection** (preferred) and **MCP (Model Context Protocol)** notifications (fallback) for all agent communication — agents connect as MCP clients, call tools, and receive messages either injected directly into their tmux pane or pushed via **MCP custom notifications**. Embedded **NATS** event bus handles reliable internal messaging, and a **DAG-based orchestration engine** provides template-driven data flow.
-
-### Middleware Architecture (Important!)
-
-Ergatai runs as a **middleware** - it does NOT spawn or manage agent processes. Instead:
-
-1. **Agents run independently** (typically inside tmux panes) and manage their own lifecycle
-2. **Agents connect to Ergatai via MCP** (Streamable HTTP) as MCP clients
-3. **Agents call tools** (send_message, list_agents, etc.) via MCP tool calls
-4. **Agents receive messages** primarily via **tmux injection** (Ergatai writes directly into the agent's tmux pane); MCP custom notifications (`ergatai/message`) are used as a fallback when tmux is unavailable
-5. **No HTTP server needed on the agent side** — agents never bind ports or expose endpoints
+### 消息发送流程
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│           Agent (runs independently, typically in tmux)          │
-│  ┌──────────────┐                                               │
-│  │   LLM/API    │                                               │
-│  │              │                                               │
-│  └──────────────┘                                               │
-└─────────────────────────────────────────────────────────────────┘
-         │ MCP (tools/call)       ▲ tmux injection (preferred)
-         ▼                        │ or MCP notifications (fallback)
-┌─────────────────────────────────────────────────────────────────┐
-│                        Ergatai (Middleware)                      │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐  │
-│  │  MCP Server  │  │ PeerRegistry │  │   NATS Event Bus     │  │
-│  │  (tools)     │  │ (push)       │  │   (JetStream)        │  │
-│  └──────────────┘  └──────────────┘  └──────────────────────┘  │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐  │
-│  │  Agent       │  │  DAG         │  │  File Access         │  │
-│  │  Registry    │  │  Scheduler   │  │  Control             │  │
-│  └──────────────┘  └──────────────┘  └──────────────────────┘  │
-│  ┌──────────────────────────────────────────────────────────┐  │
-│  │  tmux injector (writes directly into agent's tmux pane)  │  │
-│  └──────────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────┘
+Agent A (rmux pane)
+  │  通过 MCP 协议调用 send_message tool
+  ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  ① MCP Server — send_message()                    [server.rs]   │
+│     解析 target_agent_id，在 AgentRuntime registry 查找目标      │
+│     构建 AgentMessagePayload，发布到 NATS JetStream              │
+│     返回 { status: "queued" }                                    │
+└──────────────────────────────────────────────────────────────────┘
+  │
+  ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  ② NATS JetStream — AGENT_MESSAGES stream          [nats/]      │
+│     subject: ergatai.agent.message.{target_agent_id}             │
+│     持久化到文件，WorkQueue 保留策略，24h TTL                      │
+│     配置: agent_message_stream.rs                                │
+│     发布: event_bus.rs::publish_agent_message_reliable()         │
+└──────────────────────────────────────────────────────────────────┘
+  │
+  ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  ③ Message Delivery Consumer                       [message_delivery.rs]
+│     后台 pull consumer 从 JetStream 拉取消息                      │
+│     反序列化 AgentMessagePayload                                  │
+│     调用 AgentRuntime.inject_message()                            │
+│     成功 → ack()  /  失败 → nak() 重试 (最多 20 次, 30s 间隔)    │
+└──────────────────────────────────────────────────────────────────┘
+  │
+  ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  ④ AgentRuntime — inject_message()                  [runtime.rs] │
+│     在 registry 中查找 agent_id → 获取 AgentHandle               │
+│     委托给 backend.inject_message()                               │
+└──────────────────────────────────────────────────────────────────┘
+  │
+  ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  ⑤ RmuxBackend — inject_message()                 [rmux.rs]     │
+│     从 panes_map 查找 Pane handle                                │
+│     sanitize_message() (去换行, 截断 64KiB)                       │
+│     pane.send_text() → rmux daemon → 写入 pane 终端              │
+│     等同于 rmux send-keys -t {pane_id} "{message}\n"             │
+└──────────────────────────────────────────────────────────────────┘
+  │
+  ▼
+Agent B 的 rmux pane 中显示消息
 ```
 
-## Commands
+### Agent 发现与注册
 
-### Build and Test
-
-```bash
-# Build all crates
-cargo build --workspace
-
-# Build release version
-cargo build --release --workspace
-
-# Build a single crate
-cargo build -p ergatai-api
-
-# Run all tests
-cargo test --workspace
-
-# Run tests for a specific crate
-cargo test -p ergatai-core
-cargo test -p ergatai-api
-
-# Run a single test file
-cargo test -p ergatai-core --test integration_test
-
-# Run a single test function
-cargo test -p ergatai-core test_lock_acquire_release
-cargo test -p ergatai-core -- --exact test_lock_acquire_release
-
-# Run tests with filter
-cargo test -p ergatai-core lock
-
-# Lint
-cargo clippy --workspace -- -D warnings
-
-# Format
-cargo fmt --all
+```
+┌──────────────────────────────────────────────────────────────────┐
+│  启动时 + 每 30 秒                                 [main.rs]     │
+│     discover_and_register_agents()                                │
+└──────────────────────────────────────────────────────────────────┘
+  │
+  ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  RmuxBackend::discover_agents()                   [rmux.rs]     │
+│     rmux.list_sessions() → 获取所有 session                       │
+│     rmux.find_panes().all() → 获取所有 pane                       │
+│     过滤: 跳过非 Running 状态的 pane                              │
+│     过滤: 跳过 session 名以 _ 开头的 (warmup session)             │
+│     对每个 pane:                                                  │
+│       从 PaneProcessState::Running { pid } 提取子进程 PID          │
+│       读 /proc/{pid}/environ 获取 RMUX_PANE 环境变量               │
+│       用 RMUX_PANE (如 "%15") 作为 agent_id (确定性绑定)           │
+│       fallback: 读不到则用 "pane_N"                               │
+│     注册到 AgentRuntime registry                                  │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
-### Run
+### Agent ID 体系
 
-```bash
-# Run API server (Ergatai middleware)
-cargo run --bin ergatai-api -- --port 3000
+| ID 来源 | 格式 | 说明 |
+|---------|------|------|
+| RMUX_PANE 环境变量 | `%15`, `%16` | **确定性 ID**，rmux 自动注入到 pane 进程，从 `/proc/{pid}/environ` 读取 |
+| fallback | `pane_0`, `pane_1` | 读不到 RMUX_PANE 时按发现顺序编号（不稳定） |
+| MCP client | `opencode@a1b2c3d4` | MCP 连接时自动生成，仅用于 MCP peer registry |
 
-# Run with debug logging
-RUST_LOG=debug cargo run --bin ergatai-api -- --port 3000
+**关键**: agent 之间发消息使用 RMUX_PANE 值（如 `%15`）作为 target_agent_id。
 
-# Run with API token authentication
-ERGATAI_API_TOKEN=secret cargo run --bin ergatai-api -- --port 3000
+---
 
-# Run example agent (in another terminal)
-cargo run -p simple-agent -- --port 8080 --agent-id my-agent --ergatai http://localhost:3000
-
-# Run integration test
-./tests/integration_test.sh
-```
-
-### Environment Variables
-
-- `RUST_LOG` - Log level (error, warn, info, debug, trace)
-- `ERGATAI_API_TOKEN` - Bearer token for API authentication (optional)
-
-## Architecture
-
-### Layer Responsibilities
-
-| Layer | Crate | Responsibility |
-|-------|-------|----------------|
-| **Core** | `ergatai-core` | Business logic facade, re-exports from sub-crates |
-| **Collab** | `ergatai-collab` | Multi-agent collaboration (DAG scheduler, task coordinator) |
-| **DAG** | `ergatai-dag` | DAG parsing, template engine, context management |
-| **NATS** | `ergatai-nats` | Embedded NATS server and event bus |
-| **Lock** | `ergatai-lock` | File access control and token-based locking |
-| **Agent** | `ergatai-agent` | Agent config, discovery, hosted agents |
-| **Error** | `ergatai-error` | Shared error types |
-| **API** | `ergatai-api` | HTTP server with MCP endpoints |
-
-### Workspace Structure
+## 项目结构
 
 ```
 crates/
-├── ergatai-core/    # Core library facade
-├── ergatai-collab/  # Multi-agent collaboration
-├── ergatai-dag/     # DAG parsing and orchestration
-├── ergatai-nats/    # NATS messaging
-├── ergatai-lock/    # File access control
-├── ergatai-agent/   # Agent config and discovery
-├── ergatai-error/   # Error types
-└── ergatai-api/     # HTTP/MCP server
-    └── src/
-        └── mcp/
-            ├── agent_registry.rs  # Tracks connected agents
-            ├── message_relay.rs   # MCP notification push
-            ├── tools.rs           # MCP tool implementations
-            └── server.rs          # MCP JSON-RPC handler
-examples/
-└── simple-agent/    # Example agent demonstrating middleware usage
+├── ergatai-api/        HTTP/MCP 服务器入口
+│   └── src/mcp/
+│       ├── server.rs             MCP 工具实现 (send_message, list_agents 等)
+│       ├── message_delivery.rs   NATS consumer → AgentRuntime 投递
+│       └── mod.rs
+├── ergatai-runtime/    Agent 运行时 (发现、注入、生命周期)
+│   └── src/backends/
+│       ├── rmux.rs              rmux backend (发现 + 消息注入)
+│       ├── local_pty.rs         tmux/pty backend (legacy)
+│       └── direct_process.rs    直接进程 backend
+├── ergatai-nats/       嵌入式 NATS 服务器 + JetStream 事件总线
+├── ergatai-collab/     多 agent 协作 (DAG 调度、任务协调)
+├── ergatai-dag/        DAG 解析和模板引擎
+├── ergatai-lock/       文件访问控制 (token-based locking)
+├── ergatai-agent/      Agent 配置和发现
+├── ergatai-core/       门面 crate，re-export
+├── ergatai-error/      共享错误类型
+├── ergatai-binary/     二进制资源 (rmux, nats-server)
+└── ergatai-cli/        CLI 工具
 ```
 
-### Communication Architecture (Critical!)
+---
 
-**Two independent layers:**
+## 命令
 
-| Layer | Protocol | Direction | Purpose |
-|-------|----------|-----------|---------|
-| **Agent ↔ Ergatai** | MCP (Streamable HTTP) + tmux injection | Bidirectional | Agents call tools via MCP; Ergatai delivers messages via tmux injection (preferred) or MCP custom notifications (fallback) |
-| **Ergatai Internal** | NATS (JetStream) | Event stream | Task routing, completion events, file notifications |
+```bash
+# 构建
+cargo build --workspace
+cargo build -p ergatai-api
 
-**Key point**: Agents never communicate directly. All inter-agent messaging is relayed through Ergatai. Ergatai delivers messages to agents primarily via **tmux injection** (writing directly into the agent's tmux pane using `tmux send-keys`), falling back to pushing `ergatai/message` MCP notifications to the agent's SSE stream when tmux is unavailable.
+# 测试
+cargo test --workspace
+cargo test -p ergatai-api
+cargo test -p ergatai-runtime
 
-```
-User request: "Refactor this module with 3 agents"
-    ↓
-CLI generates DAG definition
-    ↓
-DagScheduler parses → NATS distributes tasks → Sub-agents A/B/C (MCP execution)
-                   ↑ NATS events relay completion
-```
+# Lint
+cargo clippy --workspace -- -D warnings
+cargo fmt --all
 
-### Core Modules
+# 启动服务器
+RUST_LOG=info cargo run -p ergatai-api -- --port 3000
 
-**NATS Messaging (`nats/`):**
-- `manager.rs` - NATS server management
-- `streams.rs` - JetStream stream definitions
-- `event_bus.rs` - Typed event publishing
-
-**DAG Orchestration (`orchestration/`):**
-- `task_graph.rs` - DAG parsing and validation
-- `template.rs` - Template engine ({{var}} rendering)
-- `dag_context.rs` - Context management for data flow
-
-**Multi-Agent Collaboration (`cross_agent/`):**
-- `dag_scheduler.rs` - DAG execution scheduling
-- `task_scheduler.rs` - Individual task scheduling
-- `agent_launcher.rs` - Agent process management
-- `message_router.rs` - Inter-agent message routing
-
-**File Access Control (`file_access/`):**
-- `lock_manager.rs` - Token-based locking (READ/WRITE/ADMIN)
-- `token.rs` - Two-level token system (SystemToken + FileToken)
-- `watchdog.rs` - Heartbeat monitoring and lock reclamation
-- `snapshot.rs` - Git snapshot creation before writes
-- `audit.rs` - Security audit logging
-
-**Agent Management (`agent/`):**
-- `config.rs` - Agent configuration structures
-- `discovery.rs` - Agent discovery (built-in + custom)
-- `hosted_config.rs` - User-defined agent configurations
-
-### File Access Control (Multi-Agent Safety)
-
-Token-based locking prevents conflicting edits:
-
-```rust
-// Agent A acquires WRITE lock
-let token = lock_manager.acquire_write("src/foo.rs").await?;
-
-// Modify file
-fs::write("src/foo.rs", new_content)?;
-
-// Automatic git snapshot
-snapshot_manager.create_snapshot("src/foo.rs")?;
-
-// Release lock (Agent B can now acquire)
-lock_manager.release(token).await?;
+# 启动 + debug 日志
+RUST_LOG=debug cargo run -p ergatai-api -- --port 3000
 ```
 
-**Two-level Token System:**
-- `SystemToken` - Session-level admission (binds agent_id + session_id)
-- `FileToken` - Operation-level (READ/WRITE/ADMIN scope)
+---
 
-**Database**: `{project_root}/.ergatai/locks.db` (SQLite)
+## 关键类型
 
-**Single Agent Mode**: When only one agent is active, automatically bypasses approval flow and conflict arbitration (5-second hysteresis debounce).
+| 类型 | 文件 | 用途 |
+|------|------|------|
+| `AgentRuntime` | `runtime.rs` | 门面：registry + backend 封装 |
+| `AgentInfo` | `types.rs` | registry 中的 agent 记录 (agent_id, handle, state, mcp_agent_id) |
+| `AgentHandle` | `types.rs` | agent 的 handle (workspace, process_id, metadata) |
+| `AgentMessagePayload` | `nats/events.rs` | NATS 消息体 (from, to, content, timestamp) |
+| `RmuxBackend` | `backends/rmux.rs` | rmux daemon 交互 (发现 + 注入) |
+| `NatsConnection` | `nats/connection.rs` | NATS 连接 + JetStream 上下文 |
+| `ErgataiMcpServer` | `mcp/server.rs` | MCP 服务器实现 (工具注册 + 协议处理) |
 
-### DAG Orchestration
+---
 
-```markdown
-## Task A (Analyze code)
-- **agent**: claude-code
-- **task**: tasks/analyze.md
-
-## Task B (Write tests)
-- **agent**: cursor
-- **task**: tasks/test.md
-- **depends_on**: [Task A]
-- **input**: "Analysis: {{TaskA.review_result}}"
-- **output**: test_result, coverage
-- **retry**: 3
-- **timeout**: 300
-```
-
-**Template Variables:**
-- `{{global.*}}` - Global variables (DagContext.global_vars)
-- `{{node_id.*}}` - Upstream node outputs (DagContext.node_outputs)
-
-### NATS Subject Naming
+## NATS Subject 命名
 
 ```
 ergatai.
-├── task.submit.{agent}              # DagScheduler → TaskScheduler
-├── task.complete.{task_id}          # Agent completion notification
-├── dag.node_complete.{node}         # AgentLauncher → DagScheduler
-├── dag.complete.{dag_id}            # All tasks complete
-├── agent.message.{agent_id}         # Inter-agent messages (@mention)
-├── file.access.request              # File lock requests (JetStream)
-├── file.ready.{md5_hash}            # File WRITE complete notification
-└── file.error.{md5_hash}            # File WRITE failed notification
+├── agent.message.{agent_id}     agent 间消息 (JetStream, 持久化)
+├── task.submit.{agent}          DagScheduler → TaskScheduler
+├── task.complete.{task_id}      任务完成通知
+├── dag.node_complete.{node}     DAG 节点完成
+├── dag.complete.{dag_id}        DAG 全部完成
+├── file.access.request          文件锁请求 (JetStream)
+├── file.ready.{md5}             文件写入完成
+└── file.error.{md5}             文件写入失败
 ```
 
-**JetStream Streams:**
-- `TASK_QUEUE` - Task distribution (WorkQueue retention)
-- `FILE_ACCESS_REQUESTS/GRANTS/ESCALATIONS` - File access control
-- `FILE_EVENTS` - File ready/error notifications
-- `LOCK_WAITERS` - Lock waiting queue
+JetStream Streams:
+- `AGENT_MESSAGES` — agent 消息投递 (WorkQueue, 24h TTL)
+- `FILE_ACCESS_REQUESTS/GRANTS/ESCALATIONS` — 文件访问控制
+- `FILE_EVENTS` — 文件就绪/错误通知
 
-## Database
+---
 
-**Location**: `{project_root}/.ergatai/ergatai.db` (SQLite)
+## 数据库
 
-**Key Tables:**
-- `projects` - Project information
-- `agents` - Agent configurations
-- `sessions` - Session records
-- `tasks` - Task execution records
+- 主库: `{project_root}/.ergatai/ergatai.db` (SQLite)
+- 锁库: `{project_root}/.ergatai/locks.db` (SQLite)
 
-**Lock Database**: `{project_root}/.ergatai/locks.db` (SQLite with 5 tables)
+---
 
-## Important Files
+## 技术栈
 
-### Core Library
-- `crates/ergatai-core/src/lib.rs` - Library entry point
-- `crates/ergatai-core/src/nats/manager.rs` - NATS global state
-- `crates/ergatai-core/src/file_access/lock_manager.rs` - Lock management (largest file)
-- `crates/ergatai-core/src/cross_agent/dag_scheduler.rs` - DAG scheduling
-
-### API Server
-- `crates/ergatai-api/src/main.rs` - HTTP/MCP server entry point
-- `crates/ergatai-api/src/mcp/` - MCP protocol implementation
-
-### Configuration
-- `Cargo.toml` - Workspace configuration
-- `docs/dev/ARCHITECTURE.md` - Detailed architecture documentation
-
-## MCP Tools (Agent Interface)
-
-Agents connect to Ergatai via MCP and can call these tools:
-
-### `list_agents`
-List all connected agents and their status.
-
-```json
-{
-  "name": "list_agents",
-  "arguments": {
-    "include_capabilities": true
-  }
-}
-```
-
-### `send_message`
-Send a message to another agent via MCP notification.
-
-```json
-{
-  "name": "send_message",
-  "arguments": {
-    "target_agent_id": "other-agent",
-    "message": "Please review this code",
-    "message_type": "request"
-  }
-}
-```
-
-### `submit_orchestration`
-Submit a DAG workflow for multi-agent collaboration.
-
-```json
-{
-  "name": "submit_orchestration",
-  "arguments": {
-    "dag_definition": "## Task A\n- agent: agent-1\n..."
-  }
-}
-```
-
-### `check_dag_status`
-Check the status of a DAG execution.
-
-```json
-{
-  "name": "check_dag_status",
-  "arguments": {
-    "dag_id": "uuid-of-dag"
-  }
-}
-```
-
-## Agent Developer Guide
-
-To create an agent that works with Ergatai:
-
-### 1. Connect to Ergatai as an MCP client
-
-Use any MCP SDK (e.g. `rmcp` for Rust) to connect to `http://localhost:3000/mcp`:
-
-```rust
-use rmcp::{ClientHandler, ServiceExt, transport::StreamableHttpClientTransport, RoleClient};
-
-struct MyAgent { agent_id: String }
-
-impl ClientHandler for MyAgent {
-    // Override get_info so Ergatai registers you under your actual name
-    fn get_info(&self) -> ClientInfo {
-        ClientInfo::new(
-            ClientCapabilities::default(),
-            Implementation::new(self.agent_id.clone(), "1.0.0"),
-        )
-    }
-
-    // Receive messages from other agents via MCP custom notifications
-    async fn on_custom_notification(
-        &self, notification: CustomNotification, _ctx: NotificationContext<RoleClient>,
-    ) {
-        if notification.method == "ergatai/message" {
-            let payload = notification.params.unwrap_or_default();
-            let from = payload["from_agent"].as_str().unwrap_or("unknown");
-            let content = payload["content"].as_str().unwrap_or("(empty)");
-            info!("📩 Message from {}: {}", from, content);
-        }
-    }
-}
-
-// Connect
-let transport = StreamableHttpClientTransport::from_uri("http://localhost:3000/mcp");
-let client = MyAgent::new("my-agent").serve(transport).await?;
-```
-
-**That's it!** Ergatai will automatically:
-- Register your agent identity (from `clientInfo.name`)
-- Enable message delivery via MCP notifications (no HTTP server needed)
-
-### 2. Use Ergatai tools
-
-Your agent can call `list_agents`, `send_message`, `submit_orchestration`, etc.
-
-See `examples/simple-agent/` for a complete working implementation.
-
-## Debugging Tips
-
-### Build Issues
-
-```bash
-# Clean build
-cargo clean
-cargo build --workspace
-
-# Check dependencies
-cargo tree | grep <crate-name>
-
-# Verbose build
-cargo build --workspace --verbose
-```
-
-### Runtime Issues
-
-```bash
-# Enable debug logging
-RUST_LOG=debug cargo run --bin ergatai-api -- --port 3000
-
-# Enable trace logging
-RUST_LOG=trace cargo run --bin ergatai-api -- --port 3000
-```
-
-### Test Issues
-
-```bash
-# Some tests may fail intermittently when run together (shared global state)
-# Run tests individually if you encounter failures
-cargo test -p ergatai-core --test <test_name>
-
-# Run with single thread to avoid race conditions
-cargo test --workspace -- --test-threads=1
-```
-
-## Tech Stack
-
-| Layer | Technology |
-|-------|-----------|
-| Language | Rust (100%) |
-| Agent→Ergatai | MCP (JSON-RPC over Streamable HTTP) |
-| MCP Spec | 2025-11-25 |
-| Messaging | NATS (async-nats 0.38) + JetStream |
-| Database | SQLite (rusqlite 0.31) |
-| CLI Framework | clap 4.5 |
-| HTTP Server | axum 0.7 |
-| Async Runtime | tokio 1.36 |
+| 层 | 技术 |
+|----|------|
+| 语言 | Rust (100%) |
+| Agent ↔ Ergatai | MCP (JSON-RPC over Streamable HTTP) |
+| 内部消息 | NATS (async-nats 0.38) + JetStream |
+| 终端复用 | rmux (tmux 兼容) |
+| 数据库 | SQLite (rusqlite 0.31) |
+| HTTP | axum 0.7 |
+| 异步 | tokio 1.36 |
+| CLI | clap 4.5 |

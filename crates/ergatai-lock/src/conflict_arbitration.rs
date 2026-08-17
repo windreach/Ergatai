@@ -509,10 +509,7 @@ mod tests {
     fn test_generate_conflict_report_contains_decision() {
         let conflict = create_test_conflict(Some("low"), Some("high"));
         let decision = arbitrate_conflict(&conflict);
-        assert_eq!(
-            decision,
-            ArbitrationDecision::GrantToNewRequester
-        );
+        assert_eq!(decision, ArbitrationDecision::GrantToNewRequester);
         let report = generate_conflict_report(&conflict, decision);
         assert!(report.contains("GrantToNewRequester"));
     }

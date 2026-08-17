@@ -822,6 +822,15 @@ mod tests {
     use super::*;
     use ergatai_dag::TaskNode;
 
+    /// Global test lock — serializes tests that share the `GLOBAL_DAG` static.
+    ///
+    /// `test_global_dag_scheduler_lifecycle` and `test_global_dag_scheduler_replace`
+    /// both call `clear_dag_scheduler()` / `set_dag_scheduler()` which mutate the
+    /// same `OnceLock<Mutex<Option<DagScheduler>>>`. Running them in parallel
+    /// causes race conditions. This lock ensures sequential execution.
+    static TEST_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+        std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
     fn sample_graph() -> TaskGraph {
         TaskGraph::new(vec![
             TaskNode::new("n1", "agent-a", "Task A"),
@@ -873,6 +882,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_global_dag_scheduler_lifecycle() {
+        let _guard = TEST_LOCK.lock().await;
         // Clean slate
         clear_dag_scheduler();
         assert!(get_dag_scheduler().is_none());
@@ -894,6 +904,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_global_dag_scheduler_replace() {
+        let _guard = TEST_LOCK.lock().await;
         clear_dag_scheduler();
 
         // Set first scheduler
@@ -1026,13 +1037,13 @@ mod tests {
 
         let ctx = scheduler.context();
         let ctx = ctx.lock().await;
-        assert_eq!(
-            ctx.get_global("greeting").as_deref(),
-            Some("hello")
-        );
+        assert_eq!(ctx.get_global("greeting").as_deref(), Some("hello"));
         let outputs = ctx.get_node_outputs("n1");
         assert!(outputs.is_some());
-        assert_eq!(outputs.unwrap().get("result").map(|s| s.as_str()), Some("done"));
+        assert_eq!(
+            outputs.unwrap().get("result").map(|s| s.as_str()),
+            Some("done")
+        );
     }
 
     #[tokio::test]
@@ -1123,7 +1134,10 @@ mod tests {
         scheduler.on_node_failed("n1", "oops").await.unwrap();
         let g = scheduler.graph.lock().await;
         let n = g.find_node("n1").unwrap();
-        assert_eq!(n.retry_count, 1, "retry_count should have been bumped before submission");
+        assert_eq!(
+            n.retry_count, 1,
+            "retry_count should have been bumped before submission"
+        );
     }
 
     #[tokio::test]
@@ -1142,7 +1156,10 @@ mod tests {
             g.update_status("n1", TaskStatus::Running).unwrap();
         }
 
-        scheduler.on_node_failed("n1", "final failure").await.unwrap();
+        scheduler
+            .on_node_failed("n1", "final failure")
+            .await
+            .unwrap();
         let g = scheduler.graph.lock().await;
         let n = g.find_node("n1").unwrap();
         assert_eq!(n.status, TaskStatus::Failed);
@@ -1209,7 +1226,13 @@ mod tests {
     async fn test_build_upstream_context_block_empty_when_no_deps() {
         let graph = TaskGraph::new(vec![TaskNode::new("n1", "a", "A")]);
         let scheduler = DagScheduler::new(PathBuf::from("/tmp/upstream-empty"), graph);
-        let node = scheduler.graph.lock().await.find_node("n1").unwrap().clone();
+        let node = scheduler
+            .graph
+            .lock()
+            .await
+            .find_node("n1")
+            .unwrap()
+            .clone();
         let block = scheduler.build_upstream_context_block(&node).await;
         assert!(block.is_empty());
     }
@@ -1228,7 +1251,13 @@ mod tests {
             )
             .await;
 
-        let node = scheduler.graph.lock().await.find_node("n2").unwrap().clone();
+        let node = scheduler
+            .graph
+            .lock()
+            .await
+            .find_node("n2")
+            .unwrap()
+            .clone();
         let block = scheduler.build_upstream_context_block(&node).await;
         assert!(block.contains("Upstream Context"));
         assert!(block.contains("key1"));

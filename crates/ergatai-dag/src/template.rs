@@ -231,10 +231,7 @@ mod tests {
     #[test]
     fn test_unicode_in_template() {
         let context = ctx(&[("名前", "太郎")]);
-        assert_eq!(
-            render_template("名前: {{名前}}", &context),
-            "名前: 太郎"
-        );
+        assert_eq!(render_template("名前: {{名前}}", &context), "名前: 太郎");
     }
 
     #[test]
@@ -253,7 +250,10 @@ mod tests {
             ("node-1.result/path", "/tmp/out"),
         ]);
         assert_eq!(
-            render_template("User: {{global.user.name}}, Path: {{node-1.result/path}}", &context),
+            render_template(
+                "User: {{global.user.name}}, Path: {{node-1.result/path}}",
+                &context
+            ),
             "User: Alice, Path: /tmp/out"
         );
     }

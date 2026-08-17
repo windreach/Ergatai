@@ -111,10 +111,10 @@ cargo build --release -p ergatai-api
   │  │                 Protocol Layer                          │ │
   │  │                                                         │ │
   │  │    ┌───────────────┐                ┌───────────────┐  │ │
-  │  │    │  MCP Server   │                │   tmux        │  │ │
+  │  │    │  MCP Server   │                │   rmux        │  │ │
   │  │    │               │   notify       │   injector    │  │ │
   │  │    │  • JSON-RPC   │◄──────────────►│               │  │ │
-  │  │    │  • SSE stream │                │  • send-keys  │  │ │
+  │  │    │  • SSE stream │                │  • send_text  │  │ │
   │  │    │  • Tools API  │                │  • Pane write │  │ │
   │  │    └───────┬───────┘                └───────┬───────┘  │ │
   │  └────────────┼────────────────────────────────┼──────────┘ │
@@ -159,14 +159,14 @@ Ergatai uses two independent protocols for bidirectional communication:
 | Direction | Protocol | Purpose |
 |-----------|----------|---------|
 | **Agent → Ergatai** | MCP (Streamable HTTP) | Agents call tools: `list_agents`, `send_message`, `submit_orchestration`, `check_dag_status` |
-| **Ergatai → Agent** | tmux injection (preferred) + MCP notification (fallback) | Ergatai delivers tasks/messages by writing directly into the agent's tmux pane, falling back to MCP notifications when tmux is unavailable |
+| **Ergatai → Agent** | rmux pane injection | Ergatai delivers messages by injecting text directly into the agent's rmux pane via `pane.send_text()` |
 
 **Agent registration flow:**
 1. Agent connects to Ergatai via MCP (as MCP client)
 2. Agent calls tools (e.g. `list_agents`, `send_message`) to interact with Ergatai
-3. Ergatai pushes tasks/messages back via tmux injection into the agent's pane (or MCP notification as fallback)
+3. Ergatai pushes tasks/messages back by injecting text into the agent's rmux pane
 
-**Key point**: Agents do NOT need to expose any incoming endpoint. Ergatai delivers messages by injecting keystrokes into the agent's tmux pane (the preferred path), or by pushing MCP notifications over the existing SSE stream when tmux is not available.
+**Key point**: Agents do NOT need to expose any incoming endpoint. Ergatai delivers messages by injecting text into the agent's rmux pane, simulating keyboard input. Agent identity is deterministically bound to panes via the `RMUX_PANE` environment variable.
 
 ### DAG Orchestration Flow
 
@@ -280,11 +280,12 @@ Send a message to another registered agent.
 **Response:**
 ```json
 {
-  "message_id": "msg-a1b2c3",
-  "status": "delivered",
-  "delivery_method": "mcp_notification",
-  "target_agent_id": "cursor",
-  "message_type": "request"
+  "status": "queued",
+  "target_agent": "cursor",
+  "delivery_method": "nats_jetstream",
+  "stream": "AGENT_MESSAGES",
+  "sequence": 42,
+  "note": "Message persisted to NATS JetStream. Background consumer will deliver via rmux injection."
 }
 ```
 
@@ -335,19 +336,21 @@ Ergatai works with any agent that implements the MCP protocol:
 ```
 ergatai/
 ├── crates/
-│   ├── ergatai-core/      # Core library — business logic facade
 │   ├── ergatai-api/       # MCP server + REST API (main entry point)
-│   ├── ergatai-collab/    # Multi-agent collaboration primitives
-│   ├── ergatai-dag/       # DAG parser, scheduler, dependency resolution
+│   ├── ergatai-runtime/   # Agent runtime (discovery, injection, lifecycle)
 │   ├── ergatai-nats/      # Embedded NATS server + JetStream streams
+│   ├── ergatai-collab/    # Multi-agent collaboration (DAG scheduling)
+│   ├── ergatai-dag/       # DAG parser, scheduler, dependency resolution
 │   ├── ergatai-lock/      # Token-based file access control
 │   ├── ergatai-agent/     # Agent config, discovery, hosted agents
-│   └── ergatai-error/     # Shared error types
-├── docs/
-│   └── MCP_CONFIG_GUIDE.md, ...
+│   ├── ergatai-core/      # Core library — business logic facade
+│   ├── ergatai-error/     # Shared error types
+│   ├── ergatai-binary/    # Binary resources (rmux, nats-server)
+│   └── ergatai-cli/       # CLI tool
 ├── examples/
 │   └── simple-agent/      # Minimal MCP agent example
 ├── Cargo.toml
+├── CLAUDE.md
 └── README.md
 ```
 

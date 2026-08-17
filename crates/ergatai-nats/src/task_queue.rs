@@ -118,15 +118,26 @@ impl<T: Serialize + for<'de> Deserialize<'de> + Send + Sync + 'static> NatsTaskQ
     /// Submit a task to the queue
     ///
     /// The message will be persisted to JetStream and delivered to a consumer.
+    /// Uses JetStream publish with acknowledgment to ensure the message is
+    /// durably stored before returning.
     pub async fn submit(&self, correlation_id: String, payload: T) -> ErgataiResult<String> {
         let message = TaskMessage::new(correlation_id, payload);
         let message_id = message.message_id.clone();
 
         let json = serde_json::to_vec(&message)?;
 
-        self.connection.publish(&self.subject, json).await?;
+        // Use JetStream publish (with ack) to ensure message persistence.
+        // This awaits a PublishAck from the server before returning.
+        let ack = self
+            .connection
+            .publish_jetstream(&self.subject, json)
+            .await?;
 
-        info!(message_id = message_id, "Task submitted");
+        info!(
+            message_id = message_id,
+            sequence = ack.sequence,
+            "Task submitted"
+        );
         Ok(message_id)
     }
 
@@ -538,7 +549,10 @@ mod tests {
 
         assert_eq!(deserialized.correlation_id, "corr-complex");
         assert_eq!(deserialized.payload.nested.len(), 2);
-        assert_eq!(deserialized.payload.nested.get("key1"), Some(&vec![1, 2, 3]));
+        assert_eq!(
+            deserialized.payload.nested.get("key1"),
+            Some(&vec![1, 2, 3])
+        );
         assert_eq!(deserialized.payload.optional, Some("value".to_string()));
     }
 

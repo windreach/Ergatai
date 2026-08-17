@@ -481,7 +481,7 @@ Write your results in markdown:
                 ))
             })?;
 
-        // 5. Set task_id and mcp_agent_id for tracking
+        // 5. Set task_id for DAG tracking
         if let Err(e) = runtime
             .set_task_id(&runtime_agent_id, agent_id.to_string())
             .await
@@ -491,19 +491,6 @@ Write your results in markdown:
                 runtime_agent_id = %runtime_agent_id,
                 error = %e,
                 "Failed to set task_id on runtime — DAG completion tracking may be broken"
-            );
-        }
-
-        // Set agent name as MCP agent ID for notification routing
-        if let Err(e) = runtime
-            .set_mcp_agent_id(&runtime_agent_id, agent_name.to_string())
-            .await
-        {
-            tracing::warn!(
-                agent = %agent_id,
-                runtime_agent_id = %runtime_agent_id,
-                error = %e,
-                "Failed to set mcp_agent_id on runtime — MCP notification fallback may not route"
             );
         }
 

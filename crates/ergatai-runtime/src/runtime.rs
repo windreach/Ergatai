@@ -17,7 +17,6 @@ use tracing::{debug, error, info, warn};
 use ergatai_error::{ErgataiError, ErgataiResult};
 
 use crate::backend::AgentRuntimeBackend;
-use crate::mcp_integration::McpIntegration;
 use crate::types::{AgentHandle, AgentInfo, AgentState, WaitResult, WorkspaceSpec};
 
 // ── Global singleton ──
@@ -55,11 +54,10 @@ pub fn init_agent_runtime(
 
 /// High-level facade for agent management.
 ///
-/// Wraps a backend + agent registry + optional MCP integration.
+/// Wraps a backend + agent registry.
 pub struct AgentRuntime {
     backend: Arc<dyn AgentRuntimeBackend>,
     registry: Arc<RwLock<HashMap<String, AgentInfo>>>,
-    mcp_integration: Arc<RwLock<Option<Arc<McpIntegration>>>>,
 }
 
 impl AgentRuntime {
@@ -68,13 +66,7 @@ impl AgentRuntime {
         Self {
             backend,
             registry: Arc::new(RwLock::new(HashMap::new())),
-            mcp_integration: Arc::new(RwLock::new(None)),
         }
-    }
-
-    /// Set the MCP integration for notification fallback.
-    pub async fn set_mcp_integration(&self, mcp: Arc<McpIntegration>) {
-        *self.mcp_integration.write().await = Some(mcp);
     }
 
     /// Get a reference to the underlying backend.
@@ -111,7 +103,6 @@ impl AgentRuntime {
             handle: handle.clone(),
             state: AgentState::Running,
             task_id: None,
-            mcp_agent_id: None,
             created_at: chrono::Utc::now(),
         };
 
@@ -124,7 +115,8 @@ impl AgentRuntime {
 
     /// Inject a message into a running agent.
     ///
-    /// Tries backend injection first, falls back to MCP notification.
+    /// Uses the backend (rmux) to inject text directly into the agent's pane.
+    /// Lookup is by `agent_id` key only.
     pub async fn inject_message(&self, agent_id: &str, message: &str) -> ErgataiResult<()> {
         let info = {
             let registry = self.registry.read().await;
@@ -134,34 +126,8 @@ impl AgentRuntime {
                 .ok_or_else(|| ErgataiError::internal(format!("Agent {} not found", agent_id)))?
         };
 
-        // Try backend injection
-        match self.backend.inject_message(&info.handle, message).await {
-            Ok(()) => {
-                debug!(
-                    agent_id = agent_id,
-                    "Message delivered via backend injection"
-                );
-                return Ok(());
-            }
-            Err(e) => {
-                debug!(
-                    agent_id = agent_id,
-                    error = %e,
-                    "Backend injection failed, trying MCP fallback"
-                );
-            }
-        }
-
-        // Try MCP fallback
-        let mcp = self.mcp_integration.read().await.clone();
-        if let (Some(mcp), Some(mcp_id)) = (mcp, &info.mcp_agent_id) {
-            return mcp.send_notification(mcp_id, message).await;
-        }
-
-        Err(ErgataiError::internal(format!(
-            "All message delivery methods failed for agent {}",
-            agent_id
-        )))
+        // Deliver via backend injection (rmux send_text)
+        self.backend.inject_message(&info.handle, message).await
     }
 
     /// Stop an agent.
@@ -199,20 +165,6 @@ impl AgentRuntime {
         self.registry.read().await.get(agent_id).cloned()
     }
 
-    /// Set the MCP agent ID for a runtime agent (for notification routing).
-    pub async fn set_mcp_agent_id(
-        &self,
-        agent_id: &str,
-        mcp_agent_id: String,
-    ) -> ErgataiResult<()> {
-        let mut registry = self.registry.write().await;
-        let info = registry
-            .get_mut(agent_id)
-            .ok_or_else(|| ErgataiError::internal(format!("Agent {} not found", agent_id)))?;
-        info.mcp_agent_id = Some(mcp_agent_id);
-        Ok(())
-    }
-
     /// Set the task ID for a runtime agent (for DAG tracking).
     pub async fn set_task_id(&self, agent_id: &str, task_id: String) -> ErgataiResult<()> {
         let mut registry = self.registry.write().await;
@@ -221,6 +173,64 @@ impl AgentRuntime {
             .ok_or_else(|| ErgataiError::internal(format!("Agent {} not found", agent_id)))?;
         info.task_id = Some(task_id);
         Ok(())
+    }
+
+    /// Register an externally-discovered agent (e.g., from rmux pane scan).
+    ///
+    /// This allows agents started outside the normal `launch_agent()` flow
+    /// (e.g., manually in rmux panes) to receive messages via the runtime
+    /// delivery chain.
+    pub async fn register_discovered_agent(
+        &self,
+        agent_id: String,
+        handle: AgentHandle,
+    ) -> ErgataiResult<()> {
+        let info = AgentInfo {
+            agent_id: agent_id.clone(),
+            workspace_id: handle.workspace.id.clone(),
+            handle,
+            state: AgentState::Running,
+            task_id: None,
+            created_at: chrono::Utc::now(),
+        };
+        self.registry.write().await.insert(agent_id.clone(), info);
+        debug!(agent_id = agent_id, "Registered discovered agent");
+        Ok(())
+    }
+
+    /// Scan the backend for running agents and register any new ones.
+    ///
+    /// Returns the number of newly registered agents. Already-registered
+    /// agents are skipped (idempotent).
+    ///
+    /// Each agent is registered atomically (single write-lock acquisition)
+    /// to prevent TOCTOU races when this method is called concurrently
+    /// (e.g., from the periodic re-discovery loop and manual triggers).
+    pub async fn discover_and_register_agents(&self) -> ErgataiResult<usize> {
+        let discovered = self.backend.discover_agents().await?;
+        let mut count = 0;
+        let mut registry = self.registry.write().await;
+        for (agent_id, handle) in discovered {
+            // Atomic check-and-insert under a single write lock acquisition.
+            // entry().or_insert() ensures no TOCTOU gap between contains_key and insert.
+            registry.entry(agent_id.clone()).or_insert_with(|| {
+                count += 1;
+                AgentInfo {
+                    agent_id: agent_id.clone(),
+                    workspace_id: handle.workspace.id.clone(),
+                    handle,
+                    state: AgentState::Running,
+                    task_id: None,
+                    created_at: chrono::Utc::now(),
+                }
+            });
+        }
+        drop(registry);
+
+        if count > 0 {
+            info!(count = count, "Discovered and registered new agents");
+        }
+        Ok(count)
     }
 
     /// Update agent state.
@@ -280,30 +290,46 @@ impl AgentRuntime {
     }
 
     /// Spawn a background monitor for an agent.
+    ///
+    /// The monitor waits for the agent process to exit and updates the registry.
+    /// A 24-hour safety timeout prevents leaked tasks if the backend hangs.
     fn spawn_monitor(&self, agent_id: String, handle: AgentHandle) {
         let backend = self.backend.clone();
         let registry = self.registry.clone();
 
         tokio::spawn(async move {
-            match backend.wait_for_exit(&handle, None).await {
-                Ok(crate::types::WaitResult::Exited { code }) => {
+            // Safety timeout: 24 hours to prevent leaked tasks on hung backends
+            let timeout_duration = std::time::Duration::from_secs(86400);
+
+            let result =
+                tokio::time::timeout(timeout_duration, backend.wait_for_exit(&handle, None)).await;
+
+            match result {
+                Ok(Ok(crate::types::WaitResult::Exited { code })) => {
                     info!(agent_id = agent_id, code = code, "Agent exited");
                 }
-                Ok(crate::types::WaitResult::Signaled { signal }) => {
+                Ok(Ok(crate::types::WaitResult::Signaled { signal })) => {
                     warn!(
                         agent_id = agent_id,
                         signal = signal,
                         "Agent killed by signal"
                     );
                 }
-                Ok(crate::types::WaitResult::Timeout) => {
+                Ok(Ok(crate::types::WaitResult::Timeout)) => {
                     warn!(agent_id = agent_id, "Agent monitor timed out (unexpected)");
                 }
-                Ok(crate::types::WaitResult::Error(e)) => {
+                Ok(Ok(crate::types::WaitResult::Error(e))) => {
                     error!(agent_id = agent_id, error = %e, "Agent monitor error");
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     error!(agent_id = agent_id, error = %e, "Agent wait failed");
+                }
+                Err(_) => {
+                    // tokio::time::timeout elapsed
+                    warn!(
+                        agent_id = agent_id,
+                        "Agent monitor timed out after 24h, forcing Stopped state"
+                    );
                 }
             }
 
@@ -319,7 +345,9 @@ impl AgentRuntime {
 mod tests {
     use super::*;
     use crate::backend::AgentRuntimeBackend;
-    use crate::types::{AgentHandle, BackendCapabilities, WaitResult, WorkspaceHandle, WorkspaceSpec};
+    use crate::types::{
+        AgentHandle, BackendCapabilities, WaitResult, WorkspaceHandle, WorkspaceSpec,
+    };
     use ergatai_error::{ErgataiError, ErgataiResult};
     use std::collections::HashMap;
     use std::path::PathBuf;
@@ -564,30 +592,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_set_mcp_agent_id() {
-        let runtime = make_runtime();
-        let agent_id = runtime
-            .launch_agent(make_spec("ws-1"), "cmd", None)
-            .await
-            .unwrap();
-        runtime
-            .set_mcp_agent_id(&agent_id, "mcp-1".to_string())
-            .await
-            .unwrap();
-        let info = runtime.get_agent(&agent_id).await.unwrap();
-        assert_eq!(info.mcp_agent_id, Some("mcp-1".to_string()));
-    }
-
-    #[tokio::test]
-    async fn test_set_mcp_agent_id_not_found() {
-        let runtime = make_runtime();
-        let result = runtime
-            .set_mcp_agent_id("nonexistent", "mcp-1".to_string())
-            .await;
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
     async fn test_set_task_id() {
         let runtime = make_runtime();
         let agent_id = runtime
@@ -605,7 +609,9 @@ mod tests {
     #[tokio::test]
     async fn test_set_task_id_not_found() {
         let runtime = make_runtime();
-        let result = runtime.set_task_id("nonexistent", "task-42".to_string()).await;
+        let result = runtime
+            .set_task_id("nonexistent", "task-42".to_string())
+            .await;
         assert!(result.is_err());
     }
 
@@ -689,16 +695,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_set_mcp_integration() {
-        let runtime = make_runtime();
-        let mcp = Arc::new(crate::mcp_integration::McpIntegration::new());
-        runtime.set_mcp_integration(mcp).await;
-        // Just verify it doesn't panic — mcp_integration is private
-    }
-
-    #[tokio::test]
-    async fn test_inject_message_with_mcp_fallback() {
-        // Backend fails injection; MCP integration set with a registered peer → success
+    async fn test_inject_message_backend_failure_propagates() {
+        // Backend injection fails → error propagates (no MCP fallback)
         let backend = Arc::new(MockBackend::with_inject_fail());
         let runtime = AgentRuntime::new(backend);
         let agent_id = runtime
@@ -706,33 +704,7 @@ mod tests {
             .await
             .unwrap();
 
-        let mcp = Arc::new(crate::mcp_integration::McpIntegration::new());
-        mcp.register_peer("mcp-1".to_string(), |_: &str| async { Ok(()) })
-            .await;
-        runtime.set_mcp_integration(mcp).await;
-        runtime
-            .set_mcp_agent_id(&agent_id, "mcp-1".to_string())
-            .await
-            .unwrap();
-
-        // Now inject should succeed via MCP fallback
-        runtime.inject_message(&agent_id, "hello").await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_inject_message_mcp_set_but_no_agent_id() {
-        // MCP integration set, but agent has no mcp_agent_id → fails
-        let backend = Arc::new(MockBackend::with_inject_fail());
-        let runtime = AgentRuntime::new(backend);
-        let agent_id = runtime
-            .launch_agent(make_spec("ws-1"), "cmd", None)
-            .await
-            .unwrap();
-
-        let mcp = Arc::new(crate::mcp_integration::McpIntegration::new());
-        runtime.set_mcp_integration(mcp).await;
-        // mcp_agent_id not set on agent
         let result = runtime.inject_message(&agent_id, "hello").await;
-        assert!(result.is_err());
+        assert!(result.is_err(), "backend failure should propagate as error");
     }
 }

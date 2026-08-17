@@ -307,6 +307,7 @@ impl AgentRuntimeBackend for LocalPtyBackend {
         let agent_id = format!("agent-{}", uuid::Uuid::new_v4());
         let mut metadata = HashMap::new();
         metadata.insert("pane_id".to_string(), pane_id.clone());
+        metadata.insert("session".to_string(), session.clone());
 
         Ok(AgentHandle {
             workspace: handle.clone(),
@@ -440,6 +441,109 @@ impl AgentRuntimeBackend for LocalPtyBackend {
             "Shutdown: cleaned up all workspaces"
         );
         Ok(())
+    }
+
+    async fn discover_agents(&self) -> ErgataiResult<Vec<(String, AgentHandle)>> {
+        // List all tmux sessions
+        let sessions_output =
+            Self::run_tmux_cmd(&["list-sessions", "-F", "#{session_name}"]).await?;
+        if !sessions_output.status.success() {
+            debug!("No tmux sessions found (or tmux not running)");
+            return Ok(Vec::new());
+        }
+
+        let stdout = String::from_utf8_lossy(&sessions_output.stdout);
+
+        // Scan ALL sessions — not just prefix-matched ones.
+        // The session_prefix is for workspace management (creating/cleaning).
+        // For discovery, we need to find agents in any session.
+        let all_sessions: Vec<String> = stdout.lines().map(|l| l.to_string()).collect();
+
+        if all_sessions.is_empty() {
+            debug!("No tmux sessions found");
+            return Ok(Vec::new());
+        }
+
+        // Delimiter for pane format parsing
+        let format = "#{pane_id}|#{pane_current_command}|#{pane_pid}".to_string();
+
+        let mut discovered = Vec::new();
+
+        for session_name in &all_sessions {
+            let output = match Self::run_tmux_cmd(&[
+                "list-panes",
+                "-t",
+                session_name,
+                "-F",
+                &format,
+            ])
+            .await
+            {
+                Ok(o) => o,
+                Err(e) => {
+                    warn!(session = session_name, error = %e, "Failed to list panes");
+                    continue;
+                }
+            };
+
+            if !output.status.success() {
+                continue;
+            }
+
+            let pane_stdout = String::from_utf8_lossy(&output.stdout);
+            for line in pane_stdout.lines() {
+                let parts: Vec<&str> = line.splitn(3, '|').collect();
+                if parts.len() < 3 {
+                    debug!("Skipping malformed pane line: {:?}", line);
+                    continue;
+                }
+
+                let pane_id = parts[0];
+                let command = parts[1];
+                let pid = parts[2];
+
+                // Generate a stable agent_id from pane_id (e.g., "pane_0")
+                let agent_id = format!("pane_{}", pane_id.replace('%', ""));
+
+                // Build a synthetic WorkspaceHandle for this session
+                let mut ws_metadata = HashMap::new();
+                ws_metadata.insert("session".to_string(), session_name.clone());
+                let workspace = WorkspaceHandle {
+                    id: session_name.clone(),
+                    backend: "local-pty".to_string(),
+                    metadata: ws_metadata,
+                };
+
+                // Build AgentHandle with pane_id + session
+                let mut metadata = HashMap::new();
+                metadata.insert("pane_id".to_string(), pane_id.to_string());
+                metadata.insert("session".to_string(), session_name.clone());
+
+                let handle = AgentHandle {
+                    workspace,
+                    agent_id: agent_id.clone(),
+                    process_id: pid.parse().ok(),
+                    metadata,
+                };
+
+                info!(
+                    agent_id = agent_id,
+                    session = session_name,
+                    pane_id = pane_id,
+                    command = command,
+                    "Discovered agent in tmux pane"
+                );
+
+                discovered.push((agent_id, handle));
+            }
+        }
+
+        info!(
+            count = discovered.len(),
+            sessions = all_sessions.len(),
+            "Discovery scan complete"
+        );
+        Ok(discovered)
     }
 }
 

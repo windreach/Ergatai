@@ -467,7 +467,13 @@ mod tests {
         let store_dir = NatsServer::get_store_dir().unwrap();
         // Should end with "ergatai/nats-store"
         let path_str = store_dir.to_string_lossy();
-        assert!(path_str.contains("ergatai"), "Store dir should contain 'ergatai'");
-        assert!(path_str.contains("nats-store"), "Store dir should contain 'nats-store'");
+        assert!(
+            path_str.contains("ergatai"),
+            "Store dir should contain 'ergatai'"
+        );
+        assert!(
+            path_str.contains("nats-store"),
+            "Store dir should contain 'nats-store'"
+        );
     }
 }

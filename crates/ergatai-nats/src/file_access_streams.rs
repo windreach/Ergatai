@@ -236,8 +236,12 @@ mod tests {
     fn test_all_configs_have_file_storage() {
         let configs = all_file_access_stream_configs();
         for config in &configs {
-            assert_eq!(config.storage, StorageType::File,
-                "Stream {} should use file storage", config.name);
+            assert_eq!(
+                config.storage,
+                StorageType::File,
+                "Stream {} should use file storage",
+                config.name
+            );
         }
     }
 }

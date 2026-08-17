@@ -678,14 +678,20 @@ mod tests {
 
     #[tokio::test]
     async fn test_strategy_default_values() {
-        assert_eq!(ScheduleStrategy::WaitForAgent, ScheduleStrategy::WaitForAgent);
+        assert_eq!(
+            ScheduleStrategy::WaitForAgent,
+            ScheduleStrategy::WaitForAgent
+        );
         assert_ne!(ScheduleStrategy::QueueTask, ScheduleStrategy::Parallel);
     }
 
     #[tokio::test]
     async fn test_agent_availability_initially_available() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let scheduler = TaskScheduler::new(temp_dir.path().to_path_buf(), ScheduleStrategy::WaitForAgent);
+        let scheduler = TaskScheduler::new(
+            temp_dir.path().to_path_buf(),
+            ScheduleStrategy::WaitForAgent,
+        );
         let avail = scheduler.check_agent_availability("any-agent").await;
         assert_eq!(avail, AgentAvailability::Available);
     }
@@ -693,9 +699,16 @@ mod tests {
     #[tokio::test]
     async fn test_agent_availability_busy_after_processing_added() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let scheduler = TaskScheduler::new(temp_dir.path().to_path_buf(), ScheduleStrategy::WaitForAgent);
+        let scheduler = TaskScheduler::new(
+            temp_dir.path().to_path_buf(),
+            ScheduleStrategy::WaitForAgent,
+        );
         // Simulate an agent currently processing a task
-        scheduler.processing.lock().await.push(("task-1".to_string(), "alice".to_string()));
+        scheduler
+            .processing
+            .lock()
+            .await
+            .push(("task-1".to_string(), "alice".to_string()));
 
         let avail = scheduler.check_agent_availability("alice").await;
         assert!(matches!(
@@ -711,9 +724,20 @@ mod tests {
     #[tokio::test]
     async fn test_mark_completed_removes_from_processing() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let scheduler = TaskScheduler::new(temp_dir.path().to_path_buf(), ScheduleStrategy::WaitForAgent);
-        scheduler.processing.lock().await.push(("task-1".to_string(), "alice".to_string()));
-        scheduler.processing.lock().await.push(("task-2".to_string(), "bob".to_string()));
+        let scheduler = TaskScheduler::new(
+            temp_dir.path().to_path_buf(),
+            ScheduleStrategy::WaitForAgent,
+        );
+        scheduler
+            .processing
+            .lock()
+            .await
+            .push(("task-1".to_string(), "alice".to_string()));
+        scheduler
+            .processing
+            .lock()
+            .await
+            .push(("task-2".to_string(), "bob".to_string()));
 
         scheduler.mark_completed("task-1").await;
 
@@ -725,7 +749,10 @@ mod tests {
     #[tokio::test]
     async fn test_mark_completed_idempotent() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let scheduler = TaskScheduler::new(temp_dir.path().to_path_buf(), ScheduleStrategy::WaitForAgent);
+        let scheduler = TaskScheduler::new(
+            temp_dir.path().to_path_buf(),
+            ScheduleStrategy::WaitForAgent,
+        );
         // Marking a non-existent task should not error or panic
         scheduler.mark_completed("does-not-exist").await;
         assert!(scheduler.processing.lock().await.is_empty());
@@ -737,7 +764,10 @@ mod tests {
         tokio::fs::create_dir_all(temp_dir.path().join(".ergatai"))
             .await
             .unwrap();
-        let scheduler = TaskScheduler::new(temp_dir.path().to_path_buf(), ScheduleStrategy::WaitForAgent);
+        let scheduler = TaskScheduler::new(
+            temp_dir.path().to_path_buf(),
+            ScheduleStrategy::WaitForAgent,
+        );
         scheduler.pending_tasks.lock().await.push(PendingTask {
             task_id: "task-1".to_string(),
             plan_file: PathBuf::from("/tmp/p.md"),
@@ -754,7 +784,10 @@ mod tests {
     #[tokio::test]
     async fn test_cancel_task_returns_false_when_not_found() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let scheduler = TaskScheduler::new(temp_dir.path().to_path_buf(), ScheduleStrategy::WaitForAgent);
+        let scheduler = TaskScheduler::new(
+            temp_dir.path().to_path_buf(),
+            ScheduleStrategy::WaitForAgent,
+        );
         let removed = scheduler.cancel_task("no-such-task").await.unwrap();
         assert!(!removed);
     }
@@ -762,7 +795,10 @@ mod tests {
     #[tokio::test]
     async fn test_list_pending_returns_clone() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let scheduler = TaskScheduler::new(temp_dir.path().to_path_buf(), ScheduleStrategy::WaitForAgent);
+        let scheduler = TaskScheduler::new(
+            temp_dir.path().to_path_buf(),
+            ScheduleStrategy::WaitForAgent,
+        );
         scheduler.pending_tasks.lock().await.push(PendingTask {
             task_id: "t1".to_string(),
             plan_file: PathBuf::from("a.md"),
@@ -791,7 +827,10 @@ mod tests {
         tokio::fs::create_dir_all(temp_dir.path().join(".ergatai"))
             .await
             .unwrap();
-        let scheduler = TaskScheduler::new(temp_dir.path().to_path_buf(), ScheduleStrategy::WaitForAgent);
+        let scheduler = TaskScheduler::new(
+            temp_dir.path().to_path_buf(),
+            ScheduleStrategy::WaitForAgent,
+        );
 
         scheduler.pending_tasks.lock().await.push(PendingTask {
             task_id: "t1".to_string(),
@@ -804,7 +843,10 @@ mod tests {
         scheduler.save_to_disk().await.unwrap();
 
         // Create a fresh scheduler pointing to the same file, load
-        let scheduler2 = TaskScheduler::new(temp_dir.path().to_path_buf(), ScheduleStrategy::WaitForAgent);
+        let scheduler2 = TaskScheduler::new(
+            temp_dir.path().to_path_buf(),
+            ScheduleStrategy::WaitForAgent,
+        );
         scheduler2.load_from_disk().await.unwrap();
 
         let tasks = scheduler2.list_pending().await;
@@ -818,7 +860,10 @@ mod tests {
     #[tokio::test]
     async fn test_load_from_disk_no_file_is_ok() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let scheduler = TaskScheduler::new(temp_dir.path().to_path_buf(), ScheduleStrategy::WaitForAgent);
+        let scheduler = TaskScheduler::new(
+            temp_dir.path().to_path_buf(),
+            ScheduleStrategy::WaitForAgent,
+        );
         // No queue file exists — should not error
         scheduler.load_from_disk().await.unwrap();
         assert_eq!(scheduler.pending_count().await, 0);
@@ -827,7 +872,10 @@ mod tests {
     #[tokio::test]
     async fn test_load_from_disk_rejects_corrupted_file() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let queue_file = temp_dir.path().join(".ergatai").join(".scheduler-queue.json");
+        let queue_file = temp_dir
+            .path()
+            .join(".ergatai")
+            .join(".scheduler-queue.json");
         tokio::fs::create_dir_all(queue_file.parent().unwrap())
             .await
             .unwrap();
@@ -835,7 +883,10 @@ mod tests {
             .await
             .unwrap();
 
-        let scheduler = TaskScheduler::new(temp_dir.path().to_path_buf(), ScheduleStrategy::WaitForAgent);
+        let scheduler = TaskScheduler::new(
+            temp_dir.path().to_path_buf(),
+            ScheduleStrategy::WaitForAgent,
+        );
         let result = scheduler.load_from_disk().await;
         assert!(result.is_err());
     }
@@ -843,7 +894,10 @@ mod tests {
     #[tokio::test]
     async fn test_load_from_disk_legacy_format_supported() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let queue_file = temp_dir.path().join(".ergatai").join(".scheduler-queue.json");
+        let queue_file = temp_dir
+            .path()
+            .join(".ergatai")
+            .join(".scheduler-queue.json");
         tokio::fs::create_dir_all(queue_file.parent().unwrap())
             .await
             .unwrap();
@@ -853,7 +907,10 @@ mod tests {
         ]"#;
         tokio::fs::write(&queue_file, legacy).await.unwrap();
 
-        let scheduler = TaskScheduler::new(temp_dir.path().to_path_buf(), ScheduleStrategy::WaitForAgent);
+        let scheduler = TaskScheduler::new(
+            temp_dir.path().to_path_buf(),
+            ScheduleStrategy::WaitForAgent,
+        );
         scheduler.load_from_disk().await.unwrap();
         let tasks = scheduler.list_pending().await;
         assert_eq!(tasks.len(), 1);
@@ -863,7 +920,10 @@ mod tests {
     #[tokio::test]
     async fn test_load_from_disk_clears_queue_when_version_newer() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let queue_file = temp_dir.path().join(".ergatai").join(".scheduler-queue.json");
+        let queue_file = temp_dir
+            .path()
+            .join(".ergatai")
+            .join(".scheduler-queue.json");
         tokio::fs::create_dir_all(queue_file.parent().unwrap())
             .await
             .unwrap();
@@ -874,7 +934,10 @@ mod tests {
         }"#;
         tokio::fs::write(&queue_file, newer).await.unwrap();
 
-        let scheduler = TaskScheduler::new(temp_dir.path().to_path_buf(), ScheduleStrategy::WaitForAgent);
+        let scheduler = TaskScheduler::new(
+            temp_dir.path().to_path_buf(),
+            ScheduleStrategy::WaitForAgent,
+        );
         scheduler.load_from_disk().await.unwrap();
         assert_eq!(scheduler.pending_count().await, 0);
     }
@@ -885,7 +948,10 @@ mod tests {
         tokio::fs::create_dir_all(temp_dir.path().join(".ergatai"))
             .await
             .unwrap();
-        let scheduler = TaskScheduler::new(temp_dir.path().to_path_buf(), ScheduleStrategy::WaitForAgent);
+        let scheduler = TaskScheduler::new(
+            temp_dir.path().to_path_buf(),
+            ScheduleStrategy::WaitForAgent,
+        );
 
         // Pre-populate in memory
         scheduler.pending_tasks.lock().await.push(PendingTask {
@@ -930,7 +996,10 @@ mod tests {
         tokio::fs::create_dir_all(temp_dir.path().join(".ergatai"))
             .await
             .unwrap();
-        let scheduler = TaskScheduler::new(temp_dir.path().to_path_buf(), ScheduleStrategy::WaitForAgent);
+        let scheduler = TaskScheduler::new(
+            temp_dir.path().to_path_buf(),
+            ScheduleStrategy::WaitForAgent,
+        );
         let count = scheduler.process_pending().await.unwrap();
         assert_eq!(count, 0);
     }
@@ -943,7 +1012,10 @@ mod tests {
         tokio::fs::create_dir_all(temp_dir.path().join(".ergatai"))
             .await
             .unwrap();
-        let scheduler = TaskScheduler::new(temp_dir.path().to_path_buf(), ScheduleStrategy::WaitForAgent);
+        let scheduler = TaskScheduler::new(
+            temp_dir.path().to_path_buf(),
+            ScheduleStrategy::WaitForAgent,
+        );
 
         {
             let mut pending = scheduler.pending_tasks.lock().await;
@@ -978,7 +1050,10 @@ mod tests {
         tokio::fs::create_dir_all(temp_dir.path().join(".ergatai"))
             .await
             .unwrap();
-        let scheduler = TaskScheduler::new(temp_dir.path().to_path_buf(), ScheduleStrategy::WaitForAgent);
+        let scheduler = TaskScheduler::new(
+            temp_dir.path().to_path_buf(),
+            ScheduleStrategy::WaitForAgent,
+        );
         scheduler.pending_tasks.lock().await.push(PendingTask {
             task_id: "t1".to_string(),
             plan_file: PathBuf::from("p.md"),
@@ -989,7 +1064,10 @@ mod tests {
         scheduler.cancel_task("t1").await.unwrap();
 
         // Verify disk state matches
-        let scheduler2 = TaskScheduler::new(temp_dir.path().to_path_buf(), ScheduleStrategy::WaitForAgent);
+        let scheduler2 = TaskScheduler::new(
+            temp_dir.path().to_path_buf(),
+            ScheduleStrategy::WaitForAgent,
+        );
         scheduler2.load_from_disk().await.unwrap();
         assert_eq!(scheduler2.pending_count().await, 0);
     }
@@ -997,7 +1075,10 @@ mod tests {
     #[tokio::test]
     async fn test_agent_availability_multiple_tasks() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let scheduler = TaskScheduler::new(temp_dir.path().to_path_buf(), ScheduleStrategy::WaitForAgent);
+        let scheduler = TaskScheduler::new(
+            temp_dir.path().to_path_buf(),
+            ScheduleStrategy::WaitForAgent,
+        );
         {
             let mut p = scheduler.processing.lock().await;
             p.push(("t1".to_string(), "alice".to_string()));

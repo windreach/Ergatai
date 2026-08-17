@@ -304,7 +304,10 @@ mod tests {
     #[test]
     fn test_render_template_with_empty_global_vars() {
         let ctx = DagContext::empty();
-        assert_eq!(ctx.render_template("{{global.missing}}"), "{{global.missing}}");
+        assert_eq!(
+            ctx.render_template("{{global.missing}}"),
+            "{{global.missing}}"
+        );
     }
 
     #[test]
@@ -350,11 +353,7 @@ mod tests {
 
     #[test]
     fn test_multiple_globals_in_render() {
-        let ctx = DagContext::new(globals(&[
-            ("a", "alpha"),
-            ("b", "beta"),
-            ("c", "gamma"),
-        ]));
+        let ctx = DagContext::new(globals(&[("a", "alpha"), ("b", "beta"), ("c", "gamma")]));
         let rendered = ctx.render_template("{{global.a}} {{global.b}} {{global.c}}");
         assert_eq!(rendered, "alpha beta gamma");
     }

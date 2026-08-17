@@ -116,12 +116,14 @@ pub struct FileAccessSummary {
 pub struct AuditManager {
     /// SQLite connection (shared with FileLockManager)
     conn: Arc<Mutex<Connection>>,
+    /// Project root directory (for validating archive paths)
+    project_root: String,
 }
 
 impl AuditManager {
     /// Create a new AuditManager
-    pub fn new(conn: Arc<Mutex<Connection>>) -> Self {
-        Self { conn }
+    pub fn new(conn: Arc<Mutex<Connection>>, project_root: String) -> Self {
+        Self { conn, project_root }
     }
 
     /// Query audit log with filters
@@ -538,15 +540,25 @@ impl AuditManager {
     ///
     /// # Arguments
     /// * `months_to_keep` - Keep logs newer than this many months
-    /// * `export_path` - Path to export archived logs (JSON format)
+    /// * `export_path` - Path to export archived logs (JSON format). Must be within
+    ///   the project's `.ergatai/archives/` directory for security.
     ///
     /// # Returns
     /// Number of entries archived and deleted
+    ///
+    /// # Security
+    /// The export path is validated to prevent path traversal attacks:
+    /// - Path is canonicalized and must be absolute
+    /// - Must be within `.ergatai/archives/` directory
+    /// - Cannot contain `..` components
     pub fn archive_old_audit_logs(
         &self,
         months_to_keep: u32,
         export_path: &str,
     ) -> Result<usize, ErgataiError> {
+        // Security: validate export path to prevent arbitrary file write
+        let export_path = Self::validate_archive_path(export_path, &self.project_root)?;
+
         let conn = self
             .conn
             .lock()
@@ -591,7 +603,14 @@ impl AuditManager {
             ErgataiError::internal(format!("Failed to serialize audit logs: {}", e))
         })?;
 
-        std::fs::write(export_path, json)
+        // Ensure parent directory exists
+        if let Some(parent) = std::path::Path::new(&export_path).parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                ErgataiError::internal(format!("Failed to create archive directory: {}", e))
+            })?;
+        }
+
+        std::fs::write(&export_path, json)
             .map_err(|e| ErgataiError::internal(format!("Failed to write archive file: {}", e)))?;
 
         // Delete archived logs
@@ -603,12 +622,86 @@ impl AuditManager {
 
         info!(
             archived = count,
-            export_path = export_path,
+            export_path = %export_path,
             months_to_keep = months_to_keep,
             "Archived old audit logs"
         );
 
         Ok(count)
+    }
+
+    /// Validate and canonicalize archive export path.
+    ///
+    /// Ensures the path is within the allowed `.ergatai/archives/` directory
+    /// to prevent path traversal attacks.
+    fn validate_archive_path(
+        export_path: &str,
+        project_root: &str,
+    ) -> Result<String, ErgataiError> {
+        // Reject paths containing .. components
+        if export_path.contains("..") {
+            return Err(ErgataiError::internal(
+                "Archive path must not contain '..' components".to_string(),
+            ));
+        }
+
+        let path = std::path::Path::new(export_path);
+
+        // If path is relative, make it relative to project_root/.ergatai/archives/
+        let resolved_path = if path.is_relative() {
+            let archives_dir = std::path::Path::new(project_root)
+                .join(".ergatai")
+                .join("archives");
+            archives_dir.join(export_path)
+        } else {
+            path.to_path_buf()
+        };
+
+        // Canonicalize the parent directory (file may not exist yet)
+        let parent = resolved_path
+            .parent()
+            .ok_or_else(|| ErgataiError::internal("Archive path has no parent directory"))?;
+
+        let archives_dir = std::path::Path::new(project_root)
+            .join(".ergatai")
+            .join("archives");
+
+        // Verify path is within allowed directory before any I/O
+        if !parent.exists() {
+            // Can't canonicalize non-existent dir — use Path::starts_with (component-aware)
+            // on the resolved path to prevent prefix confusion (e.g., "archives_evil" matching "archives")
+            if !parent.starts_with(&archives_dir) {
+                return Err(ErgataiError::internal(
+                    "Archive path must be within .ergatai/archives/ directory".to_string(),
+                ));
+            }
+        }
+
+        // Try to canonicalize; if parent exists, verify it's within allowed directory
+        if let Ok(canonical_parent) = parent.canonicalize() {
+            // Canonicalize the allowed directory for a proper ancestor check.
+            // Fall back to the resolved path if archives dir doesn't exist yet.
+            let canonical_archives = archives_dir
+                .canonicalize()
+                .unwrap_or_else(|_| archives_dir.clone());
+            if !canonical_parent.starts_with(&canonical_archives) {
+                return Err(ErgataiError::internal(
+                    "Archive path must be within .ergatai/archives/ directory".to_string(),
+                ));
+            }
+
+            // Reconstruct full path with canonical parent
+            let filename = resolved_path
+                .file_name()
+                .ok_or_else(|| ErgataiError::internal("Archive path has no filename"))?;
+            return Ok(canonical_parent
+                .join(filename)
+                .to_string_lossy()
+                .to_string());
+        }
+
+        // If canonicalization fails (parent doesn't exist), return the resolved path
+        Ok(resolved_path.to_string_lossy().to_string())
     }
 
     /// Enforce maximum row count on audit log table
@@ -682,7 +775,7 @@ mod tests {
         .unwrap();
 
         let conn = Arc::new(Mutex::new(conn));
-        let manager = AuditManager::new(conn);
+        let manager = AuditManager::new(conn, temp_dir.path().to_string_lossy().to_string());
 
         (temp_dir, manager)
     }
@@ -1134,7 +1227,9 @@ mod tests {
     #[test]
     fn test_query_audit_log_empty_database() {
         let (_temp_dir, manager) = setup_test_db();
-        let entries = manager.query_audit_log(None, None, None, None, None, 100).unwrap();
+        let entries = manager
+            .query_audit_log(None, None, None, None, None, 100)
+            .unwrap();
         assert!(entries.is_empty());
     }
 
@@ -1154,7 +1249,9 @@ mod tests {
             }
         }
 
-        let entries = manager.query_audit_log(None, None, None, None, None, 5).unwrap();
+        let entries = manager
+            .query_audit_log(None, None, None, None, None, 5)
+            .unwrap();
         assert_eq!(entries.len(), 5);
     }
 
@@ -1178,14 +1275,20 @@ mod tests {
             .unwrap();
         }
 
-        let entries = manager.query_audit_log(None, None, None, None, None, 100).unwrap();
+        let entries = manager
+            .query_audit_log(None, None, None, None, None, 100)
+            .unwrap();
         assert_eq!(entries.len(), 2);
 
         // Filter by agent
-        let entries = manager.query_audit_log(Some("a1"), None, None, None, None, 100).unwrap();
+        let entries = manager
+            .query_audit_log(Some("a1"), None, None, None, None, 100)
+            .unwrap();
         assert_eq!(entries.len(), 2);
 
-        let entries = manager.query_audit_log(Some("nonexistent"), None, None, None, None, 100).unwrap();
+        let entries = manager
+            .query_audit_log(Some("nonexistent"), None, None, None, None, 100)
+            .unwrap();
         assert!(entries.is_empty());
     }
 
@@ -1203,7 +1306,9 @@ mod tests {
             .unwrap();
         }
 
-        let entries = manager.query_audit_log(None, None, None, None, None, 100).unwrap();
+        let entries = manager
+            .query_audit_log(None, None, None, None, None, 100)
+            .unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(
             entries[0].file_path,

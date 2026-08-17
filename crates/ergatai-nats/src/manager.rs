@@ -33,41 +33,24 @@ fn nats_state() -> &'static RwLock<NatsState> {
 ///
 /// This is idempotent - calling multiple times is safe.
 /// Returns the connection if successful.
+///
+/// # Concurrency
+///
+/// Uses a write lock for the entire initialization to prevent concurrent callers
+/// from starting redundant NATS servers. The I/O cost is acceptable since
+/// initialization happens once at startup.
 pub async fn init_nats() -> ErgataiResult<NatsConnection> {
     let state = nats_state();
 
-    // Fast path: check if already initialized (read lock only)
-    {
-        let state = state.read().await;
-        if let Some(conn) = &state.connection {
-            if conn.is_connected() {
-                info!("NATS already initialized");
-                return Ok(conn.clone());
-            }
-        }
-    } // read lock released
-
-    // Slow path: perform expensive I/O outside of any lock
-    info!("Starting NATS server...");
-    let server = NatsServer::start().await?;
-    let port = server.port();
-    info!(port = port, "NATS server started");
-
-    info!("Connecting to NATS server...");
-    let connection = NatsConnection::connect_to_server(&server).await?;
-    info!("Connected to NATS server");
-
-    info!("Initializing JetStream streams...");
-    init_jetstream_streams(&connection).await?;
-
-    // Acquire write lock and double-check (another task may have initialized concurrently)
+    // Acquire write lock for the entire init sequence to prevent race condition
+    // where multiple callers start redundant NATS servers.
     let mut state = state.write().await;
-    if let Some(existing_conn) = &state.connection {
-        if existing_conn.is_connected() {
-            info!("NATS initialized by another task while we were connecting");
-            // Our newly-started server is redundant — drop triggers NatsServer::Drop
-            // which kills the child process cleanly.
-            return Ok(existing_conn.clone());
+
+    // Check if already initialized (under write lock)
+    if let Some(conn) = &state.connection {
+        if conn.is_connected() {
+            info!("NATS already initialized");
+            return Ok(conn.clone());
         }
     }
 
@@ -79,6 +62,20 @@ pub async fn init_nats() -> ErgataiResult<NatsConnection> {
         state.connection = None; // drop old connection first (uses server)
         state.server = None; // drop old server (kills child process)
     }
+
+    // Perform expensive I/O while holding the write lock.
+    // This serializes concurrent callers but prevents resource waste.
+    info!("Starting NATS server...");
+    let server = NatsServer::start().await?;
+    let port = server.port();
+    info!(port = port, "NATS server started");
+
+    info!("Connecting to NATS server...");
+    let connection = NatsConnection::connect_to_server(&server).await?;
+    info!("Connected to NATS server");
+
+    info!("Initializing JetStream streams...");
+    init_jetstream_streams(&connection).await?;
 
     state.server = Some(server);
     state.connection = Some(connection.clone());
@@ -199,6 +196,17 @@ pub async fn shutdown_nats() {
 mod tests {
     use super::*;
 
+    /// Global test lock — serializes tests that share the `NATS_STATE` global.
+    ///
+    /// Tests call `shutdown_nats()` / `init_nats()` which mutate the same
+    /// static `RwLock<NatsState>`. Running them in parallel causes race
+    /// conditions (one test's `shutdown_nats` clears another test's state).
+    /// Each test acquires this lock at the start and holds it for the
+    /// entire test body, ensuring sequential execution without adding
+    /// external dependencies.
+    static TEST_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+        std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
     /// Test that nats_state() returns the same static instance
     #[test]
     fn test_nats_state_singleton() {
@@ -215,25 +223,37 @@ mod tests {
     /// Test initial state is empty (no server, no connection)
     #[tokio::test]
     async fn test_initial_state_is_empty() {
+        let _guard = TEST_LOCK.lock().await;
         // Reset state for this test
         shutdown_nats().await;
 
         let state = nats_state();
         let state_guard = state.read().await;
-        assert!(state_guard.server.is_none(), "Server should be None initially");
-        assert!(state_guard.connection.is_none(), "Connection should be None initially");
+        assert!(
+            state_guard.server.is_none(),
+            "Server should be None initially"
+        );
+        assert!(
+            state_guard.connection.is_none(),
+            "Connection should be None initially"
+        );
     }
 
     /// Test is_nats_initialized returns false when not initialized
     #[tokio::test]
     async fn test_is_nats_initialized_false_initially() {
+        let _guard = TEST_LOCK.lock().await;
         shutdown_nats().await;
-        assert!(!is_nats_initialized().await, "Should not be initialized initially");
+        assert!(
+            !is_nats_initialized().await,
+            "Should not be initialized initially"
+        );
     }
 
     /// Test get_nats_connection returns None when not initialized
     #[tokio::test]
     async fn test_get_nats_connection_none_initially() {
+        let _guard = TEST_LOCK.lock().await;
         shutdown_nats().await;
         let conn = get_nats_connection().await;
         assert!(conn.is_none(), "Should return None when not initialized");
@@ -242,6 +262,7 @@ mod tests {
     /// Test get_nats_server_port returns None when not initialized
     #[tokio::test]
     async fn test_get_nats_server_port_none_initially() {
+        let _guard = TEST_LOCK.lock().await;
         shutdown_nats().await;
         let port = get_nats_server_port().await;
         assert!(port.is_none(), "Should return None when not initialized");
@@ -250,6 +271,7 @@ mod tests {
     /// Test shutdown_nats is idempotent (can be called multiple times)
     #[tokio::test]
     async fn test_shutdown_nats_idempotent() {
+        let _guard = TEST_LOCK.lock().await;
         shutdown_nats().await;
         shutdown_nats().await;
         shutdown_nats().await;
@@ -260,13 +282,17 @@ mod tests {
     /// Test init_nats starts server and creates connection
     #[tokio::test]
     async fn test_init_nats_starts_server() {
+        let _guard = TEST_LOCK.lock().await;
         shutdown_nats().await;
 
         let conn = init_nats().await;
         match conn {
             Ok(connection) => {
                 assert!(connection.is_connected(), "Connection should be active");
-                assert!(is_nats_initialized().await, "Should be initialized after init");
+                assert!(
+                    is_nats_initialized().await,
+                    "Should be initialized after init"
+                );
 
                 let port = get_nats_server_port().await;
                 assert!(port.is_some(), "Should have a port after init");
@@ -284,6 +310,7 @@ mod tests {
     /// Test init_nats is idempotent
     #[tokio::test]
     async fn test_init_nats_idempotent() {
+        let _guard = TEST_LOCK.lock().await;
         shutdown_nats().await;
 
         match init_nats().await {
@@ -313,6 +340,7 @@ mod tests {
     /// Test shutdown properly cleans up state
     #[tokio::test]
     async fn test_shutdown_cleanup() {
+        let _guard = TEST_LOCK.lock().await;
         shutdown_nats().await;
 
         match init_nats().await {
@@ -321,9 +349,18 @@ mod tests {
 
                 shutdown_nats().await;
 
-                assert!(!is_nats_initialized().await, "Should not be initialized after shutdown");
-                assert!(get_nats_connection().await.is_none(), "Connection should be None");
-                assert!(get_nats_server_port().await.is_none(), "Port should be None");
+                assert!(
+                    !is_nats_initialized().await,
+                    "Should not be initialized after shutdown"
+                );
+                assert!(
+                    get_nats_connection().await.is_none(),
+                    "Connection should be None"
+                );
+                assert!(
+                    get_nats_server_port().await.is_none(),
+                    "Port should be None"
+                );
             }
             Err(e) => {
                 eprintln!("⚠️  Skipping (nats-server not available): {}", e);
@@ -334,6 +371,7 @@ mod tests {
     /// Test get_nats_connection returns clone of connection
     #[tokio::test]
     async fn test_get_nats_connection_returns_clone() {
+        let _guard = TEST_LOCK.lock().await;
         shutdown_nats().await;
 
         match init_nats().await {
@@ -353,6 +391,7 @@ mod tests {
     /// Test port allocation is in valid range
     #[tokio::test]
     async fn test_port_allocation_range() {
+        let _guard = TEST_LOCK.lock().await;
         shutdown_nats().await;
 
         match init_nats().await {
@@ -372,6 +411,7 @@ mod tests {
     /// Test sequential init_nats calls (should be safe)
     #[tokio::test]
     async fn test_concurrent_init_nats() {
+        let _guard = TEST_LOCK.lock().await;
         shutdown_nats().await;
 
         // Run sequentially - init_nats should be idempotent
@@ -387,7 +427,10 @@ mod tests {
 
         // If any succeeded, we should be initialized
         if success_count > 0 {
-            assert!(is_nats_initialized().await, "Should be initialized after successful init");
+            assert!(
+                is_nats_initialized().await,
+                "Should be initialized after successful init"
+            );
         }
 
         shutdown_nats().await;

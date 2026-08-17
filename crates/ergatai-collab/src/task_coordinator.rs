@@ -606,7 +606,10 @@ Main handles conflicts.
 - **depends_on**: [alice]
 - **priority**: high
 "#;
-        let path = coordinator.create_plan("refactor-1", content).await.unwrap();
+        let path = coordinator
+            .create_plan("refactor-1", content)
+            .await
+            .unwrap();
         let plan = coordinator.parse_plan(&path).await.unwrap();
 
         assert_eq!(plan.task_id, "refactor-1");
@@ -887,10 +890,7 @@ Main handles conflicts.
     #[test]
     fn test_extract_task_name_chinese() {
         let content = "# 任务：中文任务名\n\ncontent";
-        assert_eq!(
-            extract_task_name(content),
-            Some("中文任务名".to_string())
-        );
+        assert_eq!(extract_task_name(content), Some("中文任务名".to_string()));
     }
 
     #[test]

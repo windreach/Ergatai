@@ -86,12 +86,27 @@ pub trait AgentRuntimeBackend: Send + Sync + 'static {
     /// Required because casting `&dyn AgentRuntimeBackend` directly to `&dyn Any` is
     /// not allowed (trait objects are not `Sized`).
     fn as_any(&self) -> &dyn std::any::Any;
+
+    /// Discover agents already running in the environment (e.g., tmux panes).
+    ///
+    /// Returns a list of `(agent_id, AgentHandle)` pairs for agents found outside
+    /// the normal `launch_agent()` flow. Backends that don't support discovery
+    /// return an empty vec (default implementation).
+    ///
+    /// Called at startup by `AgentRuntime::discover_and_register_agents()` to
+    /// register externally-started agents so message delivery can reach them.
+    async fn discover_agents(&self) -> ErgataiResult<Vec<(String, AgentHandle)>> {
+        Ok(Vec::new())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{AgentHandle, BackendCapabilities, ResourceLimits, WaitResult, WorkspaceHandle, WorkspaceSpec};
+    use crate::types::{
+        AgentHandle, BackendCapabilities, ResourceLimits, WaitResult, WorkspaceHandle,
+        WorkspaceSpec,
+    };
     use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};

@@ -22,6 +22,15 @@ use crate::types::{AgentHandle, BackendCapabilities, WaitResult, WorkspaceHandle
 /// Poll interval for checking process liveness.
 const EXIT_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
+/// Validate that a PID string contains only digits (prevents argument injection).
+///
+/// Returns the parsed PID as a `u32` on success, or an error if the PID is invalid.
+fn validate_pid(pid: &str) -> ErgataiResult<u32> {
+    pid.parse::<u32>().map_err(|_| {
+        ErgataiError::internal(format!("Invalid PID '{}': must be a positive integer", pid))
+    })
+}
+
 // ── DirectProcessBackend ──
 
 /// Exit code slot for a process, shared between the backend and monitor tasks.
@@ -206,15 +215,18 @@ impl AgentRuntimeBackend for DirectProcessBackend {
     }
 
     async fn is_alive(&self, handle: &AgentHandle) -> ErgataiResult<bool> {
-        let pid = handle
+        let pid_str = handle
             .process_id
             .as_ref()
             .ok_or_else(|| ErgataiError::internal("Missing PID in agent handle"))?;
 
+        // Security: validate PID to prevent argument injection
+        let pid = validate_pid(pid_str)?;
+
         #[cfg(unix)]
         {
             let result = tokio::process::Command::new("kill")
-                .args(["-0", pid])
+                .args(["-0", &pid.to_string()])
                 .status()
                 .await
                 .map_err(|e| {
@@ -231,17 +243,21 @@ impl AgentRuntimeBackend for DirectProcessBackend {
     }
 
     async fn stop_agent(&self, handle: &AgentHandle) -> ErgataiResult<()> {
-        let pid = handle
+        let pid_str = handle
             .process_id
             .as_ref()
             .ok_or_else(|| ErgataiError::internal("Missing PID in agent handle"))?;
+
+        // Security: validate PID to prevent argument injection
+        let pid = validate_pid(pid_str)?;
+        let pid_string = pid.to_string();
 
         info!(pid = pid, "Sending SIGTERM to agent process");
 
         #[cfg(unix)]
         {
             tokio::process::Command::new("kill")
-                .args(["-TERM", pid])
+                .args(["-TERM", &pid_string])
                 .status()
                 .await
                 .map_err(|e| {
@@ -268,17 +284,20 @@ impl AgentRuntimeBackend for DirectProcessBackend {
     }
 
     async fn kill_agent(&self, handle: &AgentHandle) -> ErgataiResult<()> {
-        let pid = handle
+        let pid_str = handle
             .process_id
             .as_ref()
             .ok_or_else(|| ErgataiError::internal("Missing PID in agent handle"))?;
+
+        // Security: validate PID to prevent argument injection
+        let pid = validate_pid(pid_str)?;
 
         warn!(pid = pid, "Sending SIGKILL to agent process");
 
         #[cfg(unix)]
         {
             tokio::process::Command::new("kill")
-                .args(["-KILL", pid])
+                .args(["-KILL", &pid.to_string()])
                 .status()
                 .await
                 .map_err(|e| {
@@ -451,9 +470,7 @@ mod tests {
     fn test_as_any_downcast() {
         let (backend, _tmp) = make_backend();
         let trait_obj: &dyn AgentRuntimeBackend = &backend;
-        let downcast = trait_obj
-            .as_any()
-            .downcast_ref::<DirectProcessBackend>();
+        let downcast = trait_obj.as_any().downcast_ref::<DirectProcessBackend>();
         assert!(downcast.is_some());
     }
 
@@ -725,14 +742,8 @@ mod tests {
     async fn test_list_workspaces_after_create() {
         let (backend, _tmp) = make_backend();
         backend.initialize().await.unwrap();
-        backend
-            .create_workspace(make_spec("ws-a"))
-            .await
-            .unwrap();
-        backend
-            .create_workspace(make_spec("ws-b"))
-            .await
-            .unwrap();
+        backend.create_workspace(make_spec("ws-a")).await.unwrap();
+        backend.create_workspace(make_spec("ws-b")).await.unwrap();
         let mut workspaces = backend.list_workspaces().await.unwrap();
         workspaces.sort_by(|a, b| a.id.cmp(&b.id));
         assert_eq!(workspaces.len(), 2);
@@ -786,14 +797,8 @@ mod tests {
     async fn test_shutdown_cleans_all() {
         let (backend, _tmp) = make_backend();
         backend.initialize().await.unwrap();
-        backend
-            .create_workspace(make_spec("ws-1"))
-            .await
-            .unwrap();
-        backend
-            .create_workspace(make_spec("ws-2"))
-            .await
-            .unwrap();
+        backend.create_workspace(make_spec("ws-1")).await.unwrap();
+        backend.create_workspace(make_spec("ws-2")).await.unwrap();
         backend.shutdown().await.unwrap();
         let workspaces = backend.list_workspaces().await.unwrap();
         assert!(workspaces.is_empty());

@@ -745,7 +745,10 @@ mod tests {
 "#;
         let graph = parse_dag_markdown(markdown).unwrap();
         let node = &graph.nodes[0];
-        assert_eq!(node.metadata.get("custom_key"), Some(&"custom_value".to_string()));
+        assert_eq!(
+            node.metadata.get("custom_key"),
+            Some(&"custom_value".to_string())
+        );
         assert_eq!(node.metadata.get("another"), Some(&"data".to_string()));
     }
 
@@ -778,7 +781,11 @@ mod tests {
         let markdown = "## Task A\n";
         let graph = parse_dag_markdown(markdown).unwrap();
         let id = &graph.nodes[0].id;
-        assert!(Uuid::parse_str(id).is_ok(), "ID should be a valid UUID: {}", id);
+        assert!(
+            Uuid::parse_str(id).is_ok(),
+            "ID should be a valid UUID: {}",
+            id
+        );
     }
 
     #[test]

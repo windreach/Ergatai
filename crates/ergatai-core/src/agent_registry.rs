@@ -352,9 +352,7 @@ mod tests {
             .register_agent("agent-hb2".to_string(), "conn".to_string(), None)
             .await
             .unwrap();
-        registry
-            .update_status("agent-hb2", AgentStatus::Idle)
-            .await;
+        registry.update_status("agent-hb2", AgentStatus::Idle).await;
         assert_eq!(
             registry.get_agent("agent-hb2").await.unwrap().status,
             AgentStatus::Idle
@@ -383,9 +381,7 @@ mod tests {
             .register_agent("agent-s".to_string(), "conn".to_string(), None)
             .await
             .unwrap();
-        registry
-            .update_status("agent-s", AgentStatus::Idle)
-            .await;
+        registry.update_status("agent-s", AgentStatus::Idle).await;
 
         assert_eq!(
             registry.get_agent("agent-s").await.unwrap().status,
@@ -413,9 +409,7 @@ mod tests {
     #[tokio::test]
     async fn test_update_status_missing_agent_no_panic() {
         let registry = AgentRegistry::new();
-        registry
-            .update_status("ghost", AgentStatus::Idle)
-            .await;
+        registry.update_status("ghost", AgentStatus::Idle).await;
         // No agent added, no panic
         assert!(registry.get_agent("ghost").await.is_none());
     }
@@ -438,9 +432,7 @@ mod tests {
             .await
             .unwrap();
 
-        registry
-            .update_status("a-idle", AgentStatus::Idle)
-            .await;
+        registry.update_status("a-idle", AgentStatus::Idle).await;
         registry
             .update_status("a-disc", AgentStatus::Disconnected)
             .await;
@@ -467,9 +459,7 @@ mod tests {
             .register_agent("a1".to_string(), "c1".to_string(), None)
             .await
             .unwrap();
-        registry
-            .update_status("a1", AgentStatus::Idle)
-            .await;
+        registry.update_status("a1", AgentStatus::Idle).await;
         assert_eq!(registry.active_count().await, 0);
     }
 

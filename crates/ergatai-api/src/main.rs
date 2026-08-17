@@ -296,6 +296,8 @@ async fn async_main(args: Args) -> Result<()> {
             }
         };
 
+    let mcp_cancellation_token = CancellationToken::new();
+
     match ergatai_runtime::init_agent_runtime(runtime_backend) {
         Ok(runtime) => {
             // Initialize the backend (connect to daemon, check dependencies)
@@ -312,6 +314,55 @@ async fn async_main(args: Args) -> Result<()> {
                 runtime_backend_name,
                 args.session_prefix
             );
+
+            // Discover agents already running in tmux sessions (dynamic, not hardcoded)
+            match runtime.discover_and_register_agents().await {
+                Ok(count) => {
+                    if count > 0 {
+                        tracing::info!("Discovered {} running agent(s) in tmux sessions", count);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Agent discovery scan failed (non-fatal): {}", e);
+                }
+            }
+
+            // Periodic re-discovery: scan for new agents every 30 seconds.
+            // This handles the race condition where the rmux daemon isn't ready
+            // at startup, or agents are started after the server.
+            // Uses the shared cancellation token for graceful shutdown.
+            let periodic_runtime = runtime.clone();
+            let periodic_cancel = mcp_cancellation_token.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+                // Skip the first immediate tick — initial discovery already ran above.
+                interval.tick().await;
+                loop {
+                    tokio::select! {
+                        _ = periodic_cancel.cancelled() => {
+                            tracing::debug!("Periodic discovery shutting down");
+                            break;
+                        }
+                        _ = interval.tick() => {
+                            match periodic_runtime.discover_and_register_agents().await {
+                                Ok(count) if count > 0 => {
+                                    tracing::info!(
+                                        "Periodic discovery: found {} new agent(s)",
+                                        count
+                                    );
+                                }
+                                Ok(_) => {} // no new agents
+                                Err(e) => {
+                                    tracing::debug!(
+                                        error = %e,
+                                        "Periodic discovery scan failed (will retry)"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            });
         }
         Err(e) => {
             tracing::error!("Failed to initialize AgentRuntime: {}", e);
@@ -319,7 +370,6 @@ async fn async_main(args: Args) -> Result<()> {
         }
     }
 
-    let mcp_cancellation_token = CancellationToken::new();
     let mcp_service = create_mcp_service(
         mcp_registry.clone(),
         peer_registry.clone(),
@@ -330,9 +380,7 @@ async fn async_main(args: Args) -> Result<()> {
         "MCP server initialized (protocol 2025-06-18, Streamable HTTP, SSE keep-alive: {}s)",
         args.sse_keep_alive
     );
-    tracing::info!(
-        "Agent messaging: AgentRuntime injection (preferred) + MCP notification (fallback)"
-    );
+    tracing::info!("Agent messaging: AgentRuntime injection (rmux/tmux send_text)");
 
     // Start background peer reaper — detects abrupt disconnects (kill, network drop)
     // and cleans up stale agent registrations within 10 seconds.
@@ -349,13 +397,10 @@ async fn async_main(args: Args) -> Result<()> {
             tracing::info!("✅ NATS initialized successfully");
 
             // Start the message delivery consumer — pulls from AGENT_MESSAGES
-            // JetStream stream and delivers via AgentRuntime injection / MCP notification.
+            // JetStream stream and delivers via AgentRuntime injection (rmux/tmux).
             // This provides reliable, persisted delivery for agent-to-agent messages.
-            let delivery_handle = start_message_delivery_consumer(
-                conn,
-                peer_registry.clone(),
-                mcp_cancellation_token.clone(),
-            );
+            let delivery_handle =
+                start_message_delivery_consumer(conn, mcp_cancellation_token.clone());
             tracing::info!("Message delivery consumer started (AGENT_MESSAGES JetStream)");
 
             // Monitor the consumer task — log if it exits unexpectedly before cancellation.

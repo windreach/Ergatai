@@ -100,7 +100,10 @@ mod tests {
     fn test_agent_message_stream_subject_wildcard() {
         let config = agent_message_stream_config();
         // Subject should use wildcard to match all agent message subjects
-        assert!(config.subjects[0].contains('*'), "Subject should contain wildcard");
+        assert!(
+            config.subjects[0].contains('*'),
+            "Subject should contain wildcard"
+        );
         assert_eq!(config.subjects[0], "ergatai.agent.message.*");
     }
 }

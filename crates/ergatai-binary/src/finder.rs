@@ -9,6 +9,28 @@
 use ergatai_error::{ErgataiError, ErgataiResult};
 use std::path::{Path, PathBuf};
 
+/// Check if a file is executable.
+///
+/// On Unix, checks the executable permission bit.
+/// On Windows, checks if the file extension is executable (.exe, .cmd, .bat, .com).
+fn is_executable(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        match path.metadata() {
+            Ok(meta) => meta.permissions().mode() & 0o111 != 0,
+            Err(_) => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        path.extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| matches!(ext.to_lowercase().as_str(), "exe" | "cmd" | "bat" | "com"))
+            .unwrap_or(false)
+    }
+}
+
 /// Binary file locator with environment override, bundled resources, and PATH fallback
 pub struct BinaryLocator {
     /// Binary name (e.g., "nats-server", "rmux-daemon")
@@ -27,18 +49,28 @@ impl BinaryLocator {
             if let Ok(path) = std::env::var(env_name) {
                 let path = PathBuf::from(&path);
                 if path.exists() {
-                    tracing::debug!(
-                        name = self.name,
+                    // Security: verify the file is actually executable
+                    if !is_executable(&path) {
+                        tracing::warn!(
+                            env = env_name,
+                            path = %path.display(),
+                            "env var points to non-executable file, skipping"
+                        );
+                    } else {
+                        tracing::debug!(
+                            name = self.name,
+                            path = %path.display(),
+                            "found via environment variable"
+                        );
+                        return Ok(path);
+                    }
+                } else {
+                    tracing::warn!(
+                        env = env_name,
                         path = %path.display(),
-                        "found via environment variable"
+                        "env var points to non-existent file"
                     );
-                    return Ok(path);
                 }
-                tracing::warn!(
-                    env = env_name,
-                    path = %path.display(),
-                    "env var points to non-existent file"
-                );
             }
         }
 
@@ -331,6 +363,15 @@ mod tests {
     fn test_binary_locator_find_env_override_valid_path() {
         let tmp = std::env::temp_dir().join("ergatai_test_binary");
         fs::write(&tmp, "fake binary").unwrap();
+
+        // Make the file executable (required on Unix)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&tmp).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&tmp, perms).unwrap();
+        }
 
         let env_name = "ERGATAI_TEST_BINARY_VALID";
         std::env::set_var(env_name, tmp.to_str().unwrap());

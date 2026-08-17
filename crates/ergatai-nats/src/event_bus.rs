@@ -705,10 +705,7 @@ mod tests {
 
     #[test]
     fn test_subject_construction_task_submit() {
-        let subject = format!(
-            "ergatai.task.submit.{}",
-            sanitize_agent_name("claude-code")
-        );
+        let subject = format!("ergatai.task.submit.{}", sanitize_agent_name("claude-code"));
         assert_eq!(subject, "ergatai.task.submit.claude-code");
 
         let subject2 = format!(
@@ -720,10 +717,7 @@ mod tests {
 
     #[test]
     fn test_subject_construction_agent_message() {
-        let subject = format!(
-            "ergatai.agent.message.{}",
-            sanitize_agent_name("codex")
-        );
+        let subject = format!("ergatai.agent.message.{}", sanitize_agent_name("codex"));
         assert_eq!(subject, "ergatai.agent.message.codex");
     }
 

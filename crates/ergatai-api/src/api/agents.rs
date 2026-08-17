@@ -59,10 +59,60 @@ pub async fn list_agents(State(_state): State<AppState>) -> impl IntoResponse {
     Json(response)
 }
 
+/// Allowed commands for agent spawning (security whitelist).
+/// Only these commands can be executed via the API to prevent arbitrary command execution.
+const ALLOWED_COMMANDS: &[&str] = &["claude", "cursor", "codex", "ergatai-agent", "simple-agent"];
+
+/// Validate that a workspace_id contains only safe characters (alphanumeric, hyphens, underscores).
+/// This prevents path traversal (`..`), absolute paths (`/etc`), and shell injection.
+fn is_valid_workspace_id(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Validate that the command is in the allowed list.
+fn validate_command(command: &str) -> Result<(), String> {
+    let program = command
+        .split_whitespace()
+        .next()
+        .ok_or_else(|| "Empty command".to_string())?;
+
+    // Extract just the binary name (handle paths like /usr/bin/claude)
+    let binary_name = std::path::Path::new(program)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(program);
+
+    if ALLOWED_COMMANDS.contains(&binary_name) {
+        Ok(())
+    } else {
+        // Security: don't leak the whitelist to clients
+        Err(format!("Command '{}' is not allowed", binary_name))
+    }
+}
+
 pub async fn spawn_agent(
     State(state): State<AppState>,
     Json(req): Json<SpawnAgentRequest>,
 ) -> impl IntoResponse {
+    // Security: validate command against whitelist before execution
+    if let Err(e) = validate_command(&req.command) {
+        return (StatusCode::FORBIDDEN, Json(ErrorResponse { error: e })).into_response();
+    }
+
+    // Security: validate workspace_id contains only safe characters
+    if !is_valid_workspace_id(&req.workspace_id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "workspace_id must contain only alphanumeric characters, hyphens, or underscores".to_string(),
+            }),
+        )
+            .into_response();
+    }
+
     let runtime = get_agent_runtime();
     let spec = WorkspaceSpec {
         id: req.workspace_id,

@@ -110,7 +110,11 @@ mod tests {
         let ergatai_err: ErgataiError = err.into();
         let msg = ergatai_err.to_string();
         // The alternate display format preserves the chain: "outer: middle: top"
-        assert!(msg.contains("top error"), "should contain root cause: {}", msg);
+        assert!(
+            msg.contains("top error"),
+            "should contain root cause: {}",
+            msg
+        );
         assert!(
             msg.contains("middle context"),
             "should contain middle context: {}",

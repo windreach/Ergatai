@@ -389,10 +389,7 @@ mod tests {
 
     #[test]
     fn test_subject_naming_all_agent_messages() {
-        assert_eq!(
-            subjects::all_agent_messages(),
-            "ergatai.agent.message.*"
-        );
+        assert_eq!(subjects::all_agent_messages(), "ergatai.agent.message.*");
     }
 
     #[test]
@@ -457,7 +454,12 @@ mod tests {
         let conn = NatsConnection::connect_to_server(server).await.unwrap();
 
         // Core NATS publish to non-existent subject should succeed (no subscribers)
-        let result = conn.publish("test.nonexistent.subject", b"data".to_vec()).await;
-        assert!(result.is_ok(), "Publish to non-existent subject should succeed");
+        let result = conn
+            .publish("test.nonexistent.subject", b"data".to_vec())
+            .await;
+        assert!(
+            result.is_ok(),
+            "Publish to non-existent subject should succeed"
+        );
     }
 }

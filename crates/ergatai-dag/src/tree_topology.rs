@@ -8,10 +8,10 @@
 //! This is intentionally simple: AI can reason about trees easily,
 //! and most collaboration patterns fit this model.
 
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use anyhow::Context;
 use ergatai_error::ErgataiResult;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use tokio::fs;
 
 /// Root of the task tree
@@ -177,7 +177,11 @@ impl TaskTree {
     }
 
     fn count_nodes_recursive(&self, node: &TaskNode) -> usize {
-        1 + node.children.iter().map(|c| self.count_nodes_recursive(c)).sum::<usize>()
+        1 + node
+            .children
+            .iter()
+            .map(|c| self.count_nodes_recursive(c))
+            .sum::<usize>()
     }
 
     fn count_completed(&self) -> usize {
@@ -294,15 +298,16 @@ mod tests {
     use super::*;
 
     fn sample_tree() -> TaskTree {
-        let root = TaskNode::new("pm", "pm-agent", "Analyze requirements")
-            .with_child(
-                TaskNode::new("dev-1", "dev-agent", "Implement login")
-                    .with_child(TaskNode::new("test-1", "test-agent", "Test login")),
-            )
-            .with_child(
-                TaskNode::new("dev-2", "dev-agent", "Implement registration")
-                    .with_child(TaskNode::new("test-2", "test-agent", "Test registration")),
-            );
+        let root =
+            TaskNode::new("pm", "pm-agent", "Analyze requirements")
+                .with_child(
+                    TaskNode::new("dev-1", "dev-agent", "Implement login")
+                        .with_child(TaskNode::new("test-1", "test-agent", "Test login")),
+                )
+                .with_child(
+                    TaskNode::new("dev-2", "dev-agent", "Implement registration")
+                        .with_child(TaskNode::new("test-2", "test-agent", "Test registration")),
+                );
 
         TaskTree::new(root)
     }
@@ -419,9 +424,9 @@ mod tests {
         // All nodes have children (except the deepest level)
         // But the "no leaves" scenario is really about internal nodes being complete
         // Here: just test a tree where only the root is pending and no children exist at leaf level
-        let root = TaskNode::new("root", "agent", "Root")
-            .with_child(TaskNode::new("mid", "agent", "Mid")
-                .with_child(TaskNode::new("leaf", "agent", "Leaf")));
+        let root = TaskNode::new("root", "agent", "Root").with_child(
+            TaskNode::new("mid", "agent", "Mid").with_child(TaskNode::new("leaf", "agent", "Leaf")),
+        );
         let tree = TaskTree::new(root);
         // Root is the only ready task
         let ready = tree.ready_tasks();
@@ -439,7 +444,8 @@ mod tests {
     #[test]
     fn test_set_result_sets_completed() {
         let mut tree = sample_tree();
-        tree.set_result("pm", "/path/to/result".to_string()).unwrap();
+        tree.set_result("pm", "/path/to/result".to_string())
+            .unwrap();
         let node = tree.find_node("pm").unwrap();
         assert_eq!(node.status, TaskStatus::Completed);
         assert_eq!(node.result_path, Some("/path/to/result".to_string()));
@@ -460,14 +466,8 @@ mod tests {
     #[test]
     fn test_sibling_links() {
         let root = TaskNode::new("pm", "agent", "PM")
-            .with_child(
-                TaskNode::new("dev-1", "agent", "Dev 1")
-                    .with_sibling_link("dev-2"),
-            )
-            .with_child(
-                TaskNode::new("dev-2", "agent", "Dev 2")
-                    .with_sibling_link("dev-1"),
-            );
+            .with_child(TaskNode::new("dev-1", "agent", "Dev 1").with_sibling_link("dev-2"))
+            .with_child(TaskNode::new("dev-2", "agent", "Dev 2").with_sibling_link("dev-1"));
         let tree = TaskTree::new(root);
         let dev1 = tree.find_node("dev-1").unwrap();
         assert_eq!(dev1.sibling_links, vec!["dev-2"]);

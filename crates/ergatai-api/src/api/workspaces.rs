@@ -144,8 +144,7 @@ mod tests {
 
     #[test]
     fn test_create_workspace_request_id_only() {
-        let req: CreateWorkspaceRequest =
-            serde_json::from_value(json!({"id": "ws-1"})).unwrap();
+        let req: CreateWorkspaceRequest = serde_json::from_value(json!({"id": "ws-1"})).unwrap();
         assert_eq!(req.id, "ws-1");
         assert!(req.work_dir.is_none());
         assert!(req.env.is_none());
@@ -174,8 +173,7 @@ mod tests {
 
     #[test]
     fn test_create_workspace_request_empty_id() {
-        let req: CreateWorkspaceRequest =
-            serde_json::from_value(json!({"id": ""})).unwrap();
+        let req: CreateWorkspaceRequest = serde_json::from_value(json!({"id": ""})).unwrap();
         assert_eq!(req.id, "");
     }
 

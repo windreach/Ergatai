@@ -121,9 +121,18 @@ pub fn is_daemon_running() -> bool {
 
 /// Check daemon status using a specific rmux CLI binary, falling back to PATH.
 fn check_daemon_running(rmux_cli: Option<&Path>) -> bool {
-    let cmd = rmux_cli
-        .filter(|p| p.exists())
-        .unwrap_or_else(|| Path::new("rmux"));
+    let cmd = match rmux_cli {
+        Some(path) => {
+            if path.exists() {
+                path
+            } else {
+                // Caller specified an explicit path that doesn't exist —
+                // daemon is not running at that location.
+                return false;
+            }
+        }
+        None => Path::new("rmux"),
+    };
     Command::new(cmd)
         .args(["list-sessions"])
         .output()
@@ -283,9 +292,6 @@ mod tests {
     #[test]
     fn test_env_override_variable_name() {
         // The env var should match what's documented
-        assert_eq!(
-            RMUX_LOCATOR.env_override.unwrap(),
-            "ERGATAI_RMUX_BINARY"
-        );
+        assert_eq!(RMUX_LOCATOR.env_override.unwrap(), "ERGATAI_RMUX_BINARY");
     }
 }

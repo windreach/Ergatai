@@ -206,6 +206,20 @@ impl RmuxBackend {
         }
     }
 
+    /// Read an environment variable from a running process via /proc/{pid}/environ.
+    ///
+    /// Linux-specific: reads the null-delimited environment block from procfs.
+    /// Returns `None` if the process doesn't exist, permission is denied,
+    /// or the variable is not set.
+    fn read_proc_environ(pid: u32, var_name: &str) -> Option<String> {
+        let path = format!("/proc/{}/environ", pid);
+        let data = std::fs::read(&path).ok()?;
+        let prefix = format!("{}=", var_name);
+        data.split(|b| *b == 0)
+            .filter_map(|entry| std::str::from_utf8(entry).ok())
+            .find_map(|entry| entry.strip_prefix(&prefix).map(|v| v.to_string()))
+    }
+
     // ── Advanced rmux-specific capabilities (not on trait) ──
 
     /// Wait until specific text appears in the agent's visible terminal output.
@@ -1189,6 +1203,137 @@ impl AgentRuntimeBackend for RmuxBackend {
         let _ = session.kill().await;
         info!("rmux backend initialized (daemon connected)");
         Ok(())
+    }
+
+    /// Discover agents running in rmux panes across ALL sessions.
+    ///
+    /// Scans the rmux daemon for all sessions and their panes, filtering to
+    /// only running panes. Each discovered pane is registered with an
+    /// `AgentHandle` that stores the `Pane` object in `self.panes` so that
+    /// `inject_message()` can later deliver messages to it.
+    ///
+    /// Unlike `LocalPtyBackend`, this does NOT filter by session prefix —
+    /// it discovers agents in ANY rmux session, enabling dynamic discovery
+    /// of manually-started agents.
+    async fn discover_agents(&self) -> ErgataiResult<Vec<(String, AgentHandle)>> {
+        let rmux = self.get_rmux().await?;
+
+        // List all sessions from the daemon
+        let session_names = rmux
+            .list_sessions()
+            .await
+            .map_err(|e| ErgataiError::internal(format!("Failed to list rmux sessions: {}", e)))?;
+
+        info!(
+            sessions = session_names.len(),
+            "Scanning rmux daemon for running agents"
+        );
+
+        // Find all panes across all sessions
+        let all_panes = rmux
+            .find_panes()
+            .all()
+            .await
+            .map_err(|e| ErgataiError::internal(format!("Failed to find rmux panes: {}", e)))?;
+
+        let mut discovered = Vec::new();
+
+        // Collect all pane data WITHOUT holding the write lock.
+        // This prevents blocking concurrent reads (inject_message, etc.) during discovery.
+        let mut panes_to_insert: Vec<(String, Pane)> = Vec::new();
+
+        for dp in &all_panes {
+            // Only consider running panes (skip exited/unknown)
+            let child_pid = match &dp.process {
+                PaneProcessState::Running { pid: Some(pid) } => Some(*pid),
+                PaneProcessState::Running { pid: None } => None,
+                _ => continue, // skip non-running panes
+            };
+
+            let session_name = dp.session_name.as_str().to_string();
+
+            // Skip internal sessions (names starting with `_`) — these are
+            // warmup/keepalive sessions, not agent panes.
+            if session_name.starts_with('_') {
+                continue;
+            }
+
+            let pane_id = format!("%{}", dp.pane_id.as_u32());
+            let command = dp
+                .command
+                .as_ref()
+                .and_then(|c| c.first().cloned())
+                .unwrap_or_default();
+
+            // Try to read RMUX_PANE from the pane's child process environment.
+            // This gives us the deterministic pane identifier (e.g., "%15").
+            let rmux_pane = child_pid.and_then(|pid| Self::read_proc_environ(pid, "RMUX_PANE"));
+
+            // Use the deterministic RMUX_PANE identifier (e.g., "%15") as agent_id.
+            // Fall back to pane_id (e.g., "%0") if RMUX_PANE can't be read from /proc.
+            // This ensures the same pane always gets the same agent_id across scans,
+            // making discover_and_register_agents() idempotent.
+            let agent_id = rmux_pane.clone().unwrap_or_else(|| pane_id.clone());
+
+            let mut metadata = HashMap::new();
+            metadata.insert("session".to_string(), session_name.clone());
+            metadata.insert("pane_id".to_string(), pane_id.clone());
+            if let Some(ref rp) = rmux_pane {
+                metadata.insert("rmux_pane".to_string(), rp.clone());
+            }
+
+            info!(
+                agent_id = agent_id,
+                session = session_name,
+                pane_id = pane_id,
+                rmux_pane = rmux_pane.as_deref().unwrap_or("unknown"),
+                pid = child_pid
+                    .map(|p| p.to_string())
+                    .as_deref()
+                    .unwrap_or("unknown"),
+                command = command,
+                "Discovered agent in rmux pane"
+            );
+
+            let workspace = WorkspaceHandle {
+                id: session_name.clone(),
+                backend: "rmux".to_string(),
+                metadata: {
+                    let mut m = HashMap::new();
+                    m.insert("session".to_string(), session_name);
+                    m
+                },
+            };
+
+            let handle_agent_id = agent_id.clone();
+            panes_to_insert.push((agent_id, dp.pane.clone()));
+
+            discovered.push((
+                handle_agent_id.clone(),
+                AgentHandle {
+                    agent_id: handle_agent_id,
+                    workspace,
+                    process_id: child_pid.map(|p| p.to_string()),
+                    metadata,
+                },
+            ));
+        }
+
+        // Briefly acquire the write lock to insert all discovered panes at once.
+        {
+            let mut panes_map = self.panes.write().await;
+            for (agent_id, pane_handle) in panes_to_insert {
+                panes_map.insert(agent_id, pane_handle);
+            }
+        }
+
+        info!(
+            count = discovered.len(),
+            sessions = session_names.len(),
+            "Discovery scan complete"
+        );
+
+        Ok(discovered)
     }
 
     async fn create_workspace(&self, spec: WorkspaceSpec) -> ErgataiResult<WorkspaceHandle> {

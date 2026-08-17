@@ -63,7 +63,7 @@ fn main() {
 
     // Allow skipping download for development/testing
     if env::var("ERGATAI_SKIP_RMUX_DOWNLOAD").is_ok() {
-        println!("cargo:warning=Skipping rmux-daemon download (ERGATAI_SKIP_RMUX_DOWNLOAD set)");
+        // Silently skip — no warning needed for intentional skip
         return;
     }
 
@@ -75,12 +75,8 @@ fn main() {
 
     let binary_path = resources_dir.join(binary_name);
 
-    // Skip if already exists
+    // Skip if already exists — no warning needed, this is the normal fast path
     if binary_path.exists() {
-        println!(
-            "cargo:warning=rmux binary already exists at {}",
-            binary_path.display()
-        );
         return;
     }
 
@@ -92,16 +88,15 @@ fn main() {
 
     let download_url = format!("{}/v{}/{}", RMUX_DOWNLOAD_URL, RMUX_VERSION, archive_name);
 
-    println!("cargo:warning=Downloading rmux from {}", download_url);
-
+    // Download silently — only warn on failure
     match download_and_extract(&download_url, &archive_name, &resources_dir, binary_name) {
-        Ok(path) => {
-            println!("cargo:warning=rmux binary installed to {}", path.display());
+        Ok(_path) => {
+            // Success — no warning needed, binary is ready for use
             // Make executable on Unix
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o755));
+                let _ = fs::set_permissions(&binary_path, fs::Permissions::from_mode(0o755));
             }
         }
         Err(e) => {
