@@ -416,6 +416,13 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let repo = Repository::init(temp_dir.path()).unwrap();
 
+        // Set local git config so signature() works without global config
+        {
+            let mut config = repo.config().unwrap();
+            config.set_str("user.name", "Test User").unwrap();
+            config.set_str("user.email", "test@example.com").unwrap();
+        }
+
         // Create initial commit
         let mut index = repo.index().unwrap();
         let oid = index.write_tree().unwrap();
