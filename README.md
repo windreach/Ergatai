@@ -65,6 +65,25 @@ When multiple agents edit the same codebase, Ergatai prevents conflicts with tok
 
 <br/>
 
+# Binaries
+
+Ergatai ships as **two binaries** that work together:
+
+| Binary | Role | What it does | Needs `CAP_SYS_ADMIN`? |
+|--------|------|--------------|------------------------|
+| `ergatai` | **CLI** | User-facing tool to manage workspaces and agents. Wraps rmux commands via the API server. | No |
+| `ergatai-api` | **Server** | HTTP + MCP server. Manages rmux-daemon, nats-server, file locking, and exposes the MCP API to agents. | **Yes** (for fanotify file locking) |
+
+```
+ergatai (CLI)  ──HTTP──►  ergatai-api (server)  ──► rmux-daemon  (auto-managed)
+                                └──► nats-server  (auto-managed)
+                                └──► fanotify     (kernel-level file locking)
+```
+
+Most users run **both**. The install script handles this automatically.
+
+<br/>
+
 # Quickstart
 
 **1. Install ergatai-api:**

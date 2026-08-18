@@ -1,21 +1,30 @@
 #!/usr/bin/env bash
-# install.sh — Install ergatai-api binary with fanotify capabilities
+# install.sh — Install Ergatai (CLI + server) with fanotify capabilities
 #
 # Usage:
 #   curl -sSL https://raw.githubusercontent.com/windreach/Ergatai/main/install.sh | bash
 #   curl -sSL ... | bash -s -- v0.1.0 /usr/local/bin
 #
 # What this does:
-#   1. Downloads the ergatai-api binary from GitHub Releases
-#   2. Installs it to the target directory (default: /usr/local/bin)
-#   3. Grants CAP_SYS_ADMIN via setcap — REQUIRED for kernel-level file locking
+#   1. Downloads BOTH binaries from GitHub Releases:
+#        - `ergatai`     (CLI) — user-facing tool for managing workspaces/agents,
+#                                wraps rmux commands via the API server
+#        - `ergatai-api` (server) — HTTP/MCP server that manages rmux-daemon,
+#                                   nats-server, and exposes the MCP API to agents
+#   2. Installs them to the target directory (default: /usr/local/bin)
+#   3. Grants CAP_SYS_ADMIN to `ergatai-api` only — REQUIRED for kernel-level
+#      file locking via fanotify. The CLI does not need any special capabilities.
 #
-# Why CAP_SYS_ADMIN?
-#   Ergatai uses Linux fanotify with FAN_OPEN_PERM events to intercept file
-#   open() syscalls at the VFS layer. This is the only way to enforce mandatory
-#   file locks across agents. Permission events require CAP_SYS_ADMIN.
-#   Without this capability, Ergatai falls back to advisory-only mode (locks
-#   can be bypassed by direct shell access).
+# Architecture:
+#   ┌────────────────────┐        ┌────────────────────┐
+#   │   ergatai (CLI)    │─HTTP─►│  ergatai-api (API) │
+#   │  workspace/agent   │        │  MCP + HTTP server │
+#   │  management        │        │                    │
+#   └────────────────────┘        │  ┌─ fanotify ───┐  │  ← needs CAP_SYS_ADMIN
+#                                  │  │ (file locks) │  │
+#   rmux-daemon ◄── rmux SDK ──── │  └──────────────┘  │  ← auto-managed, bundled
+#   nats-server ◄── embedded ──── │  (JetStream bus)   │  ← auto-managed, bundled
+#                                  └────────────────────┘
 #
 # Arguments:
 #   $1 — version tag (default: latest)
@@ -26,14 +35,15 @@ set -euo pipefail
 VERSION="${1:-latest}"
 INSTALL_DIR="${2:-/usr/local/bin}"
 REPO="windreach/Ergatai"
-BINARY_NAME="ergatai-api"
+CLI_NAME="ergatai"
+SERVER_NAME="ergatai-api"
 
 # ── Preflight checks ────────────────────────────────────────────────────────
 
 if [[ "$(uname -s)" != "Linux" ]]; then
     echo "⚠️  This installer is for Linux only."
     echo "   Ergatai on macOS/Windows runs in advisory-only mode (no kernel locking)."
-    echo "   Download the binary manually from https://github.com/${REPO}/releases"
+    echo "   Download the binaries manually from https://github.com/${REPO}/releases"
     exit 1
 fi
 
@@ -75,74 +85,115 @@ fi
 echo "📦 Ergatai Installer"
 echo "   Version:   $VERSION"
 echo "   Arch:      $ARCH"
-echo "   Install:   $INSTALL_DIR/$BINARY_NAME"
+echo "   Install:   $INSTALL_DIR/"
+echo ""
+echo "   Binaries to install:"
+echo "     • $CLI_NAME     (CLI — manages workspaces/agents, wraps rmux)"
+echo "     • $SERVER_NAME  (server — MCP/HTTP API, needs CAP_SYS_ADMIN)"
 echo ""
 
 # ── Download ────────────────────────────────────────────────────────────────
 
-DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${VERSION}/${BINARY_NAME}-${ARCH}"
-TMP_FILE=$(mktemp)
-trap 'rm -f "$TMP_FILE"' EXIT
+TMP_CLI=$(mktemp)
+TMP_SERVER=$(mktemp)
+trap 'rm -f "$TMP_CLI" "$TMP_SERVER"' EXIT
 
-echo "⬇️  Downloading $BINARY_NAME from $DOWNLOAD_URL"
-if ! curl -fL -o "$TMP_FILE" "$DOWNLOAD_URL"; then
-    echo "❌ Download failed. Check:"
-    echo "   - Version exists: https://github.com/${REPO}/releases"
-    echo "   - Network connection"
-    exit 1
-fi
-
-chmod +x "$TMP_FILE"
+for binary in "$CLI_NAME" "$SERVER_NAME"; do
+    DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${VERSION}/${binary}-${ARCH}"
+    TMP_FILE=$(mktemp)
+    echo "⬇️  Downloading $binary from $DOWNLOAD_URL"
+    if ! curl -fL -o "$TMP_FILE" "$DOWNLOAD_URL"; then
+        echo "❌ Download failed for $binary. Check:"
+        echo "   - Version exists: https://github.com/${REPO}/releases"
+        echo "   - Network connection"
+        exit 1
+    fi
+    chmod +x "$TMP_FILE"
+    if [[ "$binary" == "$CLI_NAME" ]]; then
+        mv "$TMP_FILE" "$TMP_CLI"
+    else
+        mv "$TMP_FILE" "$TMP_SERVER"
+    fi
+done
 
 # ── Install ─────────────────────────────────────────────────────────────────
 
-echo "📁 Installing to $INSTALL_DIR/$BINARY_NAME"
-if [[ -w "$INSTALL_DIR" ]]; then
-    mv "$TMP_FILE" "$INSTALL_DIR/$BINARY_NAME"
-else
-    sudo mv "$TMP_FILE" "$INSTALL_DIR/$BINARY_NAME"
-fi
+echo "📁 Installing to $INSTALL_DIR"
 
-# ── Grant CAP_SYS_ADMIN (REQUIRED for kernel-level file locking) ────────────
+install_binary() {
+    local src="$1"
+    local name="$2"
+    if [[ -w "$INSTALL_DIR" ]]; then
+        mv "$src" "$INSTALL_DIR/$name"
+    else
+        sudo mv "$src" "$INSTALL_DIR/$name"
+    fi
+}
 
-echo "🔐 Granting CAP_SYS_ADMIN for fanotify (kernel-level file locking)..."
+install_binary "$TMP_CLI" "$CLI_NAME"
+install_binary "$TMP_SERVER" "$SERVER_NAME"
+
+echo "   ✓ $CLI_NAME     (CLI)"
+echo "   ✓ $SERVER_NAME  (server)"
+
+# ── Grant CAP_SYS_ADMIN to SERVER only (REQUIRED for kernel-level file locking) ─
+
+echo ""
+echo "🔐 Granting CAP_SYS_ADMIN to $SERVER_NAME for fanotify..."
 echo ""
 echo "   ⚠️  This step requires sudo and is CRITICAL:"
 echo "       WITHOUT this capability, file locking runs in ADVISORY MODE"
 echo "       (locks can be bypassed by direct shell access)."
+echo "   ℹ️  Note: only the SERVER needs this capability, not the CLI."
 echo ""
 
-TARGET="$INSTALL_DIR/$BINARY_NAME"
+SERVER_TARGET="$INSTALL_DIR/$SERVER_NAME"
 if [[ -w "$INSTALL_DIR" ]]; then
-    setcap 'cap_sys_admin+ep' "$TARGET"
+    setcap 'cap_sys_admin+ep' "$SERVER_TARGET"
 else
-    sudo setcap 'cap_sys_admin+ep' "$TARGET"
+    sudo setcap 'cap_sys_admin+ep' "$SERVER_TARGET"
 fi
 
 # ── Verify ──────────────────────────────────────────────────────────────────
 
 echo "🔍 Verifying installation..."
-INSTALLED_CAPS=$(getcap "$TARGET")
-echo "   Binary:     $TARGET"
-echo "   Capabilities: ${INSTALLED_CAPS:-<none>}"
 echo ""
+echo "   CLI ($CLI_NAME):"
+echo "     Path:         $INSTALL_DIR/$CLI_NAME"
+if command -v "$CLI_NAME" &>/dev/null; then
+    echo "     Version:      $("$CLI_NAME" --version 2>/dev/null || echo '<unknown>')"
+else
+    echo "     Version:      (not in PATH — re-open shell or source ~/.bashrc)"
+fi
 
+echo ""
+echo "   Server ($SERVER_NAME):"
+echo "     Path:         $SERVER_TARGET"
+INSTALLED_CAPS=$(getcap "$SERVER_TARGET")
+echo "     Capabilities: ${INSTALLED_CAPS:-<none>}"
+
+echo ""
 if [[ "$INSTALLED_CAPS" == *"cap_sys_admin"* ]]; then
     echo "✅ Installation successful!"
     echo ""
     echo "   File locking: MANDATORY (kernel-enforced via fanotify)"
     echo ""
-    echo "   Run with:"
-    echo "     $TARGET --port 3000"
+    echo "   Start the server:"
+    echo "     $SERVER_NAME --port 3000"
+    echo ""
+    echo "   Manage workspaces/agents (in another terminal):"
+    echo "     $CLI_NAME workspace list"
+    echo "     $CLI_NAME agent list"
+    echo "     $CLI_NAME agent spawn --workspace <id> --command <cmd>"
     echo ""
     echo "   📖 Documentation: https://github.com/${REPO}#readme"
 else
-    echo "⚠️  WARNING: CAP_SYS_ADMIN not set!"
+    echo "⚠️  WARNING: CAP_SYS_ADMIN not set on $SERVER_NAME!"
     echo ""
     echo "   File locking will run in ADVISORY MODE only."
     echo "   To enable mandatory locking, run manually:"
     echo ""
-    echo "     sudo setcap 'cap_sys_admin+ep' $TARGET"
+    echo "     sudo setcap 'cap_sys_admin+ep' $SERVER_TARGET"
     echo ""
     echo "   See: https://github.com/${REPO}#file-locking-permissions"
 fi
