@@ -115,6 +115,7 @@ impl AgentRuntime {
 
         let info = AgentInfo {
             agent_id: agent_id.clone(),
+            display_name: None,
             workspace_id: spec.id,
             handle: handle.clone(),
             state: AgentState::Running,
@@ -199,6 +200,48 @@ impl AgentRuntime {
         Ok(())
     }
 
+    /// Set the display name for a runtime agent (for human-readable addressing).
+    ///
+    /// When set, agents can be addressed by this name in send_message instead of
+    /// using the auto-generated ID (e.g., "%198"). Display names must be unique.
+    /// Returns an error if the name is already taken by another agent.
+    pub async fn set_display_name(
+        &self,
+        agent_id: &str,
+        display_name: String,
+    ) -> ErgataiResult<()> {
+        let mut registry = self.registry.write().await;
+
+        // Check if display_name is already taken by another agent
+        let name_taken = registry.values().any(|info| {
+            info.display_name.as_ref() == Some(&display_name) && info.agent_id != agent_id
+        });
+        if name_taken {
+            return Err(ErgataiError::internal(format!(
+                "Display name '{}' is already taken by another agent",
+                display_name
+            )));
+        }
+
+        let info = registry
+            .get_mut(agent_id)
+            .ok_or_else(|| ErgataiError::internal(format!("Agent {} not found", agent_id)))?;
+        info.display_name = Some(display_name.clone());
+        info!(agent_id = agent_id, display_name = %display_name, "Agent display name set");
+        Ok(())
+    }
+
+    /// Find an agent by display name.
+    ///
+    /// Returns the agent_id if an agent with the given display_name exists.
+    pub async fn find_agent_by_display_name(&self, display_name: &str) -> Option<String> {
+        let registry = self.registry.read().await;
+        registry
+            .values()
+            .find(|info| info.display_name.as_ref() == Some(&display_name.to_string()))
+            .map(|info| info.agent_id.clone())
+    }
+
     /// Register an externally-discovered agent (e.g., from rmux pane scan).
     ///
     /// This allows agents started outside the normal `launch_agent()` flow
@@ -211,6 +254,7 @@ impl AgentRuntime {
     ) -> ErgataiResult<()> {
         let info = AgentInfo {
             agent_id: agent_id.clone(),
+            display_name: None,
             workspace_id: handle.workspace.id.clone(),
             handle,
             state: AgentState::Running,
@@ -242,6 +286,7 @@ impl AgentRuntime {
                 count += 1;
                 AgentInfo {
                     agent_id: agent_id.clone(),
+                    display_name: None,
                     workspace_id: handle.workspace.id.clone(),
                     handle,
                     state: AgentState::Running,

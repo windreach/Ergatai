@@ -150,6 +150,10 @@ pub struct AgentInfo {
     /// Unique agent ID (runtime-generated, e.g., "%198" for rmux panes)
     pub agent_id: String,
 
+    /// Human-readable display name (user-defined, optional)
+    /// When set, agents can be addressed by this name in send_message.
+    pub display_name: Option<String>,
+
     /// Workspace ID this agent belongs to
     pub workspace_id: String,
 
@@ -446,6 +450,7 @@ mod tests {
     fn test_agent_info_construction() {
         let info = AgentInfo {
             agent_id: "agent-1".to_string(),
+            display_name: None,
             workspace_id: "ws-1".to_string(),
             handle: AgentHandle {
                 workspace: WorkspaceHandle {
@@ -472,6 +477,7 @@ mod tests {
     fn test_agent_info_with_task() {
         let info = AgentInfo {
             agent_id: "agent-1".to_string(),
+            display_name: None,
             workspace_id: "ws-1".to_string(),
             handle: AgentHandle {
                 workspace: WorkspaceHandle {

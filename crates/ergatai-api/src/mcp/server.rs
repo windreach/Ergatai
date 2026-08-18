@@ -148,6 +148,14 @@ struct SendMessageParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct RegisterAgentNameParams {
+    /// Human-readable display name for this agent (e.g., "frontend-dev", "code-reviewer")
+    /// Once set, other agents can send messages to you using this name instead of your auto-generated ID.
+    /// Names must be unique across all agents.
+    display_name: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct SubmitOrchestrationParams {
     /// Markdown-formatted DAG definition
     dag_definition: String,
@@ -236,6 +244,7 @@ impl ErgataiMcpServer {
 
                 serde_json::json!({
                     "agent_id": info.agent_id,
+                    "display_name": info.display_name,
                     "mcp_agent_id": info.mcp_agent_id,
                     "workspace_id": info.workspace_id,
                     "status": if info.mcp_agent_id.is_some() { "active" } else { "discovered" },
@@ -253,6 +262,93 @@ impl ErgataiMcpServer {
         Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&result).unwrap_or_default(),
         )]))
+    }
+
+    /// Register a human-readable display name for this agent.
+    ///
+    /// Once registered, other agents can send messages to you using this name
+    /// instead of the auto-generated ID (e.g., "%198"). Names must be unique.
+    /// You can call this multiple times to change your display name.
+    #[tool(
+        description = "Register a human-readable display name for this agent (enables name-based messaging)"
+    )]
+    async fn register_agent_name(
+        &self,
+        params: Parameters<RegisterAgentNameParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let display_name = &params.0.display_name;
+
+        // Validate display name format
+        if display_name.is_empty() {
+            return Ok(CallToolResult::error(vec![ContentBlock::text(
+                "Display name cannot be empty",
+            )]));
+        }
+        if display_name.len() > 64 {
+            return Ok(CallToolResult::error(vec![ContentBlock::text(
+                "Display name must be 64 characters or less",
+            )]));
+        }
+        if !display_name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+        {
+            return Ok(CallToolResult::error(vec![ContentBlock::text(
+                "Display name can only contain letters, numbers, hyphens, and underscores",
+            )]));
+        }
+
+        // Get the calling agent's runtime ID
+        let my_agent_id = match self.session_agent_id.read().await.clone() {
+            Some(id) => id,
+            None => {
+                return Ok(CallToolResult::error(vec![ContentBlock::text(
+                    "Cannot register name: agent identity not established",
+                )]));
+            }
+        };
+
+        let runtime = get_agent_runtime();
+
+        // Resolve MCP ID to runtime ID if needed
+        let runtime_id = match runtime.resolve_agent_id(&my_agent_id).await {
+            Some(id) => id,
+            None => {
+                return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                    "Cannot register name: agent '{}' not found in runtime",
+                    my_agent_id
+                ))]));
+            }
+        };
+
+        // Set the display name
+        match runtime.set_display_name(&runtime_id, display_name.clone()).await {
+            Ok(()) => {
+                let result = serde_json::json!({
+                    "status": "registered",
+                    "agent_id": runtime_id,
+                    "display_name": display_name,
+                    "message": format!(
+                        "Display name '{}' registered. Other agents can now send messages to you using this name.",
+                        display_name
+                    )
+                });
+
+                info!(
+                    agent_id = %runtime_id,
+                    display_name = %display_name,
+                    "Agent registered display name"
+                );
+
+                Ok(CallToolResult::success(vec![ContentBlock::text(
+                    serde_json::to_string_pretty(&result).unwrap_or_default(),
+                )]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                "Failed to register display name: {}",
+                e
+            ))])),
+        }
     }
 
     /// Send a message to another agent.
@@ -295,12 +391,13 @@ impl ErgataiMcpServer {
             })
             .map(|a| a.agent_id.clone())
             .or_else(|| {
-                // Check runtime agents (by agent_id or task_id)
+                // Check runtime agents (by agent_id, task_id, or display_name)
                 runtime_agents
                     .iter()
                     .find(|a| {
                         a.agent_id == *target_agent_id
                             || a.task_id.as_deref() == Some(target_agent_id)
+                            || a.display_name.as_ref() == Some(target_agent_id)
                     })
                     .map(|a| a.agent_id.clone())
             });
@@ -1058,6 +1155,23 @@ impl ServerHandler for ErgataiMcpServer {
                             agent_identifier = identifier,
                             "MCP agent bound to runtime agent by identifier"
                         );
+
+                        // Auto-set display_name from URL path identifier
+                        // This allows agents to be addressed by their URL name (e.g., "agent-1")
+                        if let Err(e) = runtime.set_display_name(&runtime_id, identifier.clone()).await {
+                            warn!(
+                                runtime_id = runtime_id,
+                                display_name = identifier,
+                                error = %e,
+                                "Failed to auto-set display_name from URL path"
+                            );
+                        } else {
+                            info!(
+                                runtime_id = runtime_id,
+                                display_name = identifier,
+                                "Auto-set display_name from URL path"
+                            );
+                        }
                     }
                     None => {
                         warn!(
