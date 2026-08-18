@@ -114,10 +114,10 @@ impl CallbackPidResolver {
     fn get_snapshot(&self) -> Vec<(u32, String, String)> {
         if let Some(cache_arc) = &self.cache {
             let (cache, ttl) = &**cache_arc;
-            // Fast path: cache is fresh
+            // Fast path: cache is fresh (even if empty — empty snapshots are valid)
             {
                 let guard = cache.read();
-                if guard.1.elapsed() < *ttl && !guard.0.is_empty() {
+                if guard.1.elapsed() < *ttl {
                     return guard.0.clone();
                 }
             }

@@ -1199,7 +1199,7 @@ impl FileLockManager {
         // honored. Negative entries bound the DB load from bursts of open() calls
         // on unlocked files — the dominant case under normal workloads.
         {
-            let cache = self.active_write_locks_cache.read();
+            let mut cache = self.active_write_locks_cache.write();
             if let Some(entry) = cache.get(normalized_path) {
                 match entry {
                     LockCacheEntry::Locked { agent_id, session_id } => {
@@ -1211,7 +1211,9 @@ impl FileLockManager {
                         return Ok((false, None));
                     }
                     LockCacheEntry::Unlocked { .. } => {
-                        // Stale negative entry — fall through to DB refresh.
+                        // Stale negative entry — remove it to prevent unbounded cache growth,
+                        // then fall through to DB refresh.
+                        cache.remove(normalized_path);
                     }
                 }
             }

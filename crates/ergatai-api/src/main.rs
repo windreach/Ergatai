@@ -501,7 +501,8 @@ async fn async_main(args: Args) -> Result<()> {
                             .into_iter()
                             .filter_map(|info| {
                                 let pid: u32 = info.handle.process_id?.parse().ok()?;
-                                Some((pid, info.agent_id.clone(), info.agent_id))
+                                // Return (pid, agent_id, session_id) where session_id is workspace_id
+                                Some((pid, info.agent_id.clone(), info.workspace_id.clone()))
                             })
                             .collect()
                     }

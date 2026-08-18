@@ -44,21 +44,12 @@ use ergatai_nats::events::{EnforcementAction, FileEnforcementPayload};
 pub struct EnforcerConfig {
     /// Whether to publish NATS events on denials.
     pub publish_nats_events: bool,
-    /// Maximum time (ms) to spend deciding before failing open. Prevents
-    /// deadlock if the SQLite mutex or PidResolver callback blocks.
-    /// Default: 100 ms.
-    pub decision_timeout_ms: u64,
-    /// TTL (ms) for the cached agent snapshot inside the event loop. Reduces
-    /// per-event allocation from `runtime.list_agents()`. Default: 50 ms.
-    pub snapshot_cache_ttl_ms: u64,
 }
 
 impl Default for EnforcerConfig {
     fn default() -> Self {
         Self {
             publish_nats_events: true,
-            decision_timeout_ms: 100,
-            snapshot_cache_ttl_ms: 50,
         }
     }
 }
@@ -695,8 +686,6 @@ impl Enforcer {
         // Write FAN_ALLOW / FAN_DENY response. Marks the guard so Drop won't
         // double-respond.
         guard.respond_now(matches!(&decision, Decision::Allow));
-        // meta.fd is closed by the guard's Drop.
-        guard.responded = true; // We've responded; Drop only needs to close fd.
 
         // Audit + NATS publish run in a detached task so the event loop can
         // return to reading the next fanotify event immediately. These are
