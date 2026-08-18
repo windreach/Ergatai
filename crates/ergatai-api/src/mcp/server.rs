@@ -322,7 +322,10 @@ impl ErgataiMcpServer {
         };
 
         // Set the display name
-        match runtime.set_display_name(&runtime_id, display_name.clone()).await {
+        match runtime
+            .set_display_name(&runtime_id, display_name.clone())
+            .await
+        {
             Ok(()) => {
                 let result = serde_json::json!({
                     "status": "registered",
@@ -1158,7 +1161,10 @@ impl ServerHandler for ErgataiMcpServer {
 
                         // Auto-set display_name from URL path identifier
                         // This allows agents to be addressed by their URL name (e.g., "agent-1")
-                        if let Err(e) = runtime.set_display_name(&runtime_id, identifier.clone()).await {
+                        if let Err(e) = runtime
+                            .set_display_name(&runtime_id, identifier.clone())
+                            .await
+                        {
                             warn!(
                                 runtime_id = runtime_id,
                                 display_name = identifier,
