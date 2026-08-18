@@ -198,9 +198,7 @@ enum LockCacheEntry {
     },
     /// No WRITE lock was observed at `observed_at`. Valid until
     /// `observed_at + LOCK_CACHE_NEGATIVE_TTL`.
-    Unlocked {
-        observed_at: Instant,
-    },
+    Unlocked { observed_at: Instant },
 }
 
 impl FileLockManager {
@@ -249,7 +247,7 @@ impl FileLockManager {
             ErgataiError::internal(format!("Failed to canonicalize project root: {}", e))
         })?;
 
-        Ok(Self {
+        let manager = Self {
             conn: Arc::new(Mutex::new(conn)),
             project_root,
             project_root_canonical,
@@ -263,12 +261,70 @@ impl FileLockManager {
             disconnected_sessions: Arc::new(Mutex::new(HashMap::new())),
             pending_request_keys: Arc::new(Mutex::new(HashMap::new())),
             active_write_locks_cache: Arc::new(parking_lot::RwLock::new(HashMap::new())),
-        })
+        };
+
+        // Start background task to periodically clean up stale cache entries.
+        // Without this, the cache would grow unboundedly as new file paths are accessed,
+        // since negative entries are only removed on re-access.
+        manager.start_cache_cleanup_task();
+
+        Ok(manager)
     }
 
     /// Get the project root directory this manager was initialized with.
     pub fn project_root(&self) -> &Path {
         &self.project_root
+    }
+
+    /// Start a background task that periodically cleans up stale cache entries.
+    ///
+    /// The `active_write_locks_cache` grows unboundedly without periodic cleanup:
+    /// negative entries (Unlocked) are only removed on re-access, so file paths
+    /// that are accessed once and never again would accumulate forever. This task
+    /// runs every 60 seconds and removes all expired negative entries.
+    ///
+    /// Positive entries (Locked) are never removed by this task — they are only
+    /// invalidated when the corresponding lock is explicitly released or expires.
+    ///
+    /// If called outside a Tokio runtime context (e.g., in synchronous tests),
+    /// the task is silently skipped — the cache will still work correctly,
+    /// just without periodic cleanup.
+    fn start_cache_cleanup_task(&self) {
+        // Check if we're in a Tokio runtime context. If not (e.g., synchronous tests),
+        // skip spawning the background task. The cache will still function correctly,
+        // it just won't have periodic cleanup in that scenario.
+        let handle = match tokio::runtime::Handle::try_current() {
+            Ok(h) => h,
+            Err(_) => {
+                debug!("No Tokio runtime available; skipping cache cleanup task");
+                return;
+            }
+        };
+
+        let cache = self.active_write_locks_cache.clone();
+        handle.spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                let now = Instant::now();
+                let mut guard = cache.write();
+                let before = guard.len();
+                guard.retain(|_, entry| match entry {
+                    LockCacheEntry::Locked { .. } => true, // Keep active locks
+                    LockCacheEntry::Unlocked { observed_at } => {
+                        // Remove if older than the negative TTL
+                        now.duration_since(*observed_at) < LOCK_CACHE_NEGATIVE_TTL
+                    }
+                });
+                let removed = before.saturating_sub(guard.len());
+                if removed > 0 {
+                    debug!(
+                        removed = removed,
+                        remaining = guard.len(),
+                        "Cache cleanup: removed stale negative entries"
+                    );
+                }
+            }
+        });
     }
 
     /// Create the lock database tables.
@@ -385,9 +441,7 @@ impl FileLockManager {
 
     /// Register a new system token.
     pub fn register_system_token(&self, token: &SystemToken) -> Result<(), ErgataiError> {
-        let conn = self
-            .conn
-            .lock();
+        let conn = self.conn.lock();
 
         conn.execute(
             "INSERT INTO system_tokens (
@@ -417,9 +471,7 @@ impl FileLockManager {
 
     /// Get a system token by session ID.
     pub fn get_system_token(&self, session_id: &str) -> Result<Option<SystemToken>, ErgataiError> {
-        let conn = self
-            .conn
-            .lock();
+        let conn = self.conn.lock();
 
         let mut stmt = conn
             .prepare(
@@ -520,9 +572,7 @@ impl FileLockManager {
         // Check for WRITE conflict and get conflict info if any
         // This block ensures conn is released before any async operations
         let conflict_info = {
-            let conn = self
-                .conn
-                .lock();
+            let conn = self.conn.lock();
 
             // Read-only transaction for conflict check; auto-rolls back on drop.
             let _tx = TransactionGuard::begin(&conn).map_err(|e| {
@@ -660,9 +710,7 @@ impl FileLockManager {
         }
 
         // No conflict, proceed with lock acquisition
-        let conn = self
-            .conn
-            .lock();
+        let conn = self.conn.lock();
 
         let tx = TransactionGuard::begin(&conn)
             .map_err(|e| ErgataiError::internal(format!("Failed to begin transaction: {}", e)))?;
@@ -762,9 +810,7 @@ impl FileLockManager {
             )));
         }
 
-        let conn = self
-            .conn
-            .lock();
+        let conn = self.conn.lock();
 
         let tx = TransactionGuard::begin(&conn)
             .map_err(|e| ErgataiError::internal(format!("Failed to begin transaction: {}", e)))?;
@@ -856,9 +902,7 @@ impl FileLockManager {
         file_path: &str,
         conflict: &crate::conflict_arbitration::ConflictInfo,
     ) -> Result<bool, ErgataiError> {
-        let conn = self
-            .conn
-            .lock();
+        let conn = self.conn.lock();
 
         let tx = TransactionGuard::begin(&conn)
             .map_err(|e| ErgataiError::internal(format!("Failed to begin transaction: {}", e)))?;
@@ -868,9 +912,7 @@ impl FileLockManager {
         // Look up retry counts for both agents
         let key_new = (normalized_path.clone(), token.agent_id.clone());
         let new_retry_count = {
-            let tracker = self
-                .retry_tracker
-                .lock();
+            let tracker = self.retry_tracker.lock();
             tracker.get(&key_new).copied().unwrap_or(0)
         };
 
@@ -892,9 +934,7 @@ impl FileLockManager {
                 normalized_path.clone(),
                 conflict.current_holder.agent_id.clone(),
             );
-            let tracker = self
-                .retry_tracker
-                .lock();
+            let tracker = self.retry_tracker.lock();
             tracker.get(&key_curr).copied().unwrap_or(0)
         };
 
@@ -1013,9 +1053,7 @@ impl FileLockManager {
 
         // Use a block to ensure conn is dropped before async call
         let release_result = {
-            let conn = self
-                .conn
-                .lock();
+            let conn = self.conn.lock();
 
             let tx = TransactionGuard::begin(&conn).map_err(|e| {
                 ErgataiError::internal(format!("Failed to begin transaction: {}", e))
@@ -1094,9 +1132,7 @@ impl FileLockManager {
     pub fn is_file_locked(&self, file_path: &str) -> Result<bool, ErgataiError> {
         let normalized_path = self.validate_and_normalize_path(file_path)?;
 
-        let conn = self
-            .conn
-            .lock();
+        let conn = self.conn.lock();
 
         let is_locked: bool = conn
             .query_row(
@@ -1121,9 +1157,7 @@ impl FileLockManager {
     ) -> Result<Option<(String, String)>, ErgataiError> {
         let normalized_path = self.validate_and_normalize_path(file_path)?;
 
-        let conn = self
-            .conn
-            .lock();
+        let conn = self.conn.lock();
 
         match conn.query_row(
             "SELECT agent_id, session_id FROM file_locks
@@ -1202,7 +1236,10 @@ impl FileLockManager {
             let mut cache = self.active_write_locks_cache.write();
             if let Some(entry) = cache.get(normalized_path) {
                 match entry {
-                    LockCacheEntry::Locked { agent_id, session_id } => {
+                    LockCacheEntry::Locked {
+                        agent_id,
+                        session_id,
+                    } => {
                         return Ok((true, Some((agent_id.clone(), session_id.clone()))));
                     }
                     LockCacheEntry::Unlocked { observed_at }
@@ -1335,9 +1372,7 @@ impl FileLockManager {
     pub fn update_heartbeat(&self, token_id: &str) -> Result<(), ErgataiError> {
         let now = Utc::now().to_rfc3339();
 
-        let conn = self
-            .conn
-            .lock();
+        let conn = self.conn.lock();
 
         // Use transaction for atomicity (M3 fix)
         let tx = TransactionGuard::begin(&conn)
@@ -1496,9 +1531,7 @@ impl FileLockManager {
         mode: Option<&str>,
         reason: Option<&str>,
     ) -> Result<(), ErgataiError> {
-        let conn = self
-            .conn
-            .lock();
+        let conn = self.conn.lock();
 
         let now = Utc::now().to_rfc3339();
 
@@ -1517,9 +1550,7 @@ impl FileLockManager {
     /// Removes entries older than the specified number of days.
     /// Returns the number of entries deleted.
     pub fn cleanup_old_audit_logs(&self, days_to_keep: u32) -> Result<usize, ErgataiError> {
-        let conn = self
-            .conn
-            .lock();
+        let conn = self.conn.lock();
 
         let cutoff = Utc::now() - chrono::Duration::days(days_to_keep as i64);
         let deleted = conn
@@ -1544,9 +1575,7 @@ impl FileLockManager {
     ///
     /// Returns all tokens with status "ACTIVE".
     pub fn get_active_tokens(&self) -> Result<Vec<SystemToken>, ErgataiError> {
-        let conn = self
-            .conn
-            .lock();
+        let conn = self.conn.lock();
 
         let mut stmt = conn
             .prepare(
@@ -1613,9 +1642,7 @@ impl FileLockManager {
         &self,
         session_id: &str,
     ) -> Result<Vec<SystemToken>, ErgataiError> {
-        let conn = self
-            .conn
-            .lock();
+        let conn = self.conn.lock();
 
         let mut stmt = conn
             .prepare(
@@ -1679,9 +1706,7 @@ impl FileLockManager {
 
     /// Get all locks held by a token (for reclaim on timeout).
     pub fn get_locks_by_token(&self, token_id: &str) -> Result<Vec<FileLock>, ErgataiError> {
-        let conn = self
-            .conn
-            .lock();
+        let conn = self.conn.lock();
 
         let mut stmt = conn
             .prepare(
@@ -1758,9 +1783,7 @@ impl FileLockManager {
     /// this queries by session_id — which is what the watchdog needs
     /// when reclaiming all locks for a disconnected agent session.
     pub fn get_locks_by_session(&self, session_id: &str) -> Result<Vec<FileLock>, ErgataiError> {
-        let conn = self
-            .conn
-            .lock();
+        let conn = self.conn.lock();
 
         let mut stmt = conn
             .prepare(
@@ -1795,9 +1818,7 @@ impl FileLockManager {
     /// Test helper: Set heartbeat to a past time for testing timeout scenarios
     #[cfg(test)]
     pub fn set_heartbeat_past(&self, token_id: &str, seconds_ago: i64) -> Result<(), ErgataiError> {
-        let conn = self
-            .conn
-            .lock();
+        let conn = self.conn.lock();
 
         // Use strftime to format as RFC3339 (ISO 8601 with timezone)
         conn.execute(
@@ -1814,9 +1835,7 @@ impl FileLockManager {
         &self,
         system_token_id: &str,
     ) -> Result<Vec<FileToken>, ErgataiError> {
-        let conn = self
-            .conn
-            .lock();
+        let conn = self.conn.lock();
 
         let mut stmt = conn
             .prepare(
@@ -1863,9 +1882,7 @@ impl FileLockManager {
     ///
     /// Returns a list of all currently active file locks across all agents.
     pub fn get_all_active_locks(&self) -> Result<Vec<FileLock>, ErgataiError> {
-        let conn = self
-            .conn
-            .lock();
+        let conn = self.conn.lock();
 
         let mut stmt = conn
             .prepare(
@@ -2051,9 +2068,7 @@ impl FileLockManager {
 
     /// Mark a token as expired (for watchdog timeout handling).
     pub fn expire_token(&self, token_id: &str) -> Result<(), ErgataiError> {
-        let conn = self
-            .conn
-            .lock();
+        let conn = self.conn.lock();
 
         conn.execute(
             "UPDATE system_tokens SET status = 'EXPIRED' WHERE id = ?1",
@@ -2072,9 +2087,7 @@ impl FileLockManager {
         &self,
         session_id: &str,
     ) -> Result<FileToken, ErgataiError> {
-        let conn = self
-            .conn
-            .lock();
+        let conn = self.conn.lock();
 
         let mut stmt = conn
             .prepare(
@@ -2119,9 +2132,7 @@ impl FileLockManager {
         &self,
         session_id: &str,
     ) -> Result<SystemToken, ErgataiError> {
-        let conn = self
-            .conn
-            .lock();
+        let conn = self.conn.lock();
 
         let mut stmt = conn
             .prepare(
@@ -2158,9 +2169,7 @@ impl FileLockManager {
         // Validate scope size (M9 fix): count matching files and reject if over limit
         self.validate_scope_size(&token.scope)?;
 
-        let conn = self
-            .conn
-            .lock();
+        let conn = self.conn.lock();
 
         conn.execute(
             "INSERT INTO file_tokens (
@@ -2196,9 +2205,7 @@ impl FileLockManager {
 
     /// Find an active FileToken by token_id.
     pub fn find_active_file_token_by_id(&self, token_id: &str) -> Result<FileToken, ErgataiError> {
-        let conn = self
-            .conn
-            .lock();
+        let conn = self.conn.lock();
 
         let mut stmt = conn
             .prepare(
@@ -2243,10 +2250,7 @@ impl FileLockManager {
     ) -> Result<oneshot::Receiver<Result<(), String>>, ErgataiError> {
         let (tx, rx) = oneshot::channel();
         let mut waiters = self.waiters.lock();
-        waiters
-            .entry(file_path.to_string())
-            .or_default()
-            .push(tx);
+        waiters.entry(file_path.to_string()).or_default().push(tx);
         debug!("Added waiter for file {}", file_path);
         Ok(rx)
     }
@@ -2378,9 +2382,7 @@ impl FileLockManager {
         // Normalize path to match database storage format
         let normalized_path = self.validate_and_normalize_path(file_path)?;
 
-        let conn = self
-            .conn
-            .lock();
+        let conn = self.conn.lock();
 
         let has_lock: bool = conn
             .query_row(
@@ -2648,9 +2650,7 @@ impl FileLockManager {
 
         // Step 1: Verify current READ lock exists
         {
-            let conn = self
-                .conn
-                .lock();
+            let conn = self.conn.lock();
             let mode: Option<String> = match conn.query_row(
                 "SELECT mode FROM file_locks
                  WHERE token_id = ?1 AND file_path = ?2 AND status = 'ACTIVE'
@@ -2778,9 +2778,7 @@ impl FileLockManager {
             "Downgrading lock from WRITE to READ"
         );
 
-        let conn = self
-            .conn
-            .lock();
+        let conn = self.conn.lock();
 
         let tx = TransactionGuard::begin(&conn)
             .map_err(|e| ErgataiError::internal(format!("Failed to begin transaction: {}", e)))?;
