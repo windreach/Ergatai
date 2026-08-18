@@ -342,6 +342,60 @@ pub struct SystemTokenPayload {
     pub timestamp: u64,
 }
 
+/// Outcome of a fanotify permission decision.
+///
+/// Published by the ergatai-lock enforcer on every `open()` decision so
+/// downstream consumers (audit, UI) can observe kernel-level enforcement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum EnforcementAction {
+    /// The open was allowed (file not locked, caller is holder, or caller is
+    /// a non-agent / allowlisted PID).
+    Allowed,
+    /// The open was denied because the file is locked by another agent.
+    Denied,
+    /// The enforcer encountered an error while deciding; access was allowed
+    /// (fail-open) but the error is surfaced for diagnostics.
+    Errored,
+}
+
+impl std::fmt::Display for EnforcementAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EnforcementAction::Allowed => write!(f, "ALLOWED"),
+            EnforcementAction::Denied => write!(f, "DENIED"),
+            EnforcementAction::Errored => write!(f, "ERRORED"),
+        }
+    }
+}
+
+/// Kernel-level enforcement event: fanotify enforcer → observers.
+///
+/// Published on `ergatai.file.enforce.{project_id}` (FILE_EVENTS stream)
+/// whenever the enforcer makes a decision. Consumers can use this to build
+/// audit trails, dashboards, or trigger alerts on repeated denials.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileEnforcementPayload {
+    /// File path (relative to project root, or absolute if relative resolution failed).
+    pub file_path: String,
+    /// PID of the process that called open().
+    pub pid: u32,
+    /// Resolved agent ID, if the PID belongs to a known agent.
+    pub agent_id: Option<String>,
+    /// Resolved session ID, if known.
+    pub session_id: Option<String>,
+    /// Decision outcome.
+    pub action: EnforcementAction,
+    /// Agent ID of the current WRITE lock holder (if denied).
+    pub holder_agent_id: Option<String>,
+    /// Session ID of the current WRITE lock holder (if denied).
+    pub holder_session_id: Option<String>,
+    /// Human-readable reason for the decision.
+    pub reason: String,
+    /// Timestamp (Unix epoch seconds).
+    pub timestamp: u64,
+}
+
 /// Enum wrapping all event types — useful for a single subscriber
 /// that wants to handle multiple event kinds.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -365,6 +419,8 @@ pub enum DagEvent {
     FileReady(FileReadyPayload),
     FileError(FileErrorPayload),
     SystemToken(SystemTokenPayload),
+    /// Kernel-level enforcement event (fanotify decisions).
+    FileEnforcement(FileEnforcementPayload),
 }
 
 #[cfg(test)]

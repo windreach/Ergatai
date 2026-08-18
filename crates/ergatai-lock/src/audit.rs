@@ -5,9 +5,10 @@
 
 use chrono::{DateTime, Duration, Utc};
 use ergatai_error::ErgataiError;
+use parking_lot::Mutex;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tracing::info;
 
 /// Audit log entry
@@ -138,8 +139,7 @@ impl AuditManager {
     ) -> Result<Vec<AuditEntry>, ErgataiError> {
         let conn = self
             .conn
-            .lock()
-            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
+            .lock();
 
         let mut query = String::from(
             "SELECT timestamp, agent_id, session_id, action, file_path, mode, reason
@@ -205,8 +205,7 @@ impl AuditManager {
     pub fn get_stats(&self, period_days: Option<u32>) -> Result<FileAccessStats, ErgataiError> {
         let conn = self
             .conn
-            .lock()
-            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
+            .lock();
         self.get_stats_inner(&conn, period_days)
     }
 
@@ -299,8 +298,7 @@ impl AuditManager {
 
         let conn = self
             .conn
-            .lock()
-            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
+            .lock();
 
         let now = Utc::now();
         let period_start = now - Duration::days(period_days as i64);
@@ -510,8 +508,7 @@ impl AuditManager {
     pub fn cleanup_old_audit_logs(&self, days_to_keep: u32) -> Result<usize, ErgataiError> {
         let conn = self
             .conn
-            .lock()
-            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
+            .lock();
 
         let cutoff = (Utc::now() - Duration::days(days_to_keep as i64)).to_rfc3339();
 
@@ -561,8 +558,7 @@ impl AuditManager {
 
         let conn = self
             .conn
-            .lock()
-            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
+            .lock();
 
         let cutoff = (Utc::now() - Duration::days(months_to_keep as i64 * 30)).to_rfc3339();
 
@@ -716,8 +712,7 @@ impl AuditManager {
     pub fn enforce_row_limit(&self, max_rows: u64) -> Result<usize, ErgataiError> {
         let conn = self
             .conn
-            .lock()
-            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
+            .lock();
 
         // Count current rows
         let count: u64 = conn.query_row("SELECT COUNT(*) FROM audit_log", [], |row| row.get(0))?;
@@ -751,7 +746,8 @@ impl AuditManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
+    use parking_lot::Mutex;
+    use std::sync::Arc;
     use tempfile::TempDir;
 
     fn setup_test_db() -> (TempDir, AuditManager) {
@@ -786,7 +782,7 @@ mod tests {
 
         // Insert some audit entries
         {
-            let conn = manager.conn.lock().unwrap();
+            let conn = manager.conn.lock();
             conn.execute(
                 "INSERT INTO audit_log (timestamp, agent_id, session_id, action, file_path, mode)
                  VALUES (datetime('now'), 'agent1', 'session1', 'LOCK_ACQUIRED', 'test.rs', 'WRITE')",
@@ -810,7 +806,7 @@ mod tests {
 
         // Insert some audit entries
         {
-            let conn = manager.conn.lock().unwrap();
+            let conn = manager.conn.lock();
             conn.execute(
                 "INSERT INTO audit_log (timestamp, agent_id, session_id, action, file_path, mode)
                  VALUES (datetime('now'), 'agent1', 'session1', 'LOCK_ACQUIRED', 'test1.rs', 'WRITE')",
@@ -844,7 +840,7 @@ mod tests {
 
         // Insert audit entries with different actions and files
         {
-            let conn = manager.conn.lock().unwrap();
+            let conn = manager.conn.lock();
             conn.execute(
                 "INSERT INTO audit_log (timestamp, agent_id, session_id, action, file_path, mode)
                  VALUES (datetime('now'), 'agent1', 'session1', 'LOCK_ACQUIRED', 'test.rs', 'WRITE')",
@@ -888,7 +884,7 @@ mod tests {
 
         // Insert audit entries
         {
-            let conn = manager.conn.lock().unwrap();
+            let conn = manager.conn.lock();
             // Normal operations
             for i in 0..5 {
                 conn.execute(
@@ -921,7 +917,7 @@ mod tests {
 
         // Insert suspicious activities
         {
-            let conn = manager.conn.lock().unwrap();
+            let conn = manager.conn.lock();
             // High conflict rate agent
             for _i in 0..20 {
                 conn.execute(
@@ -963,7 +959,7 @@ mod tests {
 
         // Insert audit entries for multiple agents
         {
-            let conn = manager.conn.lock().unwrap();
+            let conn = manager.conn.lock();
             // Agent 1: 10 accesses
             for i in 0..10 {
                 conn.execute(
@@ -994,7 +990,7 @@ mod tests {
 
         // Insert audit entries with different timestamps
         {
-            let conn = manager.conn.lock().unwrap();
+            let conn = manager.conn.lock();
             // Recent entries (within 7 days)
             conn.execute(
                 "INSERT INTO audit_log (timestamp, agent_id, session_id, action, file_path, mode)
@@ -1044,7 +1040,7 @@ mod tests {
         let (_temp_dir, manager) = setup_test_db();
 
         {
-            let conn = manager.conn.lock().unwrap();
+            let conn = manager.conn.lock();
             // Old entry (40 days ago)
             conn.execute(
                 "INSERT INTO audit_log (timestamp, agent_id, session_id, action, file_path, mode)
@@ -1072,7 +1068,7 @@ mod tests {
         let (_temp_dir, manager) = setup_test_db();
 
         {
-            let conn = manager.conn.lock().unwrap();
+            let conn = manager.conn.lock();
             for i in 0..20 {
                 conn.execute(
                     "INSERT INTO audit_log (timestamp, agent_id, session_id, action, file_path, mode)
@@ -1186,7 +1182,7 @@ mod tests {
         let (_temp_dir, manager) = setup_test_db();
 
         {
-            let conn = manager.conn.lock().unwrap();
+            let conn = manager.conn.lock();
             conn.execute(
                 "INSERT INTO audit_log (timestamp, agent_id, session_id, action, file_path, mode)
                  VALUES (datetime('now'), 'agent-x', 's1', 'LOCK_ACQUIRED', 'target.rs', 'WRITE')",
@@ -1238,7 +1234,7 @@ mod tests {
         let (_temp_dir, manager) = setup_test_db();
 
         {
-            let conn = manager.conn.lock().unwrap();
+            let conn = manager.conn.lock();
             for i in 0..20 {
                 conn.execute(
                     "INSERT INTO audit_log (timestamp, agent_id, session_id, action, file_path, mode)
@@ -1260,7 +1256,7 @@ mod tests {
         let (_temp_dir, manager) = setup_test_db();
 
         {
-            let conn = manager.conn.lock().unwrap();
+            let conn = manager.conn.lock();
             conn.execute(
                 "INSERT INTO audit_log (timestamp, agent_id, session_id, action, file_path, mode)
                  VALUES (datetime('now'), 'a1', 'sess-A', 'LOCK_ACQUIRED', 'x.rs', 'WRITE')",
@@ -1297,7 +1293,7 @@ mod tests {
         let (_temp_dir, manager) = setup_test_db();
 
         {
-            let conn = manager.conn.lock().unwrap();
+            let conn = manager.conn.lock();
             conn.execute(
                 "INSERT INTO audit_log (timestamp, agent_id, session_id, action, file_path, mode, reason)
                  VALUES (datetime('now'), 'agent', 'session', 'LOCK_ACQUIRED', 'path/with spaces/file.rs', 'WRITE', 'reason with \"quotes\"')",

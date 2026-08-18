@@ -30,6 +30,7 @@ pub use events::{
     AgentMessagePayload,
     DagCompletePayload,
     DagEvent,
+    EnforcementAction,
     FileAccessApprovePayload,
     FileAccessDenyPayload,
     FileAccessEscalatePayload,
@@ -40,6 +41,8 @@ pub use events::{
     FileAccessRequestPayload,
     FileAccessRevokePayload,
     FileConflictArbitratePayload,
+    // Kernel-level enforcement event (fanotify)
+    FileEnforcementPayload,
     FileErrorPayload,
     FileReadyPayload,
     NodeCompletePayload,

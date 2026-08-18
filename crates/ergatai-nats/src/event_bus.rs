@@ -323,6 +323,18 @@ impl EventBus {
         self.publish(&subject, payload).await
     }
 
+    /// Publish a kernel-level enforcement event (fanotify decision).
+    ///
+    /// Subject: `ergatai.file.enforce.{project_id}` on the FILE_EVENTS stream.
+    pub async fn publish_file_enforcement(
+        &self,
+        project_id: &str,
+        payload: &crate::events::FileEnforcementPayload,
+    ) -> ErgataiResult<()> {
+        let subject = format!("ergatai.file.enforce.{}", sanitize_agent_name(project_id));
+        self.publish(&subject, payload).await
+    }
+
     // ── File Access Control subscribe helpers ──
 
     /// Subscribe to file access requests (FileLockManager)

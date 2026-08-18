@@ -6,11 +6,12 @@
 use chrono::{DateTime, Utc};
 use ergatai_error::ErgataiError;
 use futures_util::StreamExt;
+use parking_lot::Mutex;
 use rusqlite::{params, Connection};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
 use tracing::{debug, error, info, warn};
@@ -162,6 +163,44 @@ pub struct FileLockManager {
     /// Key: `"{agent_id}:{file_path}:{mode}"` — prevents duplicate NATS messages
     /// when the same agent retries the same file access request within the timeout window.
     pending_request_keys: Arc<Mutex<HashMap<String, (String, Instant)>>>,
+
+    /// In-memory cache of active WRITE locks for fast fanotify decision path.
+    ///
+    /// Key: normalized file path
+    /// Value: [`LockCacheEntry`] — either a known lock holder, or a "known unlocked"
+    /// entry with a timestamp (negative cache).
+    ///
+    /// This cache is updated whenever a WRITE lock is acquired or released.
+    /// The fanotify decision path checks this cache first to avoid database access
+    /// for the common case (unlocked files). Falls back to database query on cache miss
+    /// or stale entry. Negative entries are honored for `LOCK_CACHE_NEGATIVE_TTL` to
+    /// avoid hammering SQLite on every `open()` of an unlocked file.
+    active_write_locks_cache: Arc<parking_lot::RwLock<HashMap<String, LockCacheEntry>>>,
+}
+
+/// TTL for negative ("known unlocked") cache entries. 50ms is short enough to
+/// react quickly to new lock acquisitions (the acquire path always invalidates
+/// any stale negative entry before inserting the positive one), but long enough
+/// to absorb bursts of `open()` calls on unlocked files.
+const LOCK_CACHE_NEGATIVE_TTL: Duration = Duration::from_millis(50);
+
+/// Entry in [`FileLockManager::active_write_locks_cache`].
+///
+/// Either a known WRITE lock holder (positive) or a "known unlocked" marker
+/// with a timestamp (negative). Negative entries let the fanotify hot path
+/// skip SQLite for unlocked files — the dominant case under normal workloads.
+#[derive(Debug, Clone)]
+enum LockCacheEntry {
+    /// A WRITE lock is currently held by (agent_id, session_id).
+    Locked {
+        agent_id: String,
+        session_id: String,
+    },
+    /// No WRITE lock was observed at `observed_at`. Valid until
+    /// `observed_at + LOCK_CACHE_NEGATIVE_TTL`.
+    Unlocked {
+        observed_at: Instant,
+    },
 }
 
 impl FileLockManager {
@@ -223,6 +262,7 @@ impl FileLockManager {
             pending_approvals: Arc::new(Mutex::new(HashMap::new())),
             disconnected_sessions: Arc::new(Mutex::new(HashMap::new())),
             pending_request_keys: Arc::new(Mutex::new(HashMap::new())),
+            active_write_locks_cache: Arc::new(parking_lot::RwLock::new(HashMap::new())),
         })
     }
 
@@ -347,8 +387,7 @@ impl FileLockManager {
     pub fn register_system_token(&self, token: &SystemToken) -> Result<(), ErgataiError> {
         let conn = self
             .conn
-            .lock()
-            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
+            .lock();
 
         conn.execute(
             "INSERT INTO system_tokens (
@@ -380,8 +419,7 @@ impl FileLockManager {
     pub fn get_system_token(&self, session_id: &str) -> Result<Option<SystemToken>, ErgataiError> {
         let conn = self
             .conn
-            .lock()
-            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
+            .lock();
 
         let mut stmt = conn
             .prepare(
@@ -484,8 +522,7 @@ impl FileLockManager {
         let conflict_info = {
             let conn = self
                 .conn
-                .lock()
-                .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
+                .lock();
 
             // Read-only transaction for conflict check; auto-rolls back on drop.
             let _tx = TransactionGuard::begin(&conn).map_err(|e| {
@@ -625,14 +662,14 @@ impl FileLockManager {
         // No conflict, proceed with lock acquisition
         let conn = self
             .conn
-            .lock()
-            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
+            .lock();
 
         let tx = TransactionGuard::begin(&conn)
             .map_err(|e| ErgataiError::internal(format!("Failed to begin transaction: {}", e)))?;
 
         // Clear any stale retry count for this (file, agent)
-        if let Ok(mut tracker) = self.retry_tracker.lock() {
+        {
+            let mut tracker = self.retry_tracker.lock();
             tracker.remove(&(normalized_path.clone(), token.agent_id.clone()));
         }
 
@@ -688,6 +725,18 @@ impl FileLockManager {
         tx.commit()
             .map_err(|e| ErgataiError::internal(format!("Failed to commit: {}", e)))?;
 
+        // Update the in-memory cache for WRITE locks (fast path for fanotify)
+        if token.mode == FileMode::Write {
+            let mut cache = self.active_write_locks_cache.write();
+            cache.insert(
+                normalized_path.clone(),
+                LockCacheEntry::Locked {
+                    agent_id: token.agent_id.clone(),
+                    session_id: token.session_id.clone(),
+                },
+            );
+        }
+
         info!(
             "Agent {} acquired {:?} lock on {}",
             token.agent_id, token.mode, file_path
@@ -715,8 +764,7 @@ impl FileLockManager {
 
         let conn = self
             .conn
-            .lock()
-            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
+            .lock();
 
         let tx = TransactionGuard::begin(&conn)
             .map_err(|e| ErgataiError::internal(format!("Failed to begin transaction: {}", e)))?;
@@ -778,6 +826,18 @@ impl FileLockManager {
         tx.commit()
             .map_err(|e| ErgataiError::internal(format!("Failed to commit: {}", e)))?;
 
+        // Update the in-memory cache for WRITE locks (fast path for fanotify)
+        if token.mode == FileMode::Write {
+            let mut cache = self.active_write_locks_cache.write();
+            cache.insert(
+                normalized_path.clone(),
+                LockCacheEntry::Locked {
+                    agent_id: token.agent_id.clone(),
+                    session_id: token.session_id.clone(),
+                },
+            );
+        }
+
         info!(
             "Agent {} acquired {:?} lock on {} (main agent approved)",
             token.agent_id, token.mode, file_path
@@ -798,8 +858,7 @@ impl FileLockManager {
     ) -> Result<bool, ErgataiError> {
         let conn = self
             .conn
-            .lock()
-            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
+            .lock();
 
         let tx = TransactionGuard::begin(&conn)
             .map_err(|e| ErgataiError::internal(format!("Failed to begin transaction: {}", e)))?;
@@ -811,16 +870,14 @@ impl FileLockManager {
         let new_retry_count = {
             let tracker = self
                 .retry_tracker
-                .lock()
-                .map_err(|e| ErgataiError::internal(format!("retry_tracker poisoned: {}", e)))?;
+                .lock();
             tracker.get(&key_new).copied().unwrap_or(0)
         };
 
         // Check if new requester has exceeded max retries
         if new_retry_count >= crate::conflict_arbitration::MAX_RETRIES {
-            if let Ok(mut tracker) = self.retry_tracker.lock() {
-                tracker.remove(&key_new);
-            }
+            let mut tracker = self.retry_tracker.lock();
+            tracker.remove(&key_new);
             return Err(ErgataiError::LockConflict(format!(
                 "File {} lock conflict: agent {} exceeded max retries ({})",
                 file_path,
@@ -837,8 +894,7 @@ impl FileLockManager {
             );
             let tracker = self
                 .retry_tracker
-                .lock()
-                .map_err(|e| ErgataiError::internal(format!("retry_tracker poisoned: {}", e)))?;
+                .lock();
             tracker.get(&key_curr).copied().unwrap_or(0)
         };
 
@@ -852,9 +908,7 @@ impl FileLockManager {
         match decision {
             crate::conflict_arbitration::ArbitrationDecision::KeepWithCurrentHolder => {
                 let new_count = {
-                    let mut tracker = self.retry_tracker.lock().map_err(|e| {
-                        ErgataiError::internal(format!("retry_tracker poisoned: {}", e))
-                    })?;
+                    let mut tracker = self.retry_tracker.lock();
                     let count = tracker.entry(key_new).or_insert(0);
                     *count += 1;
                     *count
@@ -898,7 +952,8 @@ impl FileLockManager {
                     ))
                 })?;
 
-                if let Ok(mut tracker) = self.retry_tracker.lock() {
+                {
+                    let mut tracker = self.retry_tracker.lock();
                     tracker.remove(&key_new);
                 }
 
@@ -916,13 +971,21 @@ impl FileLockManager {
                         normalized_path, e
                     ))
                 })?;
+
+                // Invalidate the in-memory lock cache: the previous holder's WRITE
+                // lock has been expired, so the cache must no longer claim it's held.
+                // Without this, the fanotify enforcer continues to DENY the new
+                // requester (and everyone else) based on a stale entry.
+                {
+                    let mut cache = self.active_write_locks_cache.write();
+                    cache.remove(&normalized_path);
+                }
+
                 Ok(true) // Continue with lock acquisition
             }
             crate::conflict_arbitration::ArbitrationDecision::RejectBoth => {
                 let new_count = {
-                    let mut tracker = self.retry_tracker.lock().map_err(|e| {
-                        ErgataiError::internal(format!("retry_tracker poisoned: {}", e))
-                    })?;
+                    let mut tracker = self.retry_tracker.lock();
                     let count = tracker.entry(key_new).or_insert(0);
                     *count += 1;
                     *count
@@ -952,19 +1015,18 @@ impl FileLockManager {
         let release_result = {
             let conn = self
                 .conn
-                .lock()
-                .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
+                .lock();
 
             let tx = TransactionGuard::begin(&conn).map_err(|e| {
                 ErgataiError::internal(format!("Failed to begin transaction: {}", e))
             })?;
 
-            // Get lock info for audit
-            let lock_info: Option<(String, String)> = match conn.query_row(
-                "SELECT agent_id, session_id FROM file_locks
+            // Get lock info for audit (including mode, to correctly invalidate cache)
+            let lock_info: Option<(String, String, String)> = match conn.query_row(
+                "SELECT agent_id, session_id, mode FROM file_locks
                  WHERE token_id = ?1 AND file_path = ?2 AND status = 'ACTIVE'",
                 params![token_id, normalized_path],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             ) {
                 Ok(info) => Some(info),
                 Err(rusqlite::Error::QueryReturnedNoRows) => None,
@@ -976,7 +1038,7 @@ impl FileLockManager {
                 }
             };
 
-            if let Some((agent_id, session_id)) = lock_info {
+            if let Some((agent_id, session_id, mode)) = lock_info {
                 // Mark lock as expired
                 conn.execute(
                     "UPDATE file_locks SET status = 'EXPIRED'
@@ -998,6 +1060,15 @@ impl FileLockManager {
 
                 tx.commit()
                     .map_err(|e| ErgataiError::internal(format!("Failed to commit: {}", e)))?;
+
+                // Only invalidate the in-memory cache for WRITE locks. READ locks
+                // don't affect the fanotify enforcer (which only blocks WRITE-open
+                // conflicts); removing the cache entry for a READ release would
+                // wrongly allow access to a file that still has an active WRITE lock.
+                if mode == "WRITE" || mode == "ADMIN" {
+                    let mut cache = self.active_write_locks_cache.write();
+                    cache.remove(&normalized_path);
+                }
 
                 info!("Released lock on {}", file_path);
                 Ok(())
@@ -1025,8 +1096,7 @@ impl FileLockManager {
 
         let conn = self
             .conn
-            .lock()
-            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
+            .lock();
 
         let is_locked: bool = conn
             .query_row(
@@ -1038,6 +1108,202 @@ impl FileLockManager {
             .map_err(|e| ErgataiError::internal(format!("Failed to query lock: {}", e)))?;
 
         Ok(is_locked)
+    }
+
+    /// Get the holder of an active WRITE lock on `file_path`.
+    ///
+    /// Returns `(agent_id, session_id)` if a WRITE or ADMIN lock exists,
+    /// `None` if the file is not locked. Used by the fanotify enforcer to
+    /// decide whether a caller is the lock holder.
+    pub fn get_write_lock_holder(
+        &self,
+        file_path: &str,
+    ) -> Result<Option<(String, String)>, ErgataiError> {
+        let normalized_path = self.validate_and_normalize_path(file_path)?;
+
+        let conn = self
+            .conn
+            .lock();
+
+        match conn.query_row(
+            "SELECT agent_id, session_id FROM file_locks
+             WHERE file_path = ?1 AND mode = 'WRITE' AND status = 'ACTIVE'
+             LIMIT 1",
+            params![normalized_path],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        ) {
+            Ok(pair) => Ok(Some(pair)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(ErgataiError::internal(format!(
+                "Failed to query lock holder: {}",
+                e
+            ))),
+        }
+    }
+
+    /// Check file lock status and get holder info in a single query.
+    ///
+    /// This is an optimized method for the fanotify decision path that combines
+    /// `is_file_locked()` and `get_write_lock_holder()` into a single database
+    /// query, reducing mutex acquisitions from 2 to 1.
+    ///
+    /// Uses an in-memory cache (positive + negative entries) as a fast path to
+    /// avoid database access for the common cases (unlocked files, or a stable
+    /// lock holder). Falls back to database query on cache miss or stale entry.
+    ///
+    /// # Deadlock resistance
+    ///
+    /// The SQLite fallback uses `try_lock()`. If the connection mutex is held
+    /// by another task (e.g., a concurrent `acquire_lock`), we fail open
+    /// immediately instead of blocking. This is critical for the fanotify hot
+    /// path: blocking here would stall the event loop, which in stalls the
+    /// kernel's `open()` queue.
+    ///
+    /// Returns `(is_locked, holder_info)` where `holder_info` is `Some((agent_id, session_id))`
+    /// if the file is locked, `None` otherwise.
+    pub fn check_file_lock_status(
+        &self,
+        file_path: &str,
+    ) -> Result<(bool, Option<(String, String)>), ErgataiError> {
+        let normalized_path = self.validate_and_normalize_path(file_path)?;
+        self.check_file_lock_status_normalized(&normalized_path)
+    }
+
+    /// Fast variant of [`check_file_lock_status`] that skips the (expensive)
+    /// `canonicalize()` call. Use this when the caller already has a
+    /// properly-normalized path — e.g., the fanotify enforcer, which derives
+    /// the relative path via `readlink /proc/self/fd/{fd}` + `strip_prefix`.
+    ///
+    /// Same deadlock-resistant semantics as the canonical variant.
+    pub fn check_file_lock_status_fast(
+        &self,
+        normalized_path: &str,
+    ) -> Result<(bool, Option<(String, String)>), ErgataiError> {
+        self.check_file_lock_status_normalized(normalized_path)
+    }
+
+    /// Shared implementation for the two `check_file_lock_status` entry points.
+    ///
+    /// Invariants on `normalized_path`: it must already be relative to the project
+    /// root, with symlinks resolved. Both callers guarantee this (one via
+    /// `validate_and_normalize_path`, the other via `readlink + strip_prefix`).
+    fn check_file_lock_status_normalized(
+        &self,
+        normalized_path: &str,
+    ) -> Result<(bool, Option<(String, String)>), ErgataiError> {
+        let now = Instant::now();
+
+        // Fast path: check the in-memory cache first (no database access, no mutex).
+        //
+        // Both positive (Locked) and negative (Unlocked-within-TTL) entries are
+        // honored. Negative entries bound the DB load from bursts of open() calls
+        // on unlocked files — the dominant case under normal workloads.
+        {
+            let cache = self.active_write_locks_cache.read();
+            if let Some(entry) = cache.get(normalized_path) {
+                match entry {
+                    LockCacheEntry::Locked { agent_id, session_id } => {
+                        return Ok((true, Some((agent_id.clone(), session_id.clone()))));
+                    }
+                    LockCacheEntry::Unlocked { observed_at }
+                        if now.duration_since(*observed_at) < LOCK_CACHE_NEGATIVE_TTL =>
+                    {
+                        return Ok((false, None));
+                    }
+                    LockCacheEntry::Unlocked { .. } => {
+                        // Stale negative entry — fall through to DB refresh.
+                    }
+                }
+            }
+        }
+
+        // Cache miss / stale — query the database.
+        //
+        // IMPORTANT: use try_lock(), NOT lock(). The fanotify decision runs on a
+        // tokio worker (via block_in_place); blocking on the SQLite mutex here
+        // would deadlock if another task holds it. On contention we fail open —
+        // a missed denial is far less harmful than a system-wide deadlock.
+        let conn = match self.conn.try_lock() {
+            Some(guard) => guard,
+            None => {
+                debug!(
+                    path = normalized_path,
+                    "fanotify: SQLite mutex busy, failing open to prevent deadlock"
+                );
+                return Ok((false, None));
+            }
+        };
+
+        match conn.query_row(
+            "SELECT agent_id, session_id FROM file_locks
+             WHERE file_path = ?1 AND mode = 'WRITE' AND status = 'ACTIVE'
+             LIMIT 1",
+            params![normalized_path],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        ) {
+            Ok((agent_id, session_id)) => {
+                // Update cache on database hit
+                drop(conn);
+                let mut cache = self.active_write_locks_cache.write();
+                cache.insert(
+                    normalized_path.to_string(),
+                    LockCacheEntry::Locked {
+                        agent_id: agent_id.clone(),
+                        session_id: session_id.clone(),
+                    },
+                );
+                Ok((true, Some((agent_id, session_id))))
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                // Cache the negative result so the next open() of this same file
+                // within LOCK_CACHE_NEGATIVE_TTL avoids the DB entirely.
+                drop(conn);
+                let mut cache = self.active_write_locks_cache.write();
+                cache.insert(
+                    normalized_path.to_string(),
+                    LockCacheEntry::Unlocked { observed_at: now },
+                );
+                Ok((false, None))
+            }
+            Err(e) => Err(ErgataiError::internal(format!(
+                "Failed to query lock status: {}",
+                e
+            ))),
+        }
+    }
+
+    /// Record a kernel-enforced violation with known agent identity.
+    ///
+    /// Called by the fanotify `Enforcer` when it denies a file access.
+    /// Unlike `record_violation`, this records the actual caller agent
+    /// (if resolved) and the lock holder for audit purposes.
+    pub fn record_enforced_violation(
+        &self,
+        file_path: &str,
+        caller_agent: Option<&str>,
+        holder_agent: Option<&str>,
+    ) -> Result<(), ErgataiError> {
+        let normalized_path = self
+            .validate_and_normalize_path(file_path)
+            .unwrap_or_else(|_| file_path.to_string());
+
+        let agent_id = caller_agent.unwrap_or("unknown");
+        let reason = match holder_agent {
+            Some(h) => format!(
+                "kernel-enforced: blocked access to {} locked by {}",
+                normalized_path, h
+            ),
+            None => "kernel-enforced: blocked access".to_string(),
+        };
+
+        self.log_audit(
+            agent_id,
+            "unknown", // session_id not resolved at this layer
+            "enforced_violation",
+            Some(&normalized_path),
+            Some("WRITE"),
+            Some(&reason),
+        )
     }
 
     /// Record a file access violation in the audit log.
@@ -1069,8 +1335,7 @@ impl FileLockManager {
 
         let conn = self
             .conn
-            .lock()
-            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
+            .lock();
 
         // Use transaction for atomicity (M3 fix)
         let tx = TransactionGuard::begin(&conn)
@@ -1231,8 +1496,7 @@ impl FileLockManager {
     ) -> Result<(), ErgataiError> {
         let conn = self
             .conn
-            .lock()
-            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
+            .lock();
 
         let now = Utc::now().to_rfc3339();
 
@@ -1253,8 +1517,7 @@ impl FileLockManager {
     pub fn cleanup_old_audit_logs(&self, days_to_keep: u32) -> Result<usize, ErgataiError> {
         let conn = self
             .conn
-            .lock()
-            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
+            .lock();
 
         let cutoff = Utc::now() - chrono::Duration::days(days_to_keep as i64);
         let deleted = conn
@@ -1281,8 +1544,7 @@ impl FileLockManager {
     pub fn get_active_tokens(&self) -> Result<Vec<SystemToken>, ErgataiError> {
         let conn = self
             .conn
-            .lock()
-            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
+            .lock();
 
         let mut stmt = conn
             .prepare(
@@ -1351,8 +1613,7 @@ impl FileLockManager {
     ) -> Result<Vec<SystemToken>, ErgataiError> {
         let conn = self
             .conn
-            .lock()
-            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
+            .lock();
 
         let mut stmt = conn
             .prepare(
@@ -1418,8 +1679,7 @@ impl FileLockManager {
     pub fn get_locks_by_token(&self, token_id: &str) -> Result<Vec<FileLock>, ErgataiError> {
         let conn = self
             .conn
-            .lock()
-            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
+            .lock();
 
         let mut stmt = conn
             .prepare(
@@ -1498,8 +1758,7 @@ impl FileLockManager {
     pub fn get_locks_by_session(&self, session_id: &str) -> Result<Vec<FileLock>, ErgataiError> {
         let conn = self
             .conn
-            .lock()
-            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
+            .lock();
 
         let mut stmt = conn
             .prepare(
@@ -1536,8 +1795,7 @@ impl FileLockManager {
     pub fn set_heartbeat_past(&self, token_id: &str, seconds_ago: i64) -> Result<(), ErgataiError> {
         let conn = self
             .conn
-            .lock()
-            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
+            .lock();
 
         // Use strftime to format as RFC3339 (ISO 8601 with timezone)
         conn.execute(
@@ -1556,8 +1814,7 @@ impl FileLockManager {
     ) -> Result<Vec<FileToken>, ErgataiError> {
         let conn = self
             .conn
-            .lock()
-            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
+            .lock();
 
         let mut stmt = conn
             .prepare(
@@ -1606,8 +1863,7 @@ impl FileLockManager {
     pub fn get_all_active_locks(&self) -> Result<Vec<FileLock>, ErgataiError> {
         let conn = self
             .conn
-            .lock()
-            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
+            .lock();
 
         let mut stmt = conn
             .prepare(
@@ -1795,8 +2051,7 @@ impl FileLockManager {
     pub fn expire_token(&self, token_id: &str) -> Result<(), ErgataiError> {
         let conn = self
             .conn
-            .lock()
-            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
+            .lock();
 
         conn.execute(
             "UPDATE system_tokens SET status = 'EXPIRED' WHERE id = ?1",
@@ -1817,8 +2072,7 @@ impl FileLockManager {
     ) -> Result<FileToken, ErgataiError> {
         let conn = self
             .conn
-            .lock()
-            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
+            .lock();
 
         let mut stmt = conn
             .prepare(
@@ -1865,8 +2119,7 @@ impl FileLockManager {
     ) -> Result<SystemToken, ErgataiError> {
         let conn = self
             .conn
-            .lock()
-            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
+            .lock();
 
         let mut stmt = conn
             .prepare(
@@ -1905,8 +2158,7 @@ impl FileLockManager {
 
         let conn = self
             .conn
-            .lock()
-            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
+            .lock();
 
         conn.execute(
             "INSERT INTO file_tokens (
@@ -1944,8 +2196,7 @@ impl FileLockManager {
     pub fn find_active_file_token_by_id(&self, token_id: &str) -> Result<FileToken, ErgataiError> {
         let conn = self
             .conn
-            .lock()
-            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
+            .lock();
 
         let mut stmt = conn
             .prepare(
@@ -1989,12 +2240,10 @@ impl FileLockManager {
         file_path: &str,
     ) -> Result<oneshot::Receiver<Result<(), String>>, ErgataiError> {
         let (tx, rx) = oneshot::channel();
-        let mut waiters = self.waiters.lock().map_err(|e| {
-            ErgataiError::internal(format!("Failed to acquire waiters lock: {}", e))
-        })?;
+        let mut waiters = self.waiters.lock();
         waiters
             .entry(file_path.to_string())
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(tx);
         debug!("Added waiter for file {}", file_path);
         Ok(rx)
@@ -2002,9 +2251,7 @@ impl FileLockManager {
 
     /// Notify waiters that a file is ready (WRITE completed).
     pub async fn notify_file_ready(&self, file_path: &str) -> Result<(), ErgataiError> {
-        let mut waiters = self.waiters.lock().map_err(|e| {
-            ErgataiError::internal(format!("Failed to acquire waiters lock: {}", e))
-        })?;
+        let mut waiters = self.waiters.lock();
         if let Some(waiters_list) = waiters.remove(file_path) {
             info!(
                 "Notifying {} waiters that file {} is ready",
@@ -2026,9 +2273,7 @@ impl FileLockManager {
         file_path: &str,
         reason: &str,
     ) -> Result<(), ErgataiError> {
-        let mut waiters = self.waiters.lock().map_err(|e| {
-            ErgataiError::internal(format!("Failed to acquire waiters lock: {}", e))
-        })?;
+        let mut waiters = self.waiters.lock();
         if let Some(waiters_list) = waiters.remove(file_path) {
             warn!(
                 "Notifying {} waiters that file {} has error: {}",
@@ -2133,8 +2378,7 @@ impl FileLockManager {
 
         let conn = self
             .conn
-            .lock()
-            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
+            .lock();
 
         let has_lock: bool = conn
             .query_row(
@@ -2223,7 +2467,8 @@ impl FileLockManager {
     pub fn register_session(&self) {
         let prev = self.active_session_count.fetch_add(1, Ordering::Relaxed);
         // Reset hysteresis timer — count changed
-        if let Ok(mut guard) = self.single_agent_since.lock() {
+        {
+            let mut guard = self.single_agent_since.lock();
             *guard = None;
         }
         // Note: we don't know the session_id here, so we clear all expired
@@ -2243,7 +2488,8 @@ impl FileLockManager {
     /// was marked as temporarily_disconnected, the mark is cleared.
     pub fn register_session_with_id(&self, session_id: &str) {
         // Clear disconnected mark for this specific session
-        if let Ok(mut guard) = self.disconnected_sessions.lock() {
+        {
+            let mut guard = self.disconnected_sessions.lock();
             let was_disconnected = guard.remove(session_id).is_some();
             if was_disconnected {
                 info!(
@@ -2270,7 +2516,8 @@ impl FileLockManager {
             .unwrap_or(0);
         let new = prev.saturating_sub(1);
         // Reset hysteresis timer — count changed
-        if let Ok(mut guard) = self.single_agent_since.lock() {
+        {
+            let mut guard = self.single_agent_since.lock();
             *guard = None;
         }
         info!(
@@ -2287,7 +2534,8 @@ impl FileLockManager {
     /// single-agent mode detection treats the disconnect as transient.
     pub fn unregister_session_with_id(&self, session_id: &str) {
         // Mark as temporarily disconnected
-        if let Ok(mut guard) = self.disconnected_sessions.lock() {
+        {
+            let mut guard = self.disconnected_sessions.lock();
             guard.insert(session_id.to_string(), Instant::now());
         }
         self.unregister_session();
@@ -2295,18 +2543,14 @@ impl FileLockManager {
 
     /// Clean up expired disconnected sessions (older than SESSION_STICKINESS_SECS).
     fn cleanup_disconnected_sessions(&self) {
-        if let Ok(mut guard) = self.disconnected_sessions.lock() {
-            guard.retain(|_, instant| instant.elapsed().as_secs() < SESSION_STICKINESS_SECS);
-        }
+        let mut guard = self.disconnected_sessions.lock();
+        guard.retain(|_, instant| instant.elapsed().as_secs() < SESSION_STICKINESS_SECS);
     }
 
     /// Count how many sessions are currently in the temporarily_disconnected state.
     fn recently_disconnected_count(&self) -> usize {
         self.cleanup_disconnected_sessions();
-        self.disconnected_sessions
-            .lock()
-            .map(|g| g.len())
-            .unwrap_or(0)
+        self.disconnected_sessions.lock().len()
     }
 
     /// Check whether the system is in single-agent mode.
@@ -2335,19 +2579,15 @@ impl FileLockManager {
 
         if effective_count != 1 {
             // Not single-agent — ensure timer is reset
-            if let Ok(mut guard) = self.single_agent_since.lock() {
-                if guard.is_some() {
-                    *guard = None;
-                }
+            let mut guard = self.single_agent_since.lock();
+            if guard.is_some() {
+                *guard = None;
             }
             return false;
         }
 
         // Count is 1 (and no disconnected sessions) — check or start the stabilization timer
-        let mut guard = match self.single_agent_since.lock() {
-            Ok(g) => g,
-            Err(_) => return false, // Poisoned lock — fail safe (don't bypass)
-        };
+        let mut guard = self.single_agent_since.lock();
 
         match *guard {
             Some(since) => {
@@ -2408,8 +2648,7 @@ impl FileLockManager {
         {
             let conn = self
                 .conn
-                .lock()
-                .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
+                .lock();
             let mode: Option<String> = match conn.query_row(
                 "SELECT mode FROM file_locks
                  WHERE token_id = ?1 AND file_path = ?2 AND status = 'ACTIVE'
@@ -2528,6 +2767,8 @@ impl FileLockManager {
         token: &FileToken,
         file_path: &str,
     ) -> Result<(), ErgataiError> {
+        let normalized_path = self.validate_and_normalize_path(file_path)?;
+
         info!(
             token_id = %token.id,
             file_path = file_path,
@@ -2537,8 +2778,7 @@ impl FileLockManager {
 
         let conn = self
             .conn
-            .lock()
-            .map_err(|e| ErgataiError::internal(format!("Failed to acquire lock: {}", e)))?;
+            .lock();
 
         let tx = TransactionGuard::begin(&conn)
             .map_err(|e| ErgataiError::internal(format!("Failed to begin transaction: {}", e)))?;
@@ -2548,7 +2788,7 @@ impl FileLockManager {
             "SELECT mode FROM file_locks
              WHERE token_id = ?1 AND file_path = ?2 AND status = 'ACTIVE'
              LIMIT 1",
-            params![token.id.as_str(), file_path],
+            params![token.id.as_str(), normalized_path],
             |row| row.get(0),
         ) {
             Ok(m) => Some(m),
@@ -2567,13 +2807,21 @@ impl FileLockManager {
                 conn.execute(
                     "UPDATE file_locks SET mode = 'READ', updated_at = ?1
                      WHERE token_id = ?2 AND file_path = ?3 AND status = 'ACTIVE'",
-                    params![now, token.id.as_str(), file_path],
+                    params![now, token.id.as_str(), normalized_path],
                 )
                 .map_err(|e| ErgataiError::internal(format!("Failed to downgrade lock: {}", e)))?;
 
                 tx.commit().map_err(|e| {
                     ErgataiError::internal(format!("Failed to commit downgrade: {}", e))
                 })?;
+
+                // Invalidate the in-memory cache: the WRITE lock no longer exists.
+                // Without this, the fanotify enforcer continues to Deny based on
+                // a stale "Locked" entry for a file that is now only READ-locked.
+                {
+                    let mut cache = self.active_write_locks_cache.write();
+                    cache.remove(&normalized_path);
+                }
 
                 info!(token_id = %token.id, file_path = file_path, "Lock downgraded to READ");
                 Ok(())
@@ -2646,9 +2894,7 @@ impl FileLockManager {
         });
 
         // Store the task handle for cleanup
-        let mut task_guard = self.subscription_task.lock().map_err(|e| {
-            ErgataiError::internal(format!("Failed to lock subscription task: {}", e))
-        })?;
+        let mut task_guard = self.subscription_task.lock();
         *task_guard = Some(task);
 
         info!("Successfully subscribed to NATS approval subjects");
@@ -2692,11 +2938,7 @@ impl FileLockManager {
 
         // Minimize Mutex critical section: extract sender first, then release lock before logging/sending
         let sender = {
-            // Poison-safe Mutex handling: recover data even if a previous holder panicked
-            let mut waiters = pending.lock().unwrap_or_else(|e| {
-                error!("Mutex poisoned, recovering: {}", e);
-                e.into_inner()
-            });
+            let mut waiters = pending.lock();
             waiters.remove(&request_id)
         }; // lock released here
 
@@ -2735,9 +2977,7 @@ impl FileLockManager {
 
         // Clean up stale entries and check for existing request
         {
-            let mut guard = self.pending_request_keys.lock().map_err(|e| {
-                ErgataiError::internal(format!("Failed to lock pending_request_keys: {}", e))
-            })?;
+            let mut guard = self.pending_request_keys.lock();
             // Remove entries older than 60s
             guard.retain(|_, (_, instant)| instant.elapsed().as_secs() < 60);
 
@@ -2780,8 +3020,9 @@ impl FileLockManager {
                 })?;
 
             // Record the request for idempotency
-            if let Ok(mut guard) = self.pending_request_keys.lock() {
-                guard.insert(idempotency_key, (request_id.clone(), Instant::now()));
+            {
+                let mut tracker = self.pending_request_keys.lock();
+                tracker.insert(idempotency_key, (request_id.clone(), Instant::now()));
             }
 
             info!(
@@ -2810,9 +3051,7 @@ impl FileLockManager {
 
         // Register the waiter
         {
-            let mut waiters = self.pending_approvals.lock().map_err(|e| {
-                ErgataiError::internal(format!("Failed to lock pending approvals: {}", e))
-            })?;
+            let mut waiters = self.pending_approvals.lock();
             waiters.insert(request_id.to_string(), tx);
         }
 
@@ -2831,9 +3070,7 @@ impl FileLockManager {
             }
             Err(_) => {
                 // Timeout - remove waiter and return default deny
-                let mut waiters = self.pending_approvals.lock().map_err(|e| {
-                    ErgataiError::internal(format!("Failed to lock pending approvals: {}", e))
-                })?;
+                let mut waiters = self.pending_approvals.lock();
                 waiters.remove(request_id);
 
                 warn!(request_id = %request_id, "Approval request timed out");
@@ -2852,11 +3089,10 @@ impl FileLockManager {
     ///
     /// Called during cleanup to gracefully stop the background subscription.
     pub fn shutdown_nats_subscription(&self) {
-        if let Ok(mut task_guard) = self.subscription_task.lock() {
-            if let Some(task) = task_guard.take() {
-                task.abort();
-                info!("NATS approval subscription task aborted");
-            }
+        let mut guard = self.subscription_task.lock();
+        if let Some(task) = guard.take() {
+            task.abort();
+            info!("NATS approval subscription task aborted");
         }
     }
 }
@@ -2982,7 +3218,7 @@ mod tests {
     #[tokio::test]
     async fn test_wal_mode_enabled() {
         let (manager, _temp) = create_test_manager();
-        let conn = manager.conn.lock().unwrap();
+        let conn = manager.conn.lock();
 
         let journal_mode: String = conn
             .query_row("PRAGMA journal_mode", [], |row| row.get(0))
@@ -3199,7 +3435,7 @@ mod tests {
 
         // Verify READ lock exists (check DB)
         {
-            let conn = manager.conn.lock().unwrap();
+            let conn = manager.conn.lock();
             let mode: String = conn.query_row(
                 "SELECT mode FROM file_locks WHERE token_id = ?1 AND file_path = ?2 AND status = 'ACTIVE'",
                 params![read_token.id.as_str(), "test.rs"],
@@ -3218,7 +3454,7 @@ mod tests {
         // upgrade_to_write releases the READ lock (original token_id → RELEASED)
         // and creates a new synthetic WRITE token (new token_id → ACTIVE).
         // So we query for any ACTIVE lock on this file with agent_id = "test-agent".
-        let conn = manager.conn.lock().unwrap();
+        let conn = manager.conn.lock();
         let active_write: Vec<(String, String)> = conn
             .prepare(
                 "SELECT token_id, mode FROM file_locks
@@ -3344,7 +3580,7 @@ mod tests {
         // After failure, Agent A should still have a READ lock (restored).
         // The original READ lock was released, then re-acquired with a new token.
         // Check: at least one ACTIVE lock for agent-a on test.rs with mode READ.
-        let conn = manager.conn.lock().unwrap();
+        let conn = manager.conn.lock();
         let restored: Vec<(String, String)> = conn
             .prepare(
                 "SELECT token_id, mode FROM file_locks
@@ -3400,7 +3636,7 @@ mod tests {
         manager.downgrade_to_read(&write_token, "test.rs").unwrap();
 
         // Verify mode changed to READ
-        let conn = manager.conn.lock().unwrap();
+        let conn = manager.conn.lock();
         let mode: String = conn.query_row(
             "SELECT mode FROM file_locks WHERE token_id = ?1 AND file_path = ?2 AND status = 'ACTIVE'",
             params![write_token.id.as_str(), "test.rs"],
@@ -3465,7 +3701,7 @@ mod tests {
         assert!(!manager.is_file_locked("test.txt").unwrap());
 
         // But there should be 2 ACTIVE READ locks in the DB
-        let conn = manager.conn.lock().unwrap();
+        let conn = manager.conn.lock();
         let active: Vec<(String, String)> = conn
             .prepare(
                 "SELECT agent_id, mode FROM file_locks WHERE file_path = ?1 AND status = 'ACTIVE'",
@@ -3600,7 +3836,7 @@ mod tests {
             .record_violation("test.txt", "WRITE_WITHOUT_LOCK")
             .unwrap();
 
-        let conn = manager.conn.lock().unwrap();
+        let conn = manager.conn.lock();
         let count: i32 = conn
             .query_row(
                 "SELECT COUNT(*) FROM audit_log WHERE file_path = 'test.txt' AND action = 'WRITE_WITHOUT_LOCK'",
@@ -3647,7 +3883,7 @@ mod tests {
         manager.update_heartbeat(system_token.id.as_str()).unwrap();
 
         // Verify the heartbeat was updated (it should be recent now)
-        let conn = manager.conn.lock().unwrap();
+        let conn = manager.conn.lock();
         let heartbeat: String = conn
             .query_row(
                 "SELECT heartbeat_at FROM system_tokens WHERE id = ?1",
@@ -3755,7 +3991,7 @@ mod tests {
         manager.expire_token(system_token.id.as_str()).unwrap();
 
         // System token should now be in EXPIRED status
-        let conn = manager.conn.lock().unwrap();
+        let conn = manager.conn.lock();
         let status: String = conn
             .query_row(
                 "SELECT status FROM system_tokens WHERE id = ?1",
@@ -3772,7 +4008,7 @@ mod tests {
 
         // Insert an old audit entry (100 days ago) and a fresh one
         {
-            let conn = manager.conn.lock().unwrap();
+            let conn = manager.conn.lock();
             conn.execute(
                 "INSERT INTO audit_log (timestamp, agent_id, session_id, action, file_path, mode)
                  VALUES (datetime('now', '-100 days'), 'old-agent', 's1', 'LOCK_ACQUIRED', 'old.rs', 'WRITE')",
@@ -3791,7 +4027,7 @@ mod tests {
         let deleted = manager.cleanup_old_audit_logs(30).unwrap();
         assert_eq!(deleted, 1);
 
-        let conn = manager.conn.lock().unwrap();
+        let conn = manager.conn.lock();
         let count: i32 = conn
             .query_row("SELECT COUNT(*) FROM audit_log", [], |row| row.get(0))
             .unwrap();

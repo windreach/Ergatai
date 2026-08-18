@@ -2,6 +2,11 @@
 //!
 //! Provides lazy initialization of FileLockManager, SnapshotManager, and Watchdog.
 //! Similar to NatsManager, this provides a central point for file access control.
+//!
+//! Phase 9 adds an optional [`Enforcer`] that uses Linux fanotify to enforce
+//! locks at the kernel level. The enforcer is created by
+//! [`init_file_access_with_enforcer`]; the original [`init_file_access`] leaves
+//! enforcement disabled (advisory-only mode) for backward compatibility.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -13,6 +18,8 @@ use ergatai_error::ErgataiError;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
+use crate::enforcer::{Enforcer, EnforcerConfig};
+use crate::pid_resolver::PidResolver;
 use crate::{FileLockManager, SnapshotManager, Watchdog, WatchdogConfig};
 use ergatai_error::ErgataiResult;
 use ergatai_nats::get_nats_connection;
@@ -22,6 +29,8 @@ struct ProjectFileAccess {
     lock_manager: Arc<FileLockManager>,
     snapshot_manager: Arc<SnapshotManager>,
     watchdog: Arc<RwLock<Watchdog>>,
+    /// Optional kernel-level enforcer (Phase 9). `None` in advisory-only mode.
+    enforcer: Option<Arc<Enforcer>>,
 }
 
 /// Global file access state
@@ -115,13 +124,134 @@ pub async fn init_file_access(project_id: &str, project_root: &Path) -> ErgataiR
             lock_manager,
             snapshot_manager,
             watchdog,
+            enforcer: None, // Advisory-only mode; use init_file_access_with_enforcer for enforcement.
         },
     );
 
     info!(
         project_id = project_id,
         project_root = %project_root.display(),
-        "File access control system initialized"
+        "File access control system initialized (advisory mode — no kernel enforcement)"
+    );
+
+    Ok(())
+}
+
+/// Initialize file access control with kernel-level enforcement (Phase 9).
+///
+/// Like [`init_file_access`], but also creates a fanotify-based [`Enforcer`]
+/// that intercepts `open()` calls and denies access to locked files. The
+/// `pid_resolver` maps kernel-reported PIDs to ergatai agent identities.
+///
+/// If fanotify initialization fails (non-Linux, no `CAP_SYS_ADMIN`, container),
+/// the enforcer logs a warning and disables itself. Other components continue
+/// to function normally.
+///
+/// Idempotent — calling multiple times is safe.
+pub async fn init_file_access_with_enforcer(
+    project_id: &str,
+    project_root: &Path,
+    pid_resolver: Arc<dyn PidResolver>,
+) -> ErgataiResult<()> {
+    // Fetch NATS connection BEFORE acquiring the write lock (M11 fix).
+    let nats_client = if let Some(conn) = get_nats_connection().await {
+        info!(
+            project_id = project_id,
+            "NATS available, enabling multi-agent approval flow + enforcement events"
+        );
+        Some(Arc::new(conn.client().clone()))
+    } else {
+        warn!(
+            project_id = project_id,
+            "NATS not available, running in degraded mode (no approval or enforcement events)"
+        );
+        None
+    };
+
+    let manager = file_access_manager();
+    let mut manager = manager.write().await;
+
+    if manager.projects.contains_key(project_id) {
+        info!(
+            project_id = project_id,
+            "File access control already initialized"
+        );
+        return Ok(());
+    }
+
+    let lock_db_path = project_root.join(".ergatai").join("locks.db");
+
+    let lock_db_parent = lock_db_path.parent().ok_or_else(|| {
+        ErgataiError::InvalidArgument(format!(
+            "Invalid lock_db_path has no parent: {:?}",
+            lock_db_path
+        ))
+    })?;
+    tokio::fs::create_dir_all(lock_db_parent).await?;
+
+    let lock_manager = FileLockManager::new(
+        &lock_db_path,
+        project_root.to_path_buf(),
+        nats_client.clone(),
+    )?;
+
+    if let Err(e) = lock_manager.subscribe_to_nats().await {
+        warn!(project_id = project_id, error = %e, "Failed to subscribe to NATS approval subjects, continuing without approval flow");
+    }
+
+    let lock_manager = Arc::new(lock_manager);
+
+    let snapshot_manager = SnapshotManager::new(project_root)?;
+    let snapshot_manager = Arc::new(snapshot_manager);
+
+    let watchdog_config = WatchdogConfig::default();
+    let mut watchdog = Watchdog::new(lock_manager.clone(), watchdog_config);
+    watchdog.start()?;
+    let watchdog = Arc::new(RwLock::new(watchdog));
+
+    // Create the fanotify enforcer. Fails open: if init fails, enforcer stays None.
+    let enforcer = match Enforcer::start(
+        project_root.to_path_buf(),
+        project_id.to_string(),
+        lock_manager.clone(),
+        pid_resolver,
+        nats_client,
+        EnforcerConfig::default(),
+    ) {
+        Ok(e) => {
+            let active = e.is_active();
+            info!(
+                project_id = project_id,
+                active = active,
+                "fanotify enforcer created (active = {})",
+                active
+            );
+            Some(Arc::new(e))
+        }
+        Err(e) => {
+            warn!(
+                project_id = project_id,
+                error = %e,
+                "Enforcer init failed (continuing in advisory mode)"
+            );
+            None
+        }
+    };
+
+    manager.projects.insert(
+        project_id.to_string(),
+        ProjectFileAccess {
+            lock_manager,
+            snapshot_manager,
+            watchdog,
+            enforcer,
+        },
+    );
+
+    info!(
+        project_id = project_id,
+        project_root = %project_root.display(),
+        "File access control system initialized (with kernel enforcement)"
     );
 
     Ok(())
@@ -178,16 +308,35 @@ pub async fn get_watchdog(project_id: &str) -> ErgataiResult<Arc<RwLock<Watchdog
         })
 }
 
+/// Get the fanotify Enforcer for a project, if enforcement is enabled.
+///
+/// Returns `Ok(None)` if the project was initialized in advisory-only mode
+/// (via [`init_file_access`]) or if the enforcer failed to initialize.
+pub async fn get_enforcer(project_id: &str) -> ErgataiResult<Option<Arc<Enforcer>>> {
+    let manager = file_access_manager();
+    let manager = manager.read().await;
+
+    Ok(manager
+        .projects
+        .get(project_id)
+        .and_then(|p| p.enforcer.clone()))
+}
+
 /// Shutdown file access control for a project
 pub async fn shutdown_file_access(project_id: &str) -> ErgataiResult<()> {
     let manager = file_access_manager();
     let mut manager = manager.write().await;
 
     if let Some(project) = manager.projects.remove(project_id) {
-        // Stop NATS subscription first
+        // Stop enforcer first — it's the outermost layer (kernel interception).
+        if let Some(enforcer) = project.enforcer.as_ref() {
+            enforcer.stop().await;
+        }
+
+        // Stop NATS subscription.
         project.lock_manager.shutdown_nats_subscription();
 
-        // Stop watchdog
+        // Stop watchdog.
         let mut watchdog = project.watchdog.write().await;
         watchdog.stop()?;
 

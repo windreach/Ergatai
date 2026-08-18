@@ -467,7 +467,9 @@ async fn async_main(args: Args) -> Result<()> {
             });
 
             // Initialize file access control system for multi-agent file locking
-            // Uses NATS for cross-agent approval flow when conflicts arise
+            // Uses NATS for cross-agent approval flow when conflicts arise.
+            // Phase 9: also creates a fanotify-based kernel enforcer that
+            // intercepts open() calls and denies access to locked files.
             let project_root = match std::env::current_dir() {
                 Ok(dir) => dir,
                 Err(e) => {
@@ -478,10 +480,47 @@ async fn async_main(args: Args) -> Result<()> {
                     PathBuf::from(".")
                 }
             };
-            if let Err(e) = ergatai_lock::init_file_access("default", &project_root).await {
+
+            // Build a PID resolver that reads from the runtime's agent registry.
+            // The resolver maps kernel-reported PIDs (from fanotify) to agent IDs
+            // by walking the /proc/{pid}/stat parent chain until it finds a match.
+            let runtime_for_resolver = ergatai_runtime::get_agent_runtime();
+            // Use with_cache to avoid per-event allocation. Under high fanotify
+            // load, the uncached variant allocates Vec<AgentInfo> on every open().
+            // The 50ms TTL means ~20× fewer allocations.
+            let pid_resolver = ergatai_lock::CallbackPidResolver::with_cache(
+                {
+                    let runtime = runtime_for_resolver.clone();
+                    move || {
+                        // block_in_place lets us synchronously await inside a tokio worker
+                        // without blocking the whole runtime.
+                        let agents = tokio::task::block_in_place(|| {
+                            tokio::runtime::Handle::current().block_on(runtime.list_agents())
+                        });
+                        agents
+                            .into_iter()
+                            .filter_map(|info| {
+                                let pid: u32 = info.handle.process_id?.parse().ok()?;
+                                Some((pid, info.agent_id.clone(), info.agent_id))
+                            })
+                            .collect()
+                    }
+                },
+                std::time::Duration::from_millis(50),
+            );
+
+            if let Err(e) = ergatai_lock::init_file_access_with_enforcer(
+                "default",
+                &project_root,
+                std::sync::Arc::new(pid_resolver),
+            )
+            .await
+            {
                 tracing::warn!("File access control initialization failed: {}", e);
             } else {
-                tracing::info!("✅ File access control initialized (multi-agent file locking)");
+                tracing::info!(
+                    "✅ File access control initialized (multi-agent file locking + fanotify enforcement)"
+                );
             }
         }
         Err(e) => {
