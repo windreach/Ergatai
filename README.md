@@ -104,19 +104,23 @@ ergatai-api --port 3000
 
 **3. Add Ergatai to your agent's MCP config:**
 
-Each agent gets its own URL path so Ergatai can bind MCP connections to specific rmux panes:
+Each agent needs its own URL path — the **path suffix is the agent's conversation name** used for messaging, discovery, and rmux pane binding. Names must be **unique** across all agents in the same Ergatai instance (do not reuse).
 
 ```json
 {
   "mcpServers": {
     "ergatai": {
-      "url": "http://localhost:3000/mcp/agent-1"
+      "url": "http://localhost:3000/mcp/alice"
     }
   }
 }
 ```
 
-Available paths: `/mcp/agent-1`, `/mcp/agent-2`, `/mcp/agent-3`, plus `/mcp` as a shared fallback.
+Examples of valid agent names: `/mcp/alice`, `/mcp/bob`, `/mcp/claude-code`, `/mcp/cursor-agent-1`.
+
+Built-in paths: `/mcp/agent-1`, `/mcp/agent-2`, `/mcp/agent-3` (pre-configured, names fixed). The `/mcp` path (no suffix) is a shared fallback where Ergatai auto-assigns names.
+
+> ⚠️ **Do not reuse agent names.** If two agents connect to the same name (e.g., both use `/mcp/alice`), they will share session state and their messages will collide. Pick a distinct name per agent.
 
 **4. Start collaborating** — agents auto-register on connect and can immediately call `list_agents`, `register_agent_name`, `send_message`, `submit_orchestration`, and `check_dag_status`.
 
