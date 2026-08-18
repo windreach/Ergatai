@@ -8,6 +8,7 @@ pub mod message_delivery;
 pub mod server;
 
 // Re-export AgentRegistry for backward compatibility
+pub use conversation::start_conversation_reaper;
 pub use ergatai_core::agent_registry::AgentRegistry;
 pub use message_delivery::start_message_delivery_consumer;
 pub use server::create_mcp_service;

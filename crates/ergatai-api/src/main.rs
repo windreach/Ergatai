@@ -35,7 +35,10 @@ use tower_governor::{governor::GovernorConfigBuilder, key_extractor::KeyExtracto
 mod api;
 mod mcp;
 use mcp::conversation::{ConversationConfig, ConversationManager};
-use mcp::{create_mcp_service, start_message_delivery_consumer, start_peer_reaper};
+use mcp::{
+    create_mcp_service, start_conversation_reaper, start_message_delivery_consumer,
+    start_peer_reaper,
+};
 
 /// Shared application state available to all handlers.
 #[derive(Clone)]
@@ -428,6 +431,12 @@ async fn async_main(args: Args) -> Result<()> {
         mcp_cancellation_token.clone(),
     );
     tracing::info!("Peer reaper started (10s interval, auto-cleans dead transports)");
+
+    // Start background conversation reaper — sweeps stale ConversationManager entries
+    // every 5 minutes (max age: 1 hour). Prevents unbounded memory growth from
+    // accumulated conversation state in long-running deployments.
+    start_conversation_reaper(conversation_manager.clone(), mcp_cancellation_token.clone());
+    tracing::info!("Conversation reaper started (5min interval, 1h max age)");
 
     // Initialize NATS (embedded server + JetStream)
     match nats::init_nats().await {

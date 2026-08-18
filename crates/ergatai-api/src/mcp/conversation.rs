@@ -36,6 +36,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use ergatai_error::{ErgataiError, ErgataiResult};
@@ -419,8 +420,12 @@ impl ConversationManager {
         conversations.values().cloned().collect()
     }
 
+    /// Number of tracked conversations (for diagnostics / reaper logging).
+    pub async fn len(&self) -> usize {
+        self.conversations.read().await.len()
+    }
+
     /// Clean up old conversations (older than `max_age`).
-    #[allow(dead_code)]
     pub async fn cleanup_old_conversations(&self, max_age: Duration) {
         let mut conversations = self.conversations.write().await;
         let now = Utc::now();
@@ -464,6 +469,61 @@ impl ConversationManager {
             )))
         }
     }
+}
+
+/// Default maximum age for a conversation before cleanup (1 hour).
+///
+/// Conversations inactive for longer than this are swept by the reaper.
+/// Active conversations with recent activity are retained regardless of state.
+const DEFAULT_CONVERSATION_MAX_AGE_SECS: u64 = 3600;
+
+/// Default interval for the conversation reaper sweep (5 minutes).
+const CONVERSATION_REAPER_INTERVAL_SECS: u64 = 300;
+
+/// Start a background task that periodically sweeps stale conversations.
+///
+/// Mirrors the peer reaper pattern: runs on a fixed interval, calls
+/// `cleanup_old_conversations` with the configured `max_age`, and stops
+/// cleanly when the `CancellationToken` fires.
+///
+/// This prevents unbounded memory growth in long-running deployments:
+/// every MCP session's conversation state would otherwise accumulate
+/// forever in the `ConversationManager`'s `RwLock<HashMap>`.
+pub fn start_conversation_reaper(
+    manager: Arc<ConversationManager>,
+    cancellation_token: CancellationToken,
+) {
+    tokio::spawn(async move {
+        let mut interval =
+            tokio::time::interval(Duration::from_secs(CONVERSATION_REAPER_INTERVAL_SECS));
+        // First tick fires immediately — skip it so we don't sweep before any
+        // conversations have a chance to be created.
+        interval.tick().await;
+
+        let max_age = Duration::from_secs(DEFAULT_CONVERSATION_MAX_AGE_SECS);
+
+        loop {
+            tokio::select! {
+                _ = cancellation_token.cancelled() => {
+                    info!("Conversation reaper shutting down");
+                    break;
+                }
+                _ = interval.tick() => {
+                    let before = manager.len().await;
+                    manager.cleanup_old_conversations(max_age).await;
+                    let after = manager.len().await;
+                    if before != after {
+                        info!(
+                            swept = before - after,
+                            remaining = after,
+                            max_age_secs = DEFAULT_CONVERSATION_MAX_AGE_SECS,
+                            "Conversation reaper swept stale conversations"
+                        );
+                    }
+                }
+            }
+        }
+    });
 }
 
 #[cfg(test)]
