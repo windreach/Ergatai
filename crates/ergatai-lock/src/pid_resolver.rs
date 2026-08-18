@@ -164,6 +164,7 @@ impl PidResolver for CallbackPidResolver {
 /// Format: `pid (comm) state ppid ...`. The `comm` field is parenthesized and
 /// may contain spaces or parens, so we find the *last* `)` and parse field 4
 /// relative to that.
+#[cfg(target_os = "linux")]
 fn parent_pid(pid: u32) -> Option<u32> {
     let path = format!("/proc/{}/stat", pid);
     let data = std::fs::read_to_string(&path).ok()?;
@@ -173,6 +174,16 @@ fn parent_pid(pid: u32) -> Option<u32> {
     let _state = fields.next()?; // field 3
     let ppid_str = fields.next()?; // field 4
     ppid_str.parse().ok()
+}
+
+/// Parent PID resolution on non-Linux platforms.
+///
+/// Stub: returns `None` to disable ancestor walking.
+/// - macOS: use `sysctl kern.proc.pid` or `proc_pidinfo(PROC_PIDT_SHORTBSDINFO)`.
+/// - Windows: use `NtQueryInformationProcess` with `ProcessBasicInformation`.
+#[cfg(not(target_os = "linux"))]
+fn parent_pid(_pid: u32) -> Option<u32> {
+    None
 }
 
 #[cfg(test)]

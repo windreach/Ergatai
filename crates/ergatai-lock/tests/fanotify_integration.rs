@@ -10,7 +10,7 @@ use std::time::Duration;
 use tokio::process::Command;
 
 use ergatai_lock::{
-    CallbackPidResolver, Enforcer, EnforcerConfig, FileMode, FileLockManager, FileToken,
+    CallbackPidResolver, Enforcer, EnforcerConfig, FileLockManager, FileMode, FileToken,
     SystemToken,
 };
 
@@ -111,9 +111,7 @@ async fn test_enforcer_allows_holder_subprocess() {
     // preventing the fanotify event loop from processing the permission event — deadlock.
     let output = tokio::time::timeout(
         Duration::from_secs(5),
-        Command::new("cat")
-            .arg(&test_file)
-            .output()
+        Command::new("cat").arg(&test_file).output(),
     )
     .await;
 

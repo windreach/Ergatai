@@ -137,9 +137,7 @@ impl AuditManager {
         end_time: Option<&str>,
         limit: usize,
     ) -> Result<Vec<AuditEntry>, ErgataiError> {
-        let conn = self
-            .conn
-            .lock();
+        let conn = self.conn.lock();
 
         let mut query = String::from(
             "SELECT timestamp, agent_id, session_id, action, file_path, mode, reason
@@ -203,9 +201,7 @@ impl AuditManager {
 
     /// Get file access statistics (public API — acquires lock)
     pub fn get_stats(&self, period_days: Option<u32>) -> Result<FileAccessStats, ErgataiError> {
-        let conn = self
-            .conn
-            .lock();
+        let conn = self.conn.lock();
         self.get_stats_inner(&conn, period_days)
     }
 
@@ -296,9 +292,7 @@ impl AuditManager {
     ) -> Result<SecurityReport, ErgataiError> {
         info!(period_days = period_days, "Generating security report");
 
-        let conn = self
-            .conn
-            .lock();
+        let conn = self.conn.lock();
 
         let now = Utc::now();
         let period_start = now - Duration::days(period_days as i64);
@@ -506,9 +500,7 @@ impl AuditManager {
     /// # Returns
     /// Number of entries deleted
     pub fn cleanup_old_audit_logs(&self, days_to_keep: u32) -> Result<usize, ErgataiError> {
-        let conn = self
-            .conn
-            .lock();
+        let conn = self.conn.lock();
 
         let cutoff = (Utc::now() - Duration::days(days_to_keep as i64)).to_rfc3339();
 
@@ -556,9 +548,7 @@ impl AuditManager {
         // Security: validate export path to prevent arbitrary file write
         let export_path = Self::validate_archive_path(export_path, &self.project_root)?;
 
-        let conn = self
-            .conn
-            .lock();
+        let conn = self.conn.lock();
 
         let cutoff = (Utc::now() - Duration::days(months_to_keep as i64 * 30)).to_rfc3339();
 
@@ -710,9 +700,7 @@ impl AuditManager {
     /// # Returns
     /// Number of entries deleted
     pub fn enforce_row_limit(&self, max_rows: u64) -> Result<usize, ErgataiError> {
-        let conn = self
-            .conn
-            .lock();
+        let conn = self.conn.lock();
 
         // Count current rows
         let count: u64 = conn.query_row("SELECT COUNT(*) FROM audit_log", [], |row| row.get(0))?;

@@ -945,6 +945,7 @@ name = "ergatai-lock"
 version = "0.1.0"
 dependencies = [
  "async-nats",
+ "async-trait",
  "chrono",
  "ergatai-error",
  "ergatai-nats",
