@@ -76,17 +76,21 @@ cargo build --release -p ergatai-api
 
 **2. Add Ergatai to your agent's MCP config:**
 
+Each agent gets its own URL path so Ergatai can bind MCP connections to specific rmux panes:
+
 ```json
 {
   "mcpServers": {
     "ergatai": {
-      "url": "http://localhost:3000/mcp"
+      "url": "http://localhost:3000/mcp/agent-1"
     }
   }
 }
 ```
 
-**3. Start collaborating** — agents auto-register on connect and can immediately call `list_agents`, `send_message`, `submit_orchestration`, and `check_dag_status`.
+Available paths: `/mcp/agent-1`, `/mcp/agent-2`, `/mcp/agent-3`, plus `/mcp` as a shared fallback.
+
+**3. Start collaborating** — agents auto-register on connect and can immediately call `list_agents`, `register_agent_name`, `send_message`, `submit_orchestration`, and `check_dag_status`.
 
 📖 See [MCP Configuration Guide](docs/MCP_CONFIG_GUIDE.md) for full details.
 
@@ -237,7 +241,7 @@ The core value of Ergatai — parallel multi-agent workflows with dependencies:
 
 # MCP Tools
 
-Ergatai exposes four tools to connected agents:
+Ergatai exposes five tools to connected agents:
 
 ### `list_agents`
 
@@ -253,16 +257,28 @@ List all connected agents and their current status.
 {
   "agents": [
     {
-      "agent_id": "claude-code",
+      "agent_id": "%15",
+      "display_name": "alice",
+      "mcp_agent_id": "opencode@a1b2c3d4",
+      "workspace_id": "workspace-1",
       "status": "active",
-      "capabilities": ["chat", "code", "tools"],
-      "connected_at": "2026-08-14T10:00:00Z",
-      "last_heartbeat": "2026-08-14T10:05:00Z"
+      "is_self": false
     }
   ],
   "total": 1
 }
 ```
+
+### `register_agent_name`
+
+Register a human-readable display name for the calling agent. Once registered, other agents can target this name in `send_message` instead of the auto-generated runtime ID (e.g., `%15`). Names must be unique across all connected agents.
+
+**Input:**
+```json
+{ "display_name": "alice" }
+```
+
+**Validation:** non-empty, max 64 characters, alphanumeric plus `-`, `_`, `/`.
 
 ### `send_message`
 
@@ -389,7 +405,7 @@ cargo fmt --all
 | Component | Technology | Version |
 |-----------|-----------|---------|
 | Language | Rust | 2021 edition |
-| MCP Protocol | Streamable HTTP | 2025-11-25 |
+| MCP Protocol | Streamable HTTP | 2025-06-18 |
 | Messaging | async-nats + JetStream | 0.38 |
 | Database | rusqlite (embedded SQLite) | 0.31 |
 | HTTP Server | axum | 0.7 |
@@ -449,7 +465,7 @@ The agent reaper checks heartbeats every 30s. If an agent goes silent for 90s, i
 
 # Security
 
-Security audit completed 2026-08-14:
+Security audit completed 2026-08-19 (v0.1.0):
 
 - ✅ API path traversal protection
 - ✅ Bearer token authentication (`--api-token`)
