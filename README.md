@@ -67,14 +67,42 @@ When multiple agents edit the same codebase, Ergatai prevents conflicts with tok
 
 # Quickstart
 
-**1. Build and start the server:**
+**1. Install ergatai-api:**
+
+One-liner (recommended — auto-grants fanotify permissions for kernel-level file locking):
+
+```bash
+curl -sSL https://raw.githubusercontent.com/windreach/Ergatai/main/install.sh | bash
+```
+
+Or install manually:
+
+```bash
+# Download binary from GitHub Releases
+curl -L -o ergatai-api https://github.com/windreach/Ergatai/releases/latest/download/ergatai-api-x86_64
+chmod +x ergatai-api
+sudo mv ergatai-api /usr/local/bin/
+
+# ⚠️ CRITICAL: Grant CAP_SYS_ADMIN for kernel-level file locking
+sudo setcap 'cap_sys_admin+ep' /usr/local/bin/ergatai-api
+```
+
+Or build from source:
 
 ```bash
 cargo build --release -p ergatai-api
-./target/release/ergatai-api --port 3000
+sudo setcap 'cap_sys_admin+ep' ./target/release/ergatai-api
 ```
 
-**2. Add Ergatai to your agent's MCP config:**
+> 🔐 **File locking requires `CAP_SYS_ADMIN`.** Without this capability, Ergatai runs in **advisory-only mode** — agent locks are cooperative and can be bypassed by direct shell access. See [File Locking Permissions](#file-locking-permissions) below for details.
+
+**2. Start the server:**
+
+```bash
+ergatai-api --port 3000
+```
+
+**3. Add Ergatai to your agent's MCP config:**
 
 Each agent gets its own URL path so Ergatai can bind MCP connections to specific rmux panes:
 
@@ -90,9 +118,86 @@ Each agent gets its own URL path so Ergatai can bind MCP connections to specific
 
 Available paths: `/mcp/agent-1`, `/mcp/agent-2`, `/mcp/agent-3`, plus `/mcp` as a shared fallback.
 
-**3. Start collaborating** — agents auto-register on connect and can immediately call `list_agents`, `register_agent_name`, `send_message`, `submit_orchestration`, and `check_dag_status`.
+**4. Start collaborating** — agents auto-register on connect and can immediately call `list_agents`, `register_agent_name`, `send_message`, `submit_orchestration`, and `check_dag_status`.
 
 📖 See [MCP Configuration Guide](docs/MCP_CONFIG_GUIDE.md) for full details.
+
+<br/>
+
+# File Locking Permissions
+
+> ⚠️ **This section is critical for multi-agent deployments.** If you skip this step, file locking will still work but in **advisory mode only** — agents that don't know about the lock protocol can bypass it.
+
+## Why permissions are needed
+
+Ergatai enforces mandatory file locks via Linux **fanotify** with `FAN_OPEN_PERM` events. This intercepts `open()` syscalls at the VFS layer and blocks unauthorized access before it reaches the application — the only way to guarantee that concurrent agents cannot clobber each other's writes.
+
+The Linux kernel requires `CAP_SYS_ADMIN` for permission events (`fanotify(7)`):
+
+> "A fanotify group created with `FAN_CLASS_CONTENT` ... and permission events (e.g., `FAN_OPEN_PERM`) requires the `CAP_SYS_ADMIN` capability."
+
+## What happens without `CAP_SYS_ADMIN`
+
+| Mode | Lock enforcement | Bypass risk |
+|------|-----------------|-------------|
+| **Mandatory** (with `CAP_SYS_ADMIN`) | Kernel blocks unauthorized `open()` | None — enforced at VFS layer |
+| **Advisory** (without) | Agents cooperate voluntarily | High — direct shell or non-Ergatai tools ignore locks |
+
+Ergatai auto-detects capability availability at startup. If `fanotify_init()` fails with `EPERM`, it logs a warning and continues in advisory mode:
+
+```
+WARN  ergatai_lock::enforcer > fanotify init failed (need CAP_SYS_ADMIN?): ...
+WARN  ergatai_lock::manager    > Enforcer init failed (continuing in advisory mode)
+```
+
+## Granting `CAP_SYS_ADMIN`
+
+Three options, in order of preference:
+
+**1. Install script (recommended)**
+
+```bash
+curl -sSL https://raw.githubusercontent.com/windreach/Ergatai/main/install.sh | bash
+```
+
+The script downloads the binary, installs it, runs `setcap`, and verifies the capability is set.
+
+**2. Manual `setcap`**
+
+```bash
+sudo setcap 'cap_sys_admin+ep' /path/to/ergatai-api
+getcap /path/to/ergatai-api   # verify: cap_sys_admin=ep
+```
+
+⚠️ `setcap` binds the capability to the file. Any modification (rebuild, copy, download) strips it — you must re-run `setcap` after each update.
+
+**3. systemd service**
+
+```ini
+[Service]
+AmbientCapabilities=CAP_SYS_ADMIN
+CapabilityBoundingSet=CAP_SYS_ADMIN
+ExecStart=/opt/ergatai/ergatai-api --port 3000
+```
+
+See `install.sh` for a full systemd unit example.
+
+## Why `CAP_SYS_ADMIN`?
+
+`CAP_SYS_ADMIN` is a broad capability (mount, bpf, perf, etc.). We only need the fanotify subset. Unfortunately, Linux does not offer a finer-grained capability for fanotify permission events — `CAP_SYS_ADMIN` is the minimum required.
+
+This is a kernel limitation, not an Ergatai limitation. The capability is only used at `fanotify_init()` time; Ergatai does not use any other `CAP_SYS_ADMIN` features.
+
+## Platform support
+
+| Platform | Fanotify available? | Default mode |
+|----------|---------------------|--------------|
+| Linux (with `CAP_SYS_ADMIN`) | ✅ | Mandatory |
+| Linux (no caps) | ⚠️ Init fails | Advisory |
+| macOS | ❌ Different API | Advisory |
+| Windows | ❌ Different API | Advisory |
+
+Non-Linux platforms and Linux without caps fall back to advisory mode. Multi-agent file safety on these platforms depends on agent cooperation only.
 
 <br/>
 
@@ -422,10 +527,14 @@ cargo fmt --all
 When multiple agents collaborate on the same repository, Ergatai ensures safe concurrent writes:
 
 - **Token-based locking** — READ / WRITE / ADMIN modes with explicit acquire/release
+- **Mandatory enforcement** (Linux with `CAP_SYS_ADMIN`) — kernel intercepts unauthorized `open()` via fanotify
+- **Advisory fallback** — agents cooperate voluntarily; direct shell access can bypass
 - **Heartbeat monitoring** — Stale locks reclaimed after 90s of inactivity
 - **Git snapshots** — Automatic pre-write snapshots enable rollback on conflict
 - **Conflict arbitration** — Priority-based resolution when two agents contend for the same file
 - **Audit logging** — Every lock acquire, release, and conflict is logged
+
+> 🔐 **Mandatory enforcement requires `CAP_SYS_ADMIN`.** Without it, locks are advisory-only and can be bypassed. See [File Locking Permissions](#file-locking-permissions).
 
 <br/>
 
@@ -459,6 +568,14 @@ The agent reaper checks heartbeats every 30s. If an agent goes silent for 90s, i
 <summary><b>What's the difference between the API server and the core library?</b></summary>
 
 `ergatai-api` is the standalone MCP server (the entry point you run). `ergatai-core` is the reusable library — if you want to embed Ergatai's collaboration logic inside another application, depend on `ergatai-core`.
+</details>
+
+<details>
+<summary><b>Why does file locking require root / <code>CAP_SYS_ADMIN</code>?</b></summary>
+
+Ergatai enforces file locks via Linux **fanotify** with `FAN_OPEN_PERM` events, which intercept `open()` syscalls at the kernel VFS layer. This is the only way to guarantee that concurrent agents (or any other process) cannot bypass locks. The kernel requires `CAP_SYS_ADMIN` for permission events — this is a kernel limitation, not an Ergatai limitation.
+
+Without `CAP_SYS_ADMIN`, Ergatai auto-detects this at startup and falls back to **advisory mode**: locks are tracked and logged, but any process can ignore them by opening files directly. See the [File Locking Permissions](#file-locking-permissions) section for setup instructions.
 </details>
 
 <br/>
