@@ -9,7 +9,7 @@
 //!
 //! Every permission event MUST receive a kernel response — even if path
 //! resolution fails, the decision engine panics, or the NATS publish errors.
-//! The [`KernelResponseGuard`] RAII helper enforces this: on drop, if no
+//! The `KernelResponseGuard` RAII helper enforces this: on drop, if no
 //! explicit response has been written, it writes `FAN_ALLOW` and closes the
 //! per-event fd. We never leave a userspace process blocked in the kernel.
 

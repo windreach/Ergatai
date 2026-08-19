@@ -1203,7 +1203,7 @@ impl FileLockManager {
         self.check_file_lock_status_normalized(&normalized_path)
     }
 
-    /// Fast variant of [`check_file_lock_status`] that skips the (expensive)
+    /// Fast variant of [`Self::check_file_lock_status`] that skips the (expensive)
     /// `canonicalize()` call. Use this when the caller already has a
     /// properly-normalized path — e.g., the fanotify enforcer, which derives
     /// the relative path via `readlink /proc/self/fd/{fd}` + `strip_prefix`.
