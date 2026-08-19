@@ -157,7 +157,26 @@ struct RegisterAgentNameParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct SubmitOrchestrationParams {
-    /// Markdown-formatted DAG definition
+    /// DAG definition in YAML or Markdown format.
+    ///
+    /// YAML format (recommended):
+    /// ```yaml
+    /// tasks:
+    ///   - name: Task A
+    ///     agent: agent-a
+    ///     task: tasks/a.md
+    ///   - name: Task B
+    ///     agent: agent-b
+    ///     depends_on: [Task A]
+    ///     timeout: 300
+    /// ```
+    ///
+    /// Markdown format (legacy):
+    /// ```markdown
+    /// ## Task A
+    /// - **agent**: agent-a
+    /// - **task**: tasks/a.md
+    /// ```
     dag_definition: String,
     /// Optional context variables
     #[serde(default)]
@@ -601,9 +620,9 @@ impl ErgataiMcpServer {
             }
         }
 
-        // Parse markdown → TaskGraph
+        // Parse DAG definition (YAML or Markdown) → TaskGraph
         let graph =
-            ergatai_core::orchestration::parse_dag_markdown(dag_definition).map_err(|e| {
+            ergatai_core::orchestration::parse_dag_auto(dag_definition).map_err(|e| {
                 ErrorData::invalid_params(format!("Failed to parse DAG definition: {}", e), None)
             })?;
 

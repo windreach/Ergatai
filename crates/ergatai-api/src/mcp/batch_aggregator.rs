@@ -64,8 +64,6 @@ pub struct BatchAggregator {
     /// 按 from_agent 索引的发送记录，用于检测群发
     /// Key: from_agent, Value: 最近的发送记录列表
     send_records: Mutex<HashMap<String, Vec<SendRecord>>>,
-    /// batch_id 计数器
-    batch_counter: Mutex<u64>,
 }
 
 /// 单条发送记录
@@ -104,7 +102,6 @@ impl BatchAggregator {
         Self {
             sessions: Mutex::new(HashMap::new()),
             send_records: Mutex::new(HashMap::new()),
-            batch_counter: Mutex::new(0),
         }
     }
 
@@ -118,6 +115,13 @@ impl BatchAggregator {
     /// 返回值:
     /// - Some(batch_id): 该发送属于某个群发 session
     /// - None: 普通单发，不属于群发
+    ///
+    /// # 锁策略
+    ///
+    /// 分三阶段执行，避免长时间持有 `send_records` 锁：
+    /// 1. 短暂持有 `send_records` 锁：检查已有 batch、添加新记录、提取 targets
+    /// 2. 不持有任何锁：执行 batch 检测与创建（可能耗时较长）
+    /// 3. 短暂持有 `send_records` 锁：更新记录的 batch_id
     pub async fn record_send(&self, from_agent: &str, to_agent: &str, is_reply: bool) -> Option<String> {
         // 回复消息不参与 batch 检测
         // 场景: A 发给 B/C (触发 batch)，B/C 回复后 A 再回复 B/C
@@ -136,32 +140,45 @@ impl BatchAggregator {
         // 清理过期的发送记录
         self.cleanup_expired_records(from_agent, now).await;
 
-        // 添加当前发送记录
-        let mut records = self.send_records.lock().await;
-        let agent_records = records.entry(from_agent.to_string()).or_insert_with(Vec::new);
+        // ── Phase 1: 短暂持有 send_records 锁，提取 batch 检测所需数据 ──
+        let recent_targets = {
+            let mut records = self.send_records.lock().await;
+            let agent_records = records.entry(from_agent.to_string()).or_default();
 
-        // 检查是否已属于某个 batch
-        for record in agent_records.iter_mut() {
-            if record.to_agent == to_agent && record.batch_id.is_some() {
-                // 已属于某个 batch
-                return record.batch_id.clone();
+            // 检查是否已属于某个 batch
+            for record in agent_records.iter() {
+                if record.to_agent == to_agent && record.batch_id.is_some() {
+                    return record.batch_id.clone();
+                }
             }
-        }
 
-        // 添加新记录
-        agent_records.push(SendRecord {
-            to_agent: to_agent.to_string(),
-            sent_at: now,
-            batch_id: None,
-        });
+            // 添加新记录
+            agent_records.push(SendRecord {
+                to_agent: to_agent.to_string(),
+                sent_at: now,
+                batch_id: None,
+            });
 
-        // 检查是否触发群发检测
-        let batch_id = self.check_and_create_batch(from_agent, agent_records, now).await;
+            // 收集 1 分钟窗口内的不同目标（克隆出来，以便释放锁）
+            agent_records
+                .iter()
+                .filter(|r| now.duration_since(r.sent_at) <= BATCH_DETECTION_WINDOW)
+                .map(|r| r.to_agent.clone())
+                .collect::<HashSet<_>>()
+        }; // ← send_records 锁在此释放
 
-        // 更新当前记录的 batch_id
+        // ── Phase 2: 不持有 send_records 锁，执行 batch 检测/创建 ──
+        let batch_id = self
+            .check_and_create_batch(from_agent, &recent_targets, now)
+            .await;
+
+        // ── Phase 3: 短暂持有 send_records 锁，更新记录的 batch_id ──
         if let Some(ref bid) = batch_id {
-            if let Some(record) = agent_records.iter_mut().rev().find(|r| r.to_agent == to_agent) {
-                record.batch_id = Some(bid.clone());
+            let mut records = self.send_records.lock().await;
+            if let Some(agent_records) = records.get_mut(from_agent) {
+                if let Some(record) = agent_records.iter_mut().rev().find(|r| r.to_agent == to_agent) {
+                    record.batch_id = Some(bid.clone());
+                }
             }
         }
 
@@ -169,62 +186,90 @@ impl BatchAggregator {
     }
 
     /// 检查是否触发群发，如果是则创建 BatchSession
+    ///
+    /// # 参数
+    /// - `from_agent`: 发送方 agent ID
+    /// - `recent_targets`: 已在调用方计算好的近期目标集合（避免持锁期间遍历）
+    /// - `now`: 当前时间戳
+    ///
+    /// # 并发安全
+    ///
+    /// 检查与创建在同一个 `sessions` 锁作用域内完成，消除 TOCTOU 竞态。
     async fn check_and_create_batch(
         &self,
         from_agent: &str,
-        records: &[SendRecord],
+        recent_targets: &HashSet<String>,
         now: Instant,
     ) -> Option<String> {
-        // 收集 1 分钟窗口内的不同目标
-        let recent_targets: HashSet<String> = records
-            .iter()
-            .filter(|r| now.duration_since(r.sent_at) <= BATCH_DETECTION_WINDOW)
-            .map(|r| r.to_agent.clone())
-            .collect();
-
         if recent_targets.len() < MIN_BATCH_TARGETS {
             return None;
         }
 
-        // 检查是否已存在活跃的 batch
-        {
-            let sessions = self.sessions.lock().await;
-            for session in sessions.values() {
-                if session.from_agent == from_agent && !session.flushed {
-                    // 已有活跃 batch，检查新目标是否需要加入
-                    let new_targets: Vec<_> = recent_targets
-                        .iter()
-                        .filter(|t| !session.targets.contains(*t))
-                        .cloned()
-                        .collect();
+        // 整个检查和创建过程在同一个 sessions 锁作用域内完成，消除 TOCTOU 竞态。
+        let mut sessions = self.sessions.lock().await;
 
-                    if !new_targets.is_empty() {
-                        // 有新目标，需要扩展 batch
-                        drop(sessions);
-                        return self.extend_batch(from_agent, &new_targets, now).await;
-                    }
+        // 查找已有的活跃 batch
+        let existing_batch = sessions
+            .values_mut()
+            .find(|s| s.from_agent == from_agent && !s.flushed);
 
-                    return Some(session.batch_id.clone());
+        if let Some(session) = existing_batch {
+            // 已有活跃 batch，检查是否需要扩展新目标
+            let new_targets: Vec<_> = recent_targets
+                .iter()
+                .filter(|t| !session.targets.contains(*t))
+                .cloned()
+                .collect();
+
+            if !new_targets.is_empty() {
+                // 直接内联扩展（无需释放/重获锁，避免竞态窗口）
+                for target in &new_targets {
+                    session.targets.insert(target.clone());
                 }
+                let new_timeout = now + REPLY_WINDOW;
+                if new_timeout > session.max_timeout {
+                    session.max_timeout = new_timeout;
+                }
+
+                info!(
+                    batch_id = %session.batch_id,
+                    new_targets = ?new_targets,
+                    all_targets = ?session.targets,
+                    "Extended batch session"
+                );
+
+                return Some(session.batch_id.clone());
             }
+
+            return Some(session.batch_id.clone());
         }
 
-        // 创建新 batch
-        self.create_batch(from_agent, recent_targets, now).await
+        // 无活跃 batch → 创建新 batch（仍在 sessions 锁持有期内，消除竞态窗口）
+        Self::create_batch_locked(from_agent, recent_targets.clone(), now, &mut sessions)
     }
 
-    /// 创建新的 BatchSession
-    async fn create_batch(
-        &self,
+    /// 在已持有 `sessions` 锁的情况下创建新的 BatchSession。
+    ///
+    /// 此方法消除了原 `create_batch` 的 TOCTOU 竞态：检查与插入在同一个
+    /// 锁作用域内完成，不可能有两个并发调用同时为同一 from_agent 创建 batch。
+    fn create_batch_locked(
         from_agent: &str,
         targets: HashSet<String>,
         now: Instant,
+        sessions: &mut tokio::sync::MutexGuard<'_, HashMap<String, BatchSession>>,
     ) -> Option<String> {
-        let mut counter = self.batch_counter.lock().await;
-        *counter += 1;
-        let batch_id = format!("batch-{}-{}", from_agent, counter);
+        // 二次检查：在等待锁期间可能已有其他任务创建了 batch
+        for session in sessions.values() {
+            if session.from_agent == from_agent && !session.flushed {
+                return Some(session.batch_id.clone());
+            }
+        }
 
-        // 计算最大超时时间
+        // 生成 batch_id — 使用计数器（此处无 batch_counter 锁，使用静态原子计数器）
+        static BATCH_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = BATCH_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let batch_id = format!("batch-{}-{}", from_agent, seq);
+
         let max_timeout = now + REPLY_WINDOW;
 
         let session = BatchSession {
@@ -245,50 +290,12 @@ impl BatchAggregator {
             "Created batch session"
         );
 
-        let mut sessions = self.sessions.lock().await;
         sessions.insert(batch_id.clone(), session);
 
-        // 启动超时检查任务
-        self.spawn_timeout_checker(batch_id.clone());
+        // 启动超时检查任务（通过全局实例）
+        get_batch_aggregator().spawn_timeout_checker(batch_id.clone());
 
         Some(batch_id)
-    }
-
-    /// 扩展现有 batch，添加新目标
-    async fn extend_batch(
-        &self,
-        from_agent: &str,
-        new_targets: &[String],
-        now: Instant,
-    ) -> Option<String> {
-        let mut sessions = self.sessions.lock().await;
-
-        // 找到活跃的 batch
-        for session in sessions.values_mut() {
-            if session.from_agent == from_agent && !session.flushed {
-                // 添加新目标
-                for target in new_targets {
-                    session.targets.insert(target.clone());
-                }
-
-                // 更新超时时间 (取最大值)
-                let new_timeout = now + REPLY_WINDOW;
-                if new_timeout > session.max_timeout {
-                    session.max_timeout = new_timeout;
-                }
-
-                info!(
-                    batch_id = %session.batch_id,
-                    new_targets = ?new_targets,
-                    all_targets = ?session.targets,
-                    "Extended batch session"
-                );
-
-                return Some(session.batch_id.clone());
-            }
-        }
-
-        None
     }
 
     /// 处理收到的回复

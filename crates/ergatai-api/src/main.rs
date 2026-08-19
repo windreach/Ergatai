@@ -863,8 +863,8 @@ async fn submit_dag(body: String) -> impl IntoResponse {
         }
     }
 
-    // Parse markdown → TaskGraph
-    let graph = match ergatai_core::orchestration::parse_dag_markdown(&body) {
+    // Parse DAG definition (YAML or Markdown) → TaskGraph
+    let graph = match ergatai_core::orchestration::parse_dag_auto(&body) {
         Ok(g) => g,
         Err(e) => {
             return (

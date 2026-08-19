@@ -6,6 +6,7 @@ pub mod context;
 pub mod dag_parser;
 pub mod dag_topology;
 pub mod template;
+pub mod yaml_parser;
 
 // Legacy tree modules (deprecated, kept for backward compatibility)
 pub mod markdown_parser;
@@ -16,6 +17,7 @@ pub use context::DagContext;
 pub use dag_parser::parse_dag_markdown;
 pub use dag_topology::{TaskGraph, TaskNode, TaskStatus};
 pub use template::{extract_references, render_template};
+pub use yaml_parser::{is_yaml_format, parse_dag_auto, parse_dag_yaml};
 
 // Legacy tree exports (deprecated) - commented out to avoid conflicts
 // pub use tree_topology::{TaskTree, TaskNode as TreeNode, TaskStatus as TreeStatus};
