@@ -3,7 +3,7 @@
 // Requires root + CAP_SYS_ADMIN.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -21,9 +21,9 @@ fn setup() -> (tempfile::TempDir, PathBuf) {
     (tmp, root)
 }
 
-fn make_lock_manager(root: &PathBuf) -> Arc<FileLockManager> {
+fn make_lock_manager(root: &Path) -> Arc<FileLockManager> {
     let db_path = root.join(".ergatai").join("locks.db");
-    let mgr = FileLockManager::new(&db_path, root.clone(), None).unwrap();
+    let mgr = FileLockManager::new(&db_path, root.to_path_buf(), None).unwrap();
     Arc::new(mgr)
 }
 

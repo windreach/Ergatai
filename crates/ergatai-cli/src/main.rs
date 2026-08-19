@@ -116,7 +116,13 @@ async fn main() -> Result<()> {
             agent_name,
             work_dir,
         }) => {
-            commands::start::handle(&agent_name, work_dir.as_deref(), &cli.api_url, cli.token.as_deref()).await?;
+            commands::start::handle(
+                &agent_name,
+                work_dir.as_deref(),
+                &cli.api_url,
+                cli.token.as_deref(),
+            )
+            .await?;
         }
         Some(Commands::Workspace { action }) => {
             commands::workspace::handle(action, &cli.api_url, cli.token.as_deref()).await?;
@@ -130,7 +136,13 @@ async fn main() -> Result<()> {
         None => {
             // Quick start: ergatai <agent_name>
             if let Some(agent_name) = cli.agent_name {
-                commands::start::handle(&agent_name, cli.work_dir.as_deref(), &cli.api_url, cli.token.as_deref()).await?;
+                commands::start::handle(
+                    &agent_name,
+                    cli.work_dir.as_deref(),
+                    &cli.api_url,
+                    cli.token.as_deref(),
+                )
+                .await?;
             } else {
                 // No command and no agent name - show help
                 use clap::CommandFactory;

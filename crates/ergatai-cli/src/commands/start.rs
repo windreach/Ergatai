@@ -14,15 +14,17 @@ pub async fn handle(
     let effective_work_dir = match work_dir {
         Some(dir) => Some(dir.to_string()),
         None => {
-            let cwd = std::env::current_dir()
-                .context("Failed to get current directory")?;
+            let cwd = std::env::current_dir().context("Failed to get current directory")?;
             Some(cwd.to_string_lossy().to_string())
         }
     };
 
     // Step 1: Create workspace (reuse if exists)
     println!("🚀 Starting workspace: {}", agent_name);
-    println!("📁 Working directory: {}", effective_work_dir.as_deref().unwrap_or("<default>"));
+    println!(
+        "📁 Working directory: {}",
+        effective_work_dir.as_deref().unwrap_or("<default>")
+    );
     let workspace = client
         .create_workspace(agent_name, effective_work_dir.as_deref())
         .await
