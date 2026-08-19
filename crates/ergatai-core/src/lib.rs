@@ -122,30 +122,38 @@ pub use signal::setup_signal_handlers;
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use std::sync::Mutex;
+
+    // Serialize tests that touch the global RESOURCES_PATH static.
+    // Without this, parallel test execution causes races where one test
+    // overwrites the path set by another before it can assert on it.
+    static TEST_MUTEX: Mutex<()> = Mutex::new(());
 
     // ── set_resources_path / get_resources_path ──
 
     #[test]
     fn test_resources_path_initially_none() {
-        // Note: this test might fail if another test has already set the path.
-        // We reset it after each test to keep tests isolated.
+        let _guard = TEST_MUTEX.lock().unwrap();
+        reset_resources_path();
         // Just verify the getter returns Some(PathBuf) or None without panicking.
         let _ = get_resources_path();
     }
 
     #[test]
     fn test_set_resources_path_stores_value() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        reset_resources_path();
         let path = PathBuf::from("/tmp/test-resources-1");
         set_resources_path(path.clone());
         let got = get_resources_path();
         assert_eq!(got, Some(path));
-
-        // Reset for other tests
         reset_resources_path();
     }
 
     #[test]
     fn test_set_resources_path_overwrites() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        reset_resources_path();
         set_resources_path(PathBuf::from("/tmp/res-a"));
         set_resources_path(PathBuf::from("/tmp/res-b"));
         assert_eq!(get_resources_path(), Some(PathBuf::from("/tmp/res-b")));
@@ -154,6 +162,8 @@ mod tests {
 
     #[test]
     fn test_resources_path_with_relative_path() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        reset_resources_path();
         set_resources_path(PathBuf::from("./relative/path"));
         assert_eq!(get_resources_path(), Some(PathBuf::from("./relative/path")));
         reset_resources_path();
@@ -161,6 +171,8 @@ mod tests {
 
     #[test]
     fn test_resources_path_with_empty_string() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        reset_resources_path();
         set_resources_path(PathBuf::from(""));
         assert_eq!(get_resources_path(), Some(PathBuf::from("")));
         reset_resources_path();
@@ -168,6 +180,8 @@ mod tests {
 
     #[test]
     fn test_resources_path_with_unicode() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        reset_resources_path();
         let path = PathBuf::from("/tmp/リソース/测试");
         set_resources_path(path.clone());
         assert_eq!(get_resources_path(), Some(path));
@@ -176,6 +190,8 @@ mod tests {
 
     #[test]
     fn test_get_resources_path_returns_clone() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        reset_resources_path();
         set_resources_path(PathBuf::from("/tmp/clone-test"));
         let a = get_resources_path();
         let b = get_resources_path();
