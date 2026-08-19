@@ -143,10 +143,13 @@ impl DagScheduler {
         let launcher = super::agent_launcher::AgentLauncher::new(self.project_root.clone());
         launcher.clear_stale_agents().await?;
 
+        // Calculate critical path for priority optimization
+        let critical_path_result = self.calculate_critical_path().await;
+
         // Atomically collect and preempt ready nodes in a single lock acquisition
         // to prevent TOCTOU race condition where concurrent submit_graph calls
         // could submit the same node twice.
-        let ready_nodes: Vec<TaskNode> = {
+        let ready_nodes: Vec<(TaskNode, u32)> = {
             let mut graph = self.graph.lock().await;
             let ready: Vec<TaskNode> = graph
                 .ready_tasks()
@@ -173,21 +176,37 @@ impl DagScheduler {
                         continue;
                     }
                 }
-                filtered_ready.push(node);
+
+                // Calculate adjusted priority using CPM
+                let base_priority = ergatai_lock::conflict_arbitration::priority_to_number(&node.priority)
+                    .map(|p| p as u32)
+                    .unwrap_or(2);
+
+                let adjusted_priority = if let Some(ref cpm_result) = critical_path_result {
+                    ergatai_dag::critical_path::adjust_priority_with_critical_path(
+                        &node,
+                        cpm_result,
+                        base_priority,
+                    )
+                } else {
+                    base_priority
+                };
+
+                filtered_ready.push((node, adjusted_priority));
             }
 
             // Immediately preempt as Running to prevent duplicate submission
-            for n in &filtered_ready {
+            for (n, _) in &filtered_ready {
                 graph.update_status(&n.id, TaskStatus::Running)?;
             }
             filtered_ready
         };
 
         let mut submitted = Vec::with_capacity(ready_nodes.len());
-        for node in ready_nodes {
-            match self.generate_and_submit(&node).await {
+        for (node, priority) in ready_nodes {
+            match self.generate_and_submit(&node, priority).await {
                 Ok(task_id) => {
-                    tracing::info!("Submitted node {} as task {}", node.id, task_id);
+                    tracing::info!("Submitted node {} as task {} (priority: {})", node.id, task_id, priority);
                     submitted.push(task_id);
                 }
                 Err(e) => {
@@ -211,11 +230,32 @@ impl DagScheduler {
         Ok(submitted)
     }
 
+    /// Calculate critical path for the DAG
+    ///
+    /// Uses estimated durations from node metadata or defaults to 10 seconds per node.
+    /// Returns None if the graph is empty or has no valid start nodes.
+    async fn calculate_critical_path(&self) -> Option<ergatai_dag::critical_path::CriticalPathResult> {
+        let graph = self.graph.lock().await;
+
+        // Build estimated durations map
+        // Try to use node timeout as estimate, otherwise default to 10 seconds
+        let mut estimated_durations = std::collections::HashMap::new();
+        for node in &graph.nodes {
+            let duration = node.timeout.unwrap_or(10);
+            estimated_durations.insert(node.id.clone(), duration);
+        }
+
+        drop(graph);
+
+        let graph = self.graph.lock().await;
+        ergatai_dag::critical_path::calculate_critical_path(&graph, &estimated_durations)
+    }
+
     /// Generate plan and submit to scheduler (no lock acquisition)
     ///
     /// Prefers NATS event publishing when available (decoupled, event-driven).
     /// Falls back to direct `task_scheduler.submit_task()` call otherwise.
-    async fn generate_and_submit(&self, node: &TaskNode) -> ErgataiResult<String> {
+    async fn generate_and_submit(&self, node: &TaskNode, priority: u32) -> ErgataiResult<String> {
         // Generate plan file (still needed — agents read it as a document)
         let plan_file = self.generate_node_plan(node).await?;
         let task_id = node.id.clone();
@@ -232,11 +272,7 @@ impl DagScheduler {
                     plan_content,
                     plan_file: plan_file.to_string_lossy().to_string(),
                     target_agent: node.agent.clone(),
-                    priority: ergatai_lock::conflict_arbitration::priority_to_number(
-                        &node.priority,
-                    )
-                    .map(|p| p as u32)
-                    .unwrap_or(2),
+                    priority,
                     timeout_secs: node.timeout,
                     dag_id: Some(dag_id),
                 };
@@ -254,9 +290,6 @@ impl DagScheduler {
         }
 
         // Fallback: direct task_scheduler call
-        let priority = ergatai_lock::conflict_arbitration::priority_to_number(&node.priority)
-            .map(|p| p as u32)
-            .unwrap_or(2);
         let tid = self.scheduler.submit_task_with_priority(plan_file, priority).await?;
 
         // Start timeout watchdog if timeout is configured
@@ -613,9 +646,12 @@ impl DagScheduler {
         // Cancel timeout watchdog (node completed normally)
         self.cancel_timeout_watcher(node_id).await;
 
+        // Calculate critical path for priority optimization
+        let critical_path_result = self.calculate_critical_path().await;
+
         // Update completed node status AND atomically preempt ready nodes as Running
         // within a single lock acquisition to prevent TOCTOU duplicate submission.
-        let ready_nodes: Vec<TaskNode> = {
+        let ready_nodes: Vec<(TaskNode, u32)> = {
             let mut graph = self.graph.lock().await;
             if let Some(result) = result_path {
                 graph.set_result(node_id, result)?;
@@ -632,10 +668,31 @@ impl DagScheduler {
                 .filter(|n| n.status == TaskStatus::Pending)
                 .cloned()
                 .collect();
-            for n in &ready {
+
+            let mut ready_with_priority = Vec::new();
+            for node in ready {
+                // Calculate adjusted priority using CPM
+                let base_priority = ergatai_lock::conflict_arbitration::priority_to_number(&node.priority)
+                    .map(|p| p as u32)
+                    .unwrap_or(2);
+
+                let adjusted_priority = if let Some(ref cpm_result) = critical_path_result {
+                    ergatai_dag::critical_path::adjust_priority_with_critical_path(
+                        &node,
+                        cpm_result,
+                        base_priority,
+                    )
+                } else {
+                    base_priority
+                };
+
+                ready_with_priority.push((node, adjusted_priority));
+            }
+
+            for (n, _) in &ready_with_priority {
                 graph.update_status(&n.id, TaskStatus::Running)?;
             }
-            ready
+            ready_with_priority
         };
 
         tracing::info!(
@@ -645,10 +702,10 @@ impl DagScheduler {
         );
 
         let mut newly_submitted = Vec::with_capacity(ready_nodes.len());
-        for node in ready_nodes {
-            match self.generate_and_submit(&node).await {
+        for (node, priority) in ready_nodes {
+            match self.generate_and_submit(&node, priority).await {
                 Ok(task_id) => {
-                    tracing::info!("Submitted newly ready node {} as task {}", node.id, task_id);
+                    tracing::info!("Submitted newly ready node {} as task {} (priority: {})", node.id, task_id, priority);
                     newly_submitted.push(task_id);
                 }
                 Err(e) => {
@@ -762,6 +819,9 @@ impl DagScheduler {
         }; // Lock released
 
         if let Some((node_clone, retry_count)) = retry_decision {
+            // Calculate critical path for priority optimization
+            let critical_path_result = self.calculate_critical_path().await;
+
             // Exponential backoff with jitter: base * 2^(retry_count-1) + random(0, base)
             let base_delay = 3u64; // seconds
             let exponential = base_delay * (1u64 << (retry_count - 1).min(6)); // cap at 2^6 = 64
@@ -780,8 +840,23 @@ impl DagScheduler {
             // Wait before retrying (no locks held)
             tokio::time::sleep(delay).await;
 
+            // Calculate priority for retry
+            let base_priority = ergatai_lock::conflict_arbitration::priority_to_number(&node_clone.priority)
+                .map(|p| p as u32)
+                .unwrap_or(2);
+
+            let priority = if let Some(ref cpm_result) = critical_path_result {
+                ergatai_dag::critical_path::adjust_priority_with_critical_path(
+                    &node_clone,
+                    cpm_result,
+                    base_priority,
+                )
+            } else {
+                base_priority
+            };
+
             // Submit without holding lock
-            match self.generate_and_submit(&node_clone).await {
+            match self.generate_and_submit(&node_clone, priority).await {
                 Ok(_task_id) => {
                     let mut graph = self.graph.lock().await;
                     if let Err(e) = graph.update_status(node_id, TaskStatus::Running) {
