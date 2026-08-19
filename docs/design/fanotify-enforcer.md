@@ -1,4 +1,4 @@
-# 基于 fanotify 的文件锁强制实现设计
+# Fanotify-Based File Lock Enforcement Design
 
 > **Status**: Draft
 > **Author**: fanotify-design agent
@@ -9,24 +9,24 @@
 
 ## 1. Executive Summary
 
-Ergatai 当前的文件锁是纯咨询式（advisory）的：agent 通过 MCP 协议请求 `send_message` / acquire lock，但可以直接用 shell 命令（`echo x > file`、`sed -i`、`vim`）绕过。现有的 `FileSystemWatcher`（Phase 6）使用 `notify` crate 做 **事后检测**（detect-after-the-fact），只能记录违规、不能阻止。
+Ergatai's current file locking is purely advisory: agents request `send_message` / acquire lock via the MCP protocol, but can bypass this with shell commands (`echo x > file`, `sed -i`, `vim`). The existing `FileSystemWatcher` (Phase 6) uses the `notify` crate for **detect-after-the-fact** monitoring — it can only log violations, not prevent them.
 
-本方案引入 **Linux fanotify** 的 `FAN_OPEN_PERM` 权限事件，在内核层拦截写操作的 `open()` 系统调用，实现真正的 **强制锁（mandatory locking）**。
+This design introduces **Linux fanotify** `FAN_OPEN_PERM` permission events to intercept write `open()` system calls at the kernel level, implementing true **mandatory locking**.
 
-### 1.1 核心价值
+### 1.1 Core Value
 
-| 维度 | 现状 (advisory) | fanotify 方案 (mandatory) |
-|------|----------------|--------------------------|
-| 绕过难度 | 任意 shell 命令可绕过 | 内核层拦截，无 root 无法绕过 |
-| 检测时机 | 文件被修改后（notify event） | 文件打开前（permission event） |
-| 违规成本 | 事后审计 + 告警 | 操作直接失败（EACCES/EPERM） |
-| Agent 体验 | 无感 | 收到明确的 "file locked by agent X" 错误 |
+| Dimension | Current (advisory) | fanotify (mandatory) |
+|-----------|-------------------|---------------------|
+| Bypass difficulty | Any shell command can bypass | Kernel-level interception; cannot bypass without root |
+| Detection timing | After file is modified (notify event) | Before file is opened (permission event) |
+| Violation cost | Post-hoc audit + alert | Operation fails immediately (EACCES/EPERM) |
+| Agent experience | Unaware | Receives clear "file locked by agent X" error |
 
 ---
 
-## 2. 现有架构分析
+## 2. Existing Architecture Analysis
 
-### 2.1 关键组件
+### 2.1 Key Components
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
@@ -34,61 +34,61 @@ Ergatai 当前的文件锁是纯咨询式（advisory）的：agent 通过 MCP �
 │  ─────────────────────────────────────────────────────────────── │
 │  OnceLock<RwLock<HashMap<project_id, ProjectFileAccess>>>        │
 │  └── ProjectFileAccess {                                         │
-│        lock_manager:     Arc<FileLockManager>,   ← SQLite 锁库   │
+│        lock_manager:     Arc<FileLockManager>,   ← SQLite lock DB│
 │        snapshot_manager: Arc<SnapshotManager>,   ← Git COW      │
-│        watchdog:         Arc<RwLock<Watchdog>>,  ← 心跳/过期    │
-│        // ✨ 新增                                                 │
-│        enforcer:         Arc<Enforcer>,          ← fanotify 强制 │
+│        watchdog:         Arc<RwLock<Watchdog>>,  ← heartbeat/exp │
+│        // ✨ New                                                  │
+│        enforcer:         Arc<Enforcer>,          ← fanotify      │
 │      }                                                           │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-### 2.2 现有锁查询接口
+### 2.2 Existing Lock Query Interface
 
 ```rust
-// lock_manager.rs — 已有接口
+// lock_manager.rs — existing interface
 pub fn is_file_locked(&self, file_path: &str) -> Result<bool, ErgataiError>
 pub fn is_file_locked_for_write(&self, file_path: &str) -> Result<bool, ErgataiError>
 pub fn record_violation(&self, file_path: &str, action: &str) -> Result<(), ErgataiError>
 pub fn log_audit(&self, agent_id, session_id, action, file_path, mode, reason) -> Result<(), ErgataiError>
 ```
 
-**关键问题**：`is_file_locked_for_write()` 只返回 `bool`，不返回 "谁锁了它"。fanotify 拒绝时需要告诉用户 "文件被 agent-X 锁定"，所以需要扩展一个查询接口。
+**Key issue**: `is_file_locked_for_write()` only returns `bool`, not "who locked it". When fanotify denies access, it needs to tell the user "file is locked by agent-X", so we need to extend the query interface.
 
-### 2.3 PID → agent_id 映射
+### 2.3 PID → agent_id Mapping
 
-`RmuxBackend::discover_agents()`（`crates/ergatai-runtime/src/backends/rmux.rs:1246`）已经有完善的 PID 发现机制：
+`RmuxBackend::discover_agents()` (`crates/ergatai-runtime/src/backends/rmux.rs:1246`) already has a robust PID discovery mechanism:
 
 ```rust
-// 已存在
+// Already exists
 fn read_proc_environ(pid: u32, var_name: &str) -> Option<String>
 fn find_opencode_child_environ(pid: u32, var_name: &str) -> Option<String>
 ```
 
-发现流程：
-1. `rmux.find_panes().all()` → 获取所有 pane
-2. 从 `PaneProcessState::Running { pid }` 提取 PID
-3. 读 `/proc/{pid}/environ` 获取 `RMUX_PANE`（确定性 ID）
-4. 遍历 `/proc/{pid}/task/{pid}/children` 找 opencode 子进程
-5. 读 `ERGATAI_AGENT_ID` 环境变量
+Discovery flow:
+1. `rmux.find_panes().all()` → get all panes
+2. Extract PID from `PaneProcessState::Running { pid }`
+3. Read `/proc/{pid}/environ` to get `RMUX_PANE` (deterministic ID)
+4. Walk `/proc/{pid}/task/{pid}/children` to find opencode child processes
+5. Read `ERGATAI_AGENT_ID` environment variable
 
-**问题**：这些函数是 `RmuxBackend` 的私有方法。fanotify enforcer 也需要用，需要提升到共享位置。
+**Problem**: These functions are private methods of `RmuxBackend`. The fanotify enforcer also needs them, so they need to be promoted to a shared location.
 
-### 2.4 AgentRegistry（运行时）
+### 2.4 AgentRegistry (Runtime)
 
-`AgentRuntime` 维护 `registry: Arc<RwLock<HashMap<String, AgentInfo>>>`，其中：
-- `AgentInfo.agent_id` — 如 `%15`（来自 RMUX_PANE）
-- `AgentInfo.handle.process_id: Option<String>` — 子进程 PID（字符串形式）
-- `AgentInfo.handle.metadata["rmux_pane"]` — 与 agent_id 相同
-- `AgentInfo.handle.metadata["ergatai_agent_id"]` — 如果设置
+`AgentRuntime` maintains `registry: Arc<RwLock<HashMap<String, AgentInfo>>>`, where:
+- `AgentInfo.agent_id` — e.g., `%15` (from RMUX_PANE)
+- `AgentInfo.handle.process_id: Option<String>` — child process PID (as string)
+- `AgentInfo.handle.metadata["rmux_pane"]` — same as agent_id
+- `AgentInfo.handle.metadata["ergatai_agent_id"]` — if set
 
 ---
 
-## 3. fanotify 技术方案
+## 3. Fanotify Technical Approach
 
-### 3.1 Linux fanotify 机制
+### 3.1 Linux fanotify Mechanism
 
-fanotify 是 Linux 2.6.36+ 提供的文件系统通知机制，关键特性：
+fanotify is a file system notification mechanism available since Linux 2.6.36+. Key features:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -103,116 +103,116 @@ fanotify 是 Linux 2.6.36+ 提供的文件系统通知机制，关键特性：
 │  ┌─────────────────────────────────────────────────────────┐    │
 │  │  Kernel fanotify subsystem                              │    │
 │  │  ─────────────────────────────────────────────────────  │    │
-│  │  每当进程 open("/project/root/foo.rs", O_WRONLY) 时：    │    │
-│  │    ① 内核暂停该进程（进入 D 状态）                        │    │
-│  │    ② 生成 FAN_OPEN_PERM 事件                            │    │
-│  │    ③ 写入 fanotify fd                                   │    │
-│  │    ④ 等待用户态响应                                      │    │
-│  │    ⑤ 用户态写回 FAN_ALLOW 或 FAN_DENY                    │    │
-│  │    ⑥ 内核恢复/拒绝原进程的 open() 调用                   │    │
+│  │  Whenever a process open("/project/root/foo.rs", O_WRONLY):│
+│  │    ① Kernel suspends the process (enters D state)        │    │
+│  │    ② Generates FAN_OPEN_PERM event                       │    │
+│  │    ③ Writes to fanotify fd                               │    │
+│  │    ④ Waits for userspace response                        │    │
+│  │    ⑤ Userspace writes back FAN_ALLOW or FAN_DENY         │    │
+│  │    ⑥ Kernel resumes/rejects the original open() call     │    │
 │  └─────────────────────────────────────────────────────────┘    │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-**关键事件类型**：
+**Key event types**:
 
-| Event | 用途 | 阻塞语义 |
-|-------|------|---------|
-| `FAN_OPEN_PERM` | 拦截 open 权限请求 | 同步阻塞，必须响应 |
-| `FAN_ACCESS_PERM` | 拦截 read 权限（可选） | 同步阻塞 |
-| `FAN_OPEN` | 文件打开通知（非权限） | 异步 |
-| `FAN_CLOSE_WRITE` | 可写 fd 关闭 | 异步 |
+| Event | Purpose | Blocking semantics |
+|-------|---------|-------------------|
+| `FAN_OPEN_PERM` | Intercept open permission request | Synchronous blocking, must respond |
+| `FAN_ACCESS_PERM` | Intercept read permission (optional) | Synchronous blocking |
+| `FAN_OPEN` | File open notification (non-permission) | Asynchronous |
+| `FAN_CLOSE_WRITE` | Writable fd closed | Asynchronous |
 
-我们主要使用 `FAN_OPEN_PERM` 拦截 **写意图**（通过检查 `open()` 的 flags）。
+We primarily use `FAN_OPEN_PERM` to intercept **write intent** (by checking the `open()` flags).
 
-### 3.2 检测写操作的 trick
+### 3.2 Detecting Write Operations
 
-fanotify 的 `FAN_OPEN_PERM` 事件 **不直接暴露 open flags**（O_RDONLY/O_WRONLY/O_RDWR）。解决方案：
+fanotify's `FAN_OPEN_PERM` event **does not directly expose open flags** (O_RDONLY/O_WRONLY/O_RDWR). Solutions:
 
-**方案 A（推荐）: 使用 FAN_OPEN_PERM + /proc/{pid}/fdinfo**
+**Approach A (Recommended): Use FAN_OPEN_PERM + /proc/{pid}/fdinfo**
 ```rust
-// 收到 FAN_OPEN_PERM 事件时：
-// event.pid → 触发进程的 PID
-// event.fa.fid → 文件的 file handle (需要 FAN_REPORT_FID)
+// When receiving FAN_OPEN_PERM event:
+// event.pid → PID of the triggering process
+// event.fa.fid → file handle (requires FAN_REPORT_FID)
 //
-// 通过 /proc/{pid}/fd/ 或 /proc/{pid}/maps 无法看到未完成的 open
-// 但可以通过 openat2() 的 RESOLVE_NO_SYMLINKS 等辅助
+// Cannot see pending open via /proc/{pid}/fd/ or /proc/{pid}/maps
+// But can use openat2() RESOLVE_NO_SYMLINKS etc. as auxiliary
 //
-// 实际上 FAN_OPEN_PERM 事件本身不含 flags，但我们可以通过
-// 检查进程是否已持有该文件的写 fd 来判断意图
-// 更简单的做法：拦截所有 open 权限请求，用 eBPF/audit 补充 flags 信息
+// FAN_OPEN_PERM event itself doesn't contain flags, but we can
+// check if the process already holds a write fd for the file to infer intent
+// Simpler approach: intercept all open permission requests, use eBPF/audit for flags
 ```
 
-**方案 B（更实用）: 使用 `fanotify` 的 `FAN_OPEN_PERM` + 默认拒绝未知写者**
+**Approach B (More practical): Use FAN_OPEN_PERM + default deny for unknown writers**
 
-由于 fanotify permission events 无法直接区分 read/write intent，推荐 **两阶段检测**：
+Since fanotify permission events cannot directly distinguish read/write intent, a **two-stage detection** is recommended:
 
 ```
 Stage 1: FAN_OPEN_PERM
-  └─ 检查 (pid, inode) 是否已被本 enforcer 标记为 "pending write check"
-  └─ 通过 pid 查 agent_id → 查 lock table
-  └─ 如果 agent 没有该文件的 WRITE/ADMIN 锁 → 拒绝
+  └─ Check if (pid, inode) is already marked as "pending write check"
+  └─ Look up pid → agent_id → check lock table
+  └─ If agent doesn't have WRITE/ADMIN lock on the file → DENY
 
 Stage 2: FAN_CLOSE_WRITE
-  └─ 文件被修改后关闭时记录审计事件
+  └─ Record audit event when file is closed after modification
 ```
 
-**方案 C（最准确，推荐最终方案）: 使用 `FAN_RENAME` + `FAN_CREATE` + `FAN_DELETE` + `FAN_MODIFY`**
+**Approach C (Most accurate, recommended for final): Use `FAN_RENAME` + `FAN_CREATE` + `FAN_DELETE` + `FAN_MODIFY`**
 
 ```rust
-// Linux 5.17+ 支持 FAN_RENAME, FAN_CREATE, FAN_DELETE_SELF
-// 配合 FAN_REPORT_FID, FAN_REPORT_TARGET_FID
-// 可以精确捕获 mutation 操作
+// Linux 5.17+ supports FAN_RENAME, FAN_CREATE, FAN_DELETE_SELF
+// Combined with FAN_REPORT_FID, FAN_REPORT_TARGET_FID
+// Can precisely capture mutation operations
 ```
 
-**实际采用方案**: **方案 A + B 的组合** —
+**Actually adopted approach**: **Combination of A + B** —
 
 ```rust
-// 监听 FAN_OPEN_PERM → 同步拦截
-// 通过 /proc/{pid}/cmdline + pid → agent_id 映射判断身份
-// 通过 /proc/{pid}/fd/ 检查该进程是否已持有该文件的 rw fd
-//   (如果进程已经持有 rw fd，说明它在 open 时已被放过，后续 write 直接允许)
-// 否则检查 lock table
-// 如果进程不在 agent registry 中 → 直接 ALLOW（非 agent 进程不受管控）
+// Monitor FAN_OPEN_PERM → synchronous interception
+// Identify via /proc/{pid}/cmdline + pid → agent_id mapping
+// Check /proc/{pid}/fd/ to see if process already holds rw fd for the file
+//   (if process already holds rw fd, it was allowed at open time, subsequent writes pass)
+// Otherwise check lock table
+// If process is not in agent registry → ALLOW directly (non-agent processes are unmanaged)
 ```
 
-### 3.3 Rust crate 选择
+### 3.3 Rust Crate Selection
 
 ```toml
 # Cargo.toml (ergatai-lock)
 [target.'cfg(target_os = "linux")'.dependencies]
-fanotify-rs = "0.3.1"        # 高级 fanotify API
-fanotify-fid = "0.7.0"       # FID 模式事件解析
+fanotify-rs = "0.3.1"        # High-level fanotify API
+fanotify-fid = "0.7.0"       # FID mode event parsing
 
-# 或者直接使用 nix crate (已有间接依赖)
+# Or use nix crate directly (already an indirect dependency)
 nix = { version = "0.28", features = ["fanotify", "process"] }
 ```
 
-**推荐**: 直接使用 `nix` crate 的 fanotify 封装（更底层但更可控），或手写 syscall 包装。`fanotify-rs` 0.3.1 相对年轻，可能缺少 `FAN_REPORT_FID` 等现代特性。
+**Recommendation**: Use the `nix` crate's fanotify wrapper directly (lower-level but more controllable), or hand-write syscall wrappers. `fanotify-rs` 0.3.1 is relatively young and may lack modern features like `FAN_REPORT_FID`.
 
-### 3.4 性能考虑
+### 3.4 Performance Considerations
 
-fanotify 的 permission event 是 **同步阻塞** 的 — 被拦截的进程在内核中睡眠直到用户态响应。性能关键点：
+fanotify permission events are **synchronous blocking** — the intercepted process sleeps in the kernel until userspace responds. Key performance points:
 
-| 环节 | 延迟预算 | 备注 |
-|------|---------|------|
-| 事件从内核到用户态 | < 1μs | fd read，零拷贝 |
-| PID → agent_id 查询 | < 5μs | 内存 HashMap + 缓存 |
-| lock table 查询 | < 50μs | SQLite WAL 读（内存缓存热路径）|
-| 响应写回内核 | < 1μs | fd write |
-| **总延迟** | **< 100μs** | 对 agent 几乎无感 |
+| Stage | Latency budget | Notes |
+|-------|---------------|-------|
+| Event from kernel to userspace | < 1μs | fd read, zero-copy |
+| PID → agent_id lookup | < 5μs | In-memory HashMap + cache |
+| Lock table query | < 50μs | SQLite WAL read (hot path in memory cache) |
+| Response write back to kernel | < 1μs | fd write |
+| **Total latency** | **< 100μs** | Nearly imperceptible to agents |
 
-**优化策略**：
-1. **热路径缓存**: 维护 `HashMap<(pid, inode_hash), (agent_id, lock_expires_at)>` 的 LRU 缓存
-2. **批量响应**: 一次 `read()` 读多个事件，批量处理
-3. **白名单**: 对 ergatai 自身的进程（如 snapshot, watchdog）直接 ALLOW
-4. **非 agent 进程**: 不在 registry 中的 PID 直接 ALLOW（不干扰系统其他进程）
+**Optimization strategies**:
+1. **Hot-path caching**: Maintain LRU cache of `HashMap<(pid, inode_hash), (agent_id, lock_expires_at)>`
+2. **Batch responses**: Read multiple events in one `read()`, process in batch
+3. **Allowlist**: Directly ALLOW ergatai's own processes (e.g., snapshot, watchdog)
+4. **Non-agent processes**: Directly ALLOW PIDs not in registry (don't interfere with other system processes)
 
 ---
 
-## 4. 架构设计
+## 4. Architecture Design
 
-### 4.1 总体架构
+### 4.1 Overall Architecture
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
@@ -249,18 +249,18 @@ fanotify 的 permission event 是 **同步阻塞** 的 — 被拦截的进程在
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 4.2 新增模块：`enforcer.rs`
+### 4.2 New Module: `enforcer.rs`
 
 ```
 crates/ergatai-lock/src/
-├── enforcer.rs           ← 新增：fanotify 强制锁实现
-├── pid_resolver.rs       ← 新增：PID → agent_id 解析（从 RmuxBackend 提升）
-├── lock_manager.rs       ← 修改：新增 is_file_locked_by() 等查询方法
-├── watcher.rs            ← 保留：事后检测作为 fallback + 非 Linux 平台
-└── manager.rs            ← 修改：集成 Enforcer 到 ProjectFileAccess
+├── enforcer.rs           ← New: fanotify mandatory lock implementation
+├── pid_resolver.rs       ← New: PID → agent_id resolution (extracted from RmuxBackend)
+├── lock_manager.rs       ← Modified: add is_file_locked_by() and other query methods
+├── watcher.rs            ← Kept: detect-after-the-fact as fallback + non-Linux platforms
+└── manager.rs            ← Modified: integrate Enforcer into ProjectFileAccess
 ```
 
-### 4.3 数据结构设计
+### 4.3 Data Structure Design
 
 ```rust
 // enforcer.rs
@@ -276,9 +276,9 @@ crates/ergatai-lock/src/
 /// 3. Stopped during `shutdown_file_access()`
 ///
 /// # Failure Modes
-/// - fanotify fd 创建失败 → fail-open (降级到 FileSystemWatcher 模式)
-/// - enforcer 线程 panic → fail-open (log + 继续)
-/// - 锁库不可用 → fail-open (允许所有访问，记录 warning)
+/// - fanotify fd creation fails → fail-open (degrades to FileSystemWatcher mode)
+/// - enforcer thread panics → fail-open (log + continue)
+/// - Lock DB unavailable → fail-open (allow all access, log warning)
 pub struct Enforcer {
     /// fanotify file descriptor (wrapped for safe drop)
     fanotify_fd: OwnedFd,
@@ -365,7 +365,7 @@ pub struct EnforcerMetrics {
 }
 ```
 
-### 4.4 PID 解析器
+### 4.4 PID Resolver
 
 ```rust
 // pid_resolver.rs
@@ -497,10 +497,10 @@ impl PidResolver {
 }
 ```
 
-### 4.5 LockManager 扩展
+### 4.5 LockManager Extension
 
 ```rust
-// lock_manager.rs — 新增方法
+// lock_manager.rs — new methods
 
 /// Get the lock holder for a file (for write-mode locks).
 /// Returns (agent_id, session_id) if a WRITE/ADMIN lock exists.
@@ -561,22 +561,22 @@ pub fn record_enforced_violation(
 }
 ```
 
-### 4.6 集成到 FileAccessManager
+### 4.6 Integration into FileAccessManager
 
 ```rust
-// manager.rs — 修改 ProjectFileAccess
+// manager.rs — modified ProjectFileAccess
 
 struct ProjectFileAccess {
     lock_manager: Arc<FileLockManager>,
     snapshot_manager: Arc<SnapshotManager>,
     watchdog: Arc<RwLock<Watchdog>>,
-    enforcer: Option<Arc<Enforcer>>,  // ← 新增，None if disabled/unsupported
+    enforcer: Option<Arc<Enforcer>>,  // ← New, None if disabled/unsupported
 }
 
 pub async fn init_file_access(project_id: &str, project_root: &Path) -> ErgataiResult<()> {
     // ... existing code ...
 
-    // 创建 Enforcer (Linux only, 失败则 fail-open 降级)
+    // Create Enforcer (Linux only, fail-open degradation on failure)
     let enforcer = match Enforcer::new(
         lock_manager.clone(),
         project_root.to_path_buf(),
@@ -628,9 +628,9 @@ pub async fn shutdown_file_access(project_id: &str) -> ErgataiResult<()> {
 
 ---
 
-## 5. 事件循环核心逻辑
+## 5. Event Loop Core Logic
 
-### 5.1 主循环伪代码
+### 5.1 Main Loop Pseudocode
 
 ```rust
 impl Enforcer {
@@ -834,89 +834,89 @@ impl Enforcer {
 }
 ```
 
-### 5.2 关键问题：读/写意图区分
+### 5.2 Key Challenge: Read/Write Intent Distinction
 
-fanotify `FAN_OPEN_PERM` 事件 **不暴露 open flags**。这是核心挑战。
+fanotify `FAN_OPEN_PERM` events **do not expose open flags**. This is the core challenge.
 
-**解决方案演进**：
+**Solution evolution**:
 
-| 方案 | 实现复杂度 | 准确性 | 推荐度 |
-|------|-----------|--------|--------|
-| A: 只拦截 WRITE lock holder 冲突 | 低 | 中（防并发冲突，不防无锁写入） | ★★★★ 短期 |
-| B: FAN_CLOSE_WRITE 事后补救 | 低 | 中（写完了才发现，可以回滚） | ★★★ 辅助 |
-| C: eBPF 补充（bpf_openfile） | 高 | 高（能精确读 flags） | ★★★★★ 长期 |
-| D: LSM 自定义模块 | 极高 | 最高 | ★★ 内核级 |
+| Approach | Implementation complexity | Accuracy | Recommendation |
+|----------|--------------------------|----------|----------------|
+| A: Only intercept WRITE lock holder conflicts | Low | Medium (prevents concurrent conflicts, not unlocked writes) | ★★★★ Short-term |
+| B: FAN_CLOSE_WRITE post-hoc remediation | Low | Medium (detects after write, can rollback) | ★★★ Auxiliary |
+| C: eBPF supplement (bpf_openfile) | High | High (can read flags precisely) | ★★★★★ Long-term |
+| D: Custom LSM module | Very high | Highest | ★★ Kernel-level |
 
-**推荐分阶段实现**：
+**Recommended phased implementation**:
 
-**Phase 1（MVP, 本文重点）**:
+**Phase 1 (MVP, focus of this document)**:
 ```
-FAN_OPEN_PERM + /proc/{pid}/fd/* inspection + 进程树分析
+FAN_OPEN_PERM + /proc/{pid}/fd/* inspection + process tree analysis
 ↓
-拦截场景: agent A 持 WRITE lock on file.rs
-         agent B (通过 shell `echo >> file.rs`) open(file.rs, O_WRONLY)
-         → 内核暂停 B 的 open()
-         → enforcer 查 lock table → 发现 holder = A
-         → 返回 FAN_DENY → B 的 open() 失败，返回 EPERM
-         → audit: "ENFORCED_WRITE_CONFLICT agent=B holder=A"
+Interception scenario: agent A holds WRITE lock on file.rs
+             agent B (via shell `echo >> file.rs`) open(file.rs, O_WRONLY)
+             → Kernel suspends B's open()
+             → Enforcer queries lock table → finds holder = A
+             → Returns FAN_DENY → B's open() fails with EPERM
+             → Audit: "ENFORCED_WRITE_CONFLICT agent=B holder=A"
 ```
 
-**Phase 2（增强）**:
+**Phase 2 (Enhancement)**:
 ```
-FAN_CLOSE_WRITE + 文件 hash 比较 (类似现有 FileSystemWatcher)
+FAN_CLOSE_WRITE + file hash comparison (similar to existing FileSystemWatcher)
 ↓
-检测: 文件被修改但无 lock → 触发 SIGSTOP + 通知 + 自动回滚 (git checkout)
+Detection: file modified without lock → trigger SIGSTOP + notify + auto-rollback (git checkout)
 ```
 
-**Phase 3（终极）**:
+**Phase 3 (Ultimate)**:
 ```
-eBPF bpf_openfile 程序拦截 openat2() 系统调用
+eBPF bpf_openfile program intercepts openat2() system calls
 ↓
-精确读取 open flags, 区分 O_RDONLY / O_WRONLY / O_RDWR
-在 open 入口就能判断意图, 无需 /proc 二次查询
+Precisely reads open flags, distinguishes O_RDONLY / O_WRONLY / O_RDWR
+Determines intent at open entry point, no /proc secondary query needed
 ```
 
-### 5.3 处理 open flags 的实用方案
+### 5.3 Practical Approach for Handling Open Flags
 
-由于 fanotify 无法直接读 open flags，我们使用一个 **混合策略**：
+Since fanotify cannot directly read open flags, we use a **hybrid strategy**:
 
 ```rust
-/// 对于 FAN_OPEN_PERM 事件, 我们尝试以下方法推断 open 意图:
+/// For FAN_OPEN_PERM events, we try the following methods to infer open intent:
 ///
-/// 1. /proc/{pid}/cmdline: 检查进程正在执行的命令
-///    - 如果 cmdline 包含 "cat", "less", "head" → 大概率是 READ
-///    - 如果 cmdline 包含 "vim", "sed -i", "echo >>" → 大概率是 WRITE
-///    - 不可靠 (进程可以改名, exec 后 cmdline 变化)
+/// 1. /proc/{pid}/cmdline: Check the command the process is executing
+///    - If cmdline contains "cat", "less", "head" → likely READ
+///    - If cmdline contains "vim", "sed -i", "echo >>" → likely WRITE
+///    - Unreliable (processes can rename, cmdline changes after exec)
 ///
-/// 2. /proc/{pid}/fd/* 扫描 (在 FAN_OPEN_PERM 时点):
-///    - 列出进程已持有的 fd, 找到刚打开的那个 (最新 inode match)
-///    - 读 /proc/{pid}/fdinfo/{fd} 获取 open flags
-///    - 问题: FAN_OPEN_PERM 时 open 还没完成, fd 还没创建
+/// 2. /proc/{pid}/fd/* scan (at FAN_OPEN_PERM time):
+///    - List fds held by the process, find the just-opened one (latest inode match)
+///    - Read /proc/{pid}/fdinfo/{fd} to get open flags
+///    - Problem: at FAN_OPEN_PERM time, open hasn't completed, fd doesn't exist yet
 ///
-/// 3. 实际最可行: 使用 FAN_CLOSE_WRITE + hash 对比:
-///    - 记录每个被监控文件的 pre-hash (在 FAN_OPEN 时)
-///    - FAN_CLOSE_WRITE 触发时对比 post-hash
-///    - 如果 hash 变化且无 lock → 违规 → 回滚 (git checkout) + 审计
+/// 3. Most feasible in practice: Use FAN_CLOSE_WRITE + hash comparison:
+///    - Record pre-hash for each monitored file (at FAN_OPEN time)
+///    - Compare post-hash when FAN_CLOSE_WRITE triggers
+///    - If hash changed and no lock → violation → rollback (git checkout) + audit
 ///
-/// 4. 或者使用 fanotify 的 FAN_MODIFY 事件:
-///    - FAN_MODIFY 在 pwrite/write 时触发 (非权限事件)
-///    - 可以配合 FAN_CLOSE_WRITE 实现 "检测到修改"
+/// 4. Or use fanotify's FAN_MODIFY event:
+///    - FAN_MODIFY triggers on pwrite/write (non-permission event)
+///    - Can combine with FAN_CLOSE_WRITE for "detect modification"
 ///
-/// 5. 最佳折中: 拦截所有 FAN_OPEN_PERM, 对 "可能是写" 的 open
-///    进行 lock 检查, 其余直接 ALLOW:
-///    - 如果 file 已有 WRITE/ADMIN lock 且 caller 不是 holder → DENY
-///    - 如果 file 无 lock → ALLOW (但仍可通过 FAN_CLOSE_WRITE 监测)
-///    - 这样至少能防止 "两个 agent 同时写一个文件" 的冲突
+/// 5. Best compromise: Intercept all FAN_OPEN_PERM, perform lock check
+///    for "possibly write" opens, ALLOW the rest:
+///    - If file has WRITE/ADMIN lock and caller is not holder → DENY
+///    - If file has no lock → ALLOW (but still monitorable via FAN_CLOSE_WRITE)
+///    - This at least prevents "two agents writing same file simultaneously" conflicts
 ```
 
 ---
 
-## 6. NATS 事件集成
+## 6. NATS Event Integration
 
-### 6.1 新增事件类型
+### 6.1 New Event Type
 
 ```rust
-// ergatai-nats/src/events.rs — 新增
+// ergatai-nats/src/events.rs — new
 
 /// Published when the fanotify enforcer denies a file access
 pub struct FileAccessEnforcedPayload {
@@ -944,7 +944,7 @@ pub struct FileAccessEnforcedPayload {
 // Stream: FILE_EVENTS (existing)
 ```
 
-### 6.2 发布逻辑
+### 6.2 Publish Logic
 
 ```rust
 impl Enforcer {
@@ -975,11 +975,11 @@ impl Enforcer {
 
 ---
 
-## 7. 与 AgentRuntime 的集成
+## 7. Integration with AgentRuntime
 
-### 7.1 PID 注册钩子
+### 7.1 PID Registration Hook
 
-在 `RmuxBackend::discover_agents()` 完成后，通知 PidResolver 刷新：
+After `RmuxBackend::discover_agents()` completes, notify PidResolver to refresh:
 
 ```rust
 // runtime.rs — AgentRuntime
@@ -998,7 +998,7 @@ pub async fn discover_and_register_agents(self: &Arc<Self>) -> ErgataiResult<usi
         }
     }
 
-    // ✨ 新增：通知 PidResolver 刷新
+    // ✨ New: notify PidResolver to refresh
     if new_count > 0 {
         if let Some(resolver) = get_pid_resolver() {
             resolver.refresh().await?;
@@ -1009,10 +1009,10 @@ pub async fn discover_and_register_agents(self: &Arc<Self>) -> ErgataiResult<usi
 }
 ```
 
-### 7.2 全局 PidResolver
+### 7.2 Global PidResolver
 
 ```rust
-// pid_resolver.rs — 全局单例
+// pid_resolver.rs — global singleton
 
 static PID_RESOLVER: OnceLock<Arc<PidResolver>> = OnceLock::new();
 
@@ -1030,106 +1030,106 @@ pub fn get_pid_resolver() -> Option<Arc<PidResolver>> {
 
 ---
 
-## 8. 测试策略
+## 8. Testing Strategy
 
-### 8.1 单元测试（不需要 root）
+### 8.1 Unit Tests (no root required)
 
 ```rust
 #[cfg(test)]
 mod tests {
-    // 测试 PidResolver 的 /proc 解析逻辑
-    // 测试 decision cache 的 LRU 行为
-    // 测试 EnforcerConfig 的 exclude_paths 匹配
-    // 测试 lock_manager.get_write_lock_holder()
+    // Test PidResolver's /proc parsing logic
+    // Test decision cache LRU behavior
+    // Test EnforcerConfig's exclude_paths matching
+    // Test lock_manager.get_write_lock_holder()
 
     #[tokio::test]
     async fn test_pid_resolver_walks_ancestors() {
-        // 在测试进程中 fork 一个子进程
-        // 注册父进程为 agent-1
-        // 验证子进程的 resolve() 返回 agent-1
+        // Fork a child process in the test
+        // Register parent process as agent-1
+        // Verify child's resolve() returns agent-1
     }
 
     #[tokio::test]
     async fn test_decision_cache_expires() {
-        // 缓存一个 decision, 等待 TTL 过期
-        // 验证 cache miss
+        // Cache a decision, wait for TTL to expire
+        // Verify cache miss
     }
 }
 ```
 
-### 8.2 集成测试（需要 Linux + root）
+### 8.2 Integration Tests (requires Linux + root)
 
 ```rust
 #[cfg(all(test, target_os = "linux"))]
 mod integration_tests {
-    // 需要 #[ignore] 默认，手动运行
-    // 或检测 CAP_SYS_ADMIN capability
+    // Need #[ignore] by default, run manually
+    // Or detect CAP_SYS_ADMIN capability
 
     #[tokio::test]
     #[ignore]  // requires root
     async fn test_enforcer_denies_unauthorized_write() {
-        // 1. 启动 enforcer on temp dir
-        // 2. agent-1 获取 WRITE lock on "file.txt"
-        // 3. 模拟 agent-2 的进程 open("file.txt", O_WRONLY)
-        // 4. 验证 open() 返回 EPERM
-        // 5. 验证 audit_log 包含 ENFORCED_WRITE_CONFLICT
+        // 1. Start enforcer on temp dir
+        // 2. agent-1 acquires WRITE lock on "file.txt"
+        // 3. Simulate agent-2's process open("file.txt", O_WRONLY)
+        // 4. Verify open() returns EPERM
+        // 5. Verify audit_log contains ENFORCED_WRITE_CONFLICT
     }
 
     #[tokio::test]
     #[ignore]
     async fn test_enforcer_allows_lock_holder() {
-        // agent-1 持有 lock → agent-1 的进程可以 open
+        // agent-1 holds lock → agent-1's process can open
     }
 
     #[tokio::test]
     #[ignore]
     async fn test_enforcer_allows_non_agent_process() {
-        // 非 agent 的 PID 不被拦截
+        // Non-agent PIDs are not intercepted
     }
 
     #[tokio::test]
     #[ignore]
     async fn test_enforcer_fail_open_on_lock_db_error() {
-        // 模拟 SQLite 错误 → 验证 fail-open
+        // Simulate SQLite error → verify fail-open
     }
 }
 ```
 
-### 8.3 CI 考虑
+### 8.3 CI Considerations
 
 ```yaml
 # GitHub Actions
 - name: fanotify integration tests
   if: runner.os == 'Linux'
   run: cargo test -p ergatai-lock -- --ignored fanotify
-  # 需要 --privileged or CAP_SYS_ADMIN
+  # Requires --privileged or CAP_SYS_ADMIN
 ```
 
 ---
 
-## 9. 风险与限制
+## 9. Risks and Limitations
 
-### 9.1 平台限制
+### 9.1 Platform Limitations
 
-| 问题 | 影响 | 缓解 |
-|------|------|------|
-| Linux-only | macOS/Windows 无法使用 | `#[cfg(target_os = "linux")]`，其他平台保持 FileSystemWatcher |
-| 需要 root/CAP_SYS_ADMIN | 普通用户无法启用 | 文档说明；或 setuid wrapper |
-| 内核版本要求 | FAN_REPORT_FID 需 5.1+，FAN_RENAME 需 5.17+ | 检测内核版本，降级使用基础 FAN_OPEN_PERM |
+| Issue | Impact | Mitigation |
+|-------|--------|------------|
+| Linux-only | macOS/Windows cannot use | `#[cfg(target_os = "linux")]`, keep FileSystemWatcher on other platforms |
+| Requires root/CAP_SYS_ADMIN | Regular users cannot enable | Document; or setuid wrapper |
+| Kernel version requirements | FAN_REPORT_FID needs 5.1+, FAN_RENAME needs 5.17+ | Detect kernel version, degrade to basic FAN_OPEN_PERM |
 
-### 9.2 兼容性
+### 9.2 Compatibility
 
-| 场景 | 行为 | 备注 |
-|------|------|------|
-| Docker container | fanotify 默认在 container 内可用 | 需要 `--privileged` 或 `CAP_SYS_ADMIN` |
-| OverlayFS | FID 模式可能不支持 | 需要测试；可回退到 non-FID 模式 |
-| NFS/network FS | fanotify 不支持 | 只监控本地路径 |
-| btrfs/ZFS | 应该可以工作 | 建议测试覆盖 |
-| 多挂载命名空间 | fanotify 是 per-mount | 需为每个挂载点 mark |
+| Scenario | Behavior | Notes |
+|----------|----------|-------|
+| Docker container | fanotify available by default in containers | Needs `--privileged` or `CAP_SYS_ADMIN` |
+| OverlayFS | FID mode may not be supported | Needs testing; can fall back to non-FID mode |
+| NFS/network FS | fanotify not supported | Only monitor local paths |
+| btrfs/ZFS | Should work | Recommend test coverage |
+| Multiple mount namespaces | fanotify is per-mount | Need to mark each mount point |
 
-### 9.3 性能影响
+### 9.3 Performance Impact
 
-**热路径分析**（每次文件 open）：
+**Hot path analysis** (per file open):
 ```
 Kernel → fanotify fd read:      ~500ns
 Event parsing:                  ~200ns
@@ -1142,113 +1142,113 @@ Total (cache hit):              ~2μs
 Total (cache miss):             ~10μs
 ```
 
-**影响评估**：
-- 对普通开发工作流：无可感知延迟（<10μs per open）
-- 对高频 I/O（如 cargo build）：可能增加 1-5% 总时间
-- 建议：对 `target/` 目录默认 exclude
+**Impact assessment**:
+- Normal development workflow: no perceptible delay (<10μs per open)
+- High-frequency I/O (e.g., cargo build): may add 1-5% total time
+- Recommendation: exclude `target/` directory by default
 
-### 9.4 故障模式
+### 9.4 Failure Modes
 
-| 故障 | 默认行为 | 可配置 |
-|------|---------|--------|
-| Enforcer panic | fail-open（允许所有） | `fail_closed: true` 反转 |
-| SQLite 不可用 | fail-open | `fail_closed: true` 反转 |
-| NATS 不可用 | 继续工作（仅本地审计） | ✓ |
-| PidResolver stale | 拒绝新 agent（直到 refresh） | 缩短 refresh_interval |
-| fanotify 初始化失败 | 降级到 FileSystemWatcher 模式 | ✓ |
+| Failure | Default behavior | Configurable |
+|---------|-----------------|--------------|
+| Enforcer panic | fail-open (allow all) | `fail_closed: true` to invert |
+| SQLite unavailable | fail-open | `fail_closed: true` to invert |
+| NATS unavailable | Continue working (local audit only) | ✓ |
+| PidResolver stale | Reject new agents (until refresh) | Shorten refresh_interval |
+| fanotify init fails | Degrade to FileSystemWatcher mode | ✓ |
 
-### 9.5 安全风险
+### 9.5 Security Risks
 
-| 风险 | 缓解 |
-|------|------|
-| Agent 通过 `su`/`sudo` 切换到其他用户绕过 PID 映射 | 检查 /proc/{pid}/uid，非 agent uid → deny |
-| Agent 通过 `nsenter` 切换命名空间 | fanotify 是 mount namespace 隔离的 |
-| Agent 直接调用 syscall（绕过 glibc） | fanotify 在内核层拦截，无法绕过 |
-| Agent 修改 enforcer 自身代码 | 通过 .ergatai/ 排除 + 锁保护 |
-
----
-
-## 10. 实施路线图
-
-### Phase 1: MVP（2-3 周）
-- [ ] 提取 `pid_resolver.rs` 从 RmuxBackend
-- [ ] 实现 `enforcer.rs` 基础框架（fanotify mark + event loop）
-- [ ] 实现 "holder conflict detection"（拦截已被其他 agent 锁定的写操作）
-- [ ] 集成到 `manager.rs` + `lib.rs`
-- [ ] 单元测试 + 手动集成测试
-- [ ] NATS 事件发布
-
-### Phase 2: 增强（1-2 周）
-- [ ] `FAN_CLOSE_WRITE` 事后补救（无锁写入检测 + 自动 git checkout 回滚）
-- [ ] `get_write_lock_holder()` 接口
-- [ ] 决策缓存优化
-- [ ] `enforcer_metrics` 可观测性（Prometheus 指标）
-- [ ] 配置 hot-reload（watch config file）
-
-### Phase 3: 精确意图检测（2-3 周）
-- [ ] eBPF 补充（精确读 open flags）
-- [ ] 或者：使用 `seccomp-bpf` 拦截 openat
-- [ ] 区分 READ / WRITE / CREATE / DELETE 操作
-- [ ] 实现 "must hold lock to write" 强策略
-
-### Phase 4: 生产化（ongoing）
-- [ ] CI 集成（privileged test runner）
-- [ ] 性能基准测试
-- [ ] 文档 + 用户指南
-- [ ] 渐进式发布（feature flag: `enforcer.enabled`）
+| Risk | Mitigation |
+|------|------------|
+| Agent bypasses PID mapping via `su`/`sudo` to other user | Check /proc/{pid}/uid, non-agent uid → deny |
+| Agent switches namespace via `nsenter` | fanotify is mount namespace isolated |
+| Agent calls syscall directly (bypassing glibc) | fanotify intercepts at kernel level, cannot bypass |
+| Agent modifies enforcer's own code | Via .ergatai/ exclusion + lock protection |
 
 ---
 
-## 11. 关键决策记录 (ADR)
+## 10. Implementation Roadmap
 
-### ADR-1: 选择 fanotify 而非 inotify
-**决策**: 使用 fanotify
-**理由**:
-- inotify 只能事后通知（无 permission event）
-- fanotify 提供 FAN_OPEN_PERM 同步拦截
-- fanotify 支持全局 PID 信息（inotify 只有 wd）
-- fanotify 支持 FAN_REPORT_FID（基于 inode，无需 path watch）
+### Phase 1: MVP (2-3 weeks)
+- [ ] Extract `pid_resolver.rs` from RmuxBackend
+- [ ] Implement `enforcer.rs` basic framework (fanotify mark + event loop)
+- [ ] Implement "holder conflict detection" (intercept writes already locked by another agent)
+- [ ] Integrate into `manager.rs` + `lib.rs`
+- [ ] Unit tests + manual integration tests
+- [ ] NATS event publishing
 
-### ADR-2: fail-open vs fail-closed 默认策略
-**决策**: 默认 fail-open
-**理由**:
-- fail-closed 会阻塞所有开发工作流当 enforcer 出错
-- ergatai 是开发工具，不是安全产品
-- 高级用户可配置 `fail_closed: true` 切换
+### Phase 2: Enhancement (1-2 weeks)
+- [ ] `FAN_CLOSE_WRITE` post-hoc remediation (unlocked write detection + auto git checkout rollback)
+- [ ] `get_write_lock_holder()` interface
+- [ ] Decision cache optimization
+- [ ] `enforcer_metrics` observability (Prometheus metrics)
+- [ ] Config hot-reload (watch config file)
 
-### ADR-3: 分阶段实现 vs 一步到位
-**决策**: 分阶段（Phase 1 先做冲突检测，Phase 3 做精确意图）
-**理由**:
-- Phase 1 已能解决最严重的 "并发写冲突" 问题
-- eBPF 集成复杂度高，需要内核适配
-- 渐进式发布降低风险
+### Phase 3: Precise Intent Detection (2-3 weeks)
+- [ ] eBPF supplement (precisely read open flags)
+- [ ] Or: use `seccomp-bpf` to intercept openat
+- [ ] Distinguish READ / WRITE / CREATE / DELETE operations
+- [ ] Implement "must hold lock to write" strict policy
 
-### ADR-4: PidResolver 作为独立模块
-**决策**: 从 RmuxBackend 提取为共享模块
-**理由**:
-- fanotify enforcer 需要相同的 PID → agent_id 映射
-- 未来可能用于其他功能（资源隔离、网络策略）
-- 避免在 RmuxBackend 中耦合 fanotify 逻辑
+### Phase 4: Production Hardening (ongoing)
+- [ ] CI integration (privileged test runner)
+- [ ] Performance benchmarking
+- [ ] Documentation + user guide
+- [ ] Gradual rollout (feature flag: `enforcer.enabled`)
 
 ---
 
-## 12. 总结
+## 11. Key Decision Records (ADR)
 
-本设计基于 Linux fanotify 的 `FAN_OPEN_PERM` 权限事件，为 Ergatai 提供 **内核级强制文件锁**。核心创新是：
+### ADR-1: Choose fanotify over inotify
+**Decision**: Use fanotify
+**Rationale**:
+- inotify only provides post-hoc notifications (no permission events)
+- fanotify provides FAN_OPEN_PERM synchronous interception
+- fanotify supports global PID information (inotify only has wd)
+- fanotify supports FAN_REPORT_FID (inode-based, no path watch needed)
 
-1. **PID → agent_id 解析器**：复用 RmuxBackend 已有的 `/proc` 分析逻辑
-2. **热路径缓存**：保证 <10μs 的响应延迟
-3. **fail-open 策略**：enforcer 失败不影响开发工作流
-4. **分阶段实施**：先做最有价值的冲突检测，再迭代增强
+### ADR-2: fail-open vs fail-closed default policy
+**Decision**: Default fail-open
+**Rationale**:
+- fail-closed would block all development workflows when enforcer errors
+- Ergatai is a development tool, not a security product
+- Advanced users can configure `fail_closed: true` to switch
 
-**Phase 1 的覆盖范围**：
-- ✅ 防止两个 agent 同时写同一文件
-- ✅ 告诉用户 "文件被 agent-X 锁定"（而不是静默失败）
-- ✅ 审计日志完整记录所有拦截事件
-- ❌ 不能防止 "无锁写入"（Phase 2/3 解决）
-- ❌ 仅 Linux，需要 root/CAP_SYS_ADMIN
+### ADR-3: Phased implementation vs all-at-once
+**Decision**: Phased (Phase 1 does conflict detection, Phase 3 does precise intent)
+**Rationale**:
+- Phase 1 already solves the most serious "concurrent write conflict" problem
+- eBPF integration is complex and requires kernel adaptation
+- Gradual rollout reduces risk
 
-**架构兼容性**：
-- 与现有 `FileSystemWatcher` 互补（fanotify 事前拦截 + notify 事后检测）
-- 与 `FileLockManager` 共享 SQLite 数据库
-- 通过 NATS 发布事件供 UI/dashboard 消费
+### ADR-4: PidResolver as independent module
+**Decision**: Extract from RmuxBackend as shared module
+**Rationale**:
+- fanotify enforcer needs the same PID → agent_id mapping
+- May be used for other features in the future (resource isolation, network policy)
+- Avoid coupling fanotify logic into RmuxBackend
+
+---
+
+## 12. Summary
+
+This design provides **kernel-level mandatory file locking** for Ergatai based on Linux fanotify's `FAN_OPEN_PERM` permission events. Core innovations:
+
+1. **PID → agent_id resolver**: Reuses RmuxBackend's existing `/proc` analysis logic
+2. **Hot-path caching**: Ensures <10μs response latency
+3. **fail-open policy**: Enforcer failure doesn't block development workflows
+4. **Phased implementation**: Start with the most valuable conflict detection, then iterate
+
+**Phase 1 coverage**:
+- ✅ Prevents two agents from writing the same file simultaneously
+- ✅ Tells users "file is locked by agent-X" (instead of silent failure)
+- ✅ Audit log records all interception events
+- ❌ Cannot prevent "unlocked writes" (Phase 2/3)
+- ❌ Linux only, requires root/CAP_SYS_ADMIN
+
+**Architecture compatibility**:
+- Complements existing `FileSystemWatcher` (fanotify pre-interception + notify post-detection)
+- Shares SQLite database with `FileLockManager`
+- Publishes events via NATS for UI/dashboard consumption
