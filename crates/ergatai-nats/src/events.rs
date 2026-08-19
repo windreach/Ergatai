@@ -65,8 +65,8 @@ pub struct NodeCompletePayload {
     pub agent_name: String,
     /// Brief result summary (not the full result file)
     pub result_summary: Option<String>,
-    /// Structured key-value outputs → fed into DagContext for template rendering
-    pub outputs: HashMap<String, String>,
+    /// Structured outputs (JSON value) → fed into DagContext for template rendering
+    pub outputs: serde_json::Value,
     /// Optional path to the full result file (for large outputs)
     pub result_file: Option<String>,
 }
@@ -478,16 +478,16 @@ mod tests {
 
     #[test]
     fn test_node_complete_roundtrip() {
-        let mut outputs = HashMap::new();
-        outputs.insert("review_result".to_string(), "LGTM".to_string());
-        outputs.insert("issues".to_string(), "3".to_string());
+        let mut outputs = serde_json::Map::new();
+        outputs.insert("review_result".to_string(), serde_json::Value::String("LGTM".to_string()));
+        outputs.insert("issues".to_string(), serde_json::Value::String("3".to_string()));
 
         let payload = NodeCompletePayload {
             node_id: "n1".to_string(),
             task_id: "n1".to_string(),
             agent_name: "claude-code".to_string(),
             result_summary: Some("Done".to_string()),
-            outputs: outputs.clone(),
+            outputs: serde_json::Value::Object(outputs.clone()),
             result_file: Some(".ergatai/.dag-results/n1.md".to_string()),
         };
 
@@ -495,11 +495,15 @@ mod tests {
         let restored: NodeCompletePayload = serde_json::from_str(&json).unwrap();
 
         assert_eq!(restored.node_id, "n1");
-        assert_eq!(restored.outputs.len(), 2);
-        assert_eq!(
-            restored.outputs.get("review_result"),
-            Some(&"LGTM".to_string())
-        );
+        if let serde_json::Value::Object(ref obj) = restored.outputs {
+            assert_eq!(obj.len(), 2);
+            assert_eq!(
+                obj.get("review_result"),
+                Some(&serde_json::Value::String("LGTM".to_string()))
+            );
+        } else {
+            panic!("Expected Object");
+        }
         assert_eq!(
             restored.result_file,
             Some(".ergatai/.dag-results/n1.md".to_string())
@@ -513,13 +517,13 @@ mod tests {
             task_id: "n1".to_string(),
             agent_name: "agent".to_string(),
             result_summary: None,
-            outputs: HashMap::new(),
+            outputs: serde_json::Value::Object(serde_json::Map::new()),
             result_file: None,
         };
 
         let json = serde_json::to_string(&payload).unwrap();
         let restored: NodeCompletePayload = serde_json::from_str(&json).unwrap();
-        assert!(restored.outputs.is_empty());
+        assert!(matches!(restored.outputs, serde_json::Value::Object(ref obj) if obj.is_empty()));
     }
 
     // ── NodeFailedPayload ──
@@ -573,7 +577,7 @@ mod tests {
             task_id: "n1".to_string(),
             agent_name: "agent".to_string(),
             result_summary: Some("ok".to_string()),
-            outputs: HashMap::new(),
+            outputs: serde_json::Value::Object(serde_json::Map::new()),
             result_file: None,
         });
 

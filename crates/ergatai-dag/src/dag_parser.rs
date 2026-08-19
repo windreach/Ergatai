@@ -191,6 +191,7 @@ impl TaskNodeBuilder {
             timeout: self.timeout,
             scope: self.scope, // Phase 3: File access scope
             metadata,
+            condition: None, // Markdown parser doesn't support conditions yet
         })
     }
 }

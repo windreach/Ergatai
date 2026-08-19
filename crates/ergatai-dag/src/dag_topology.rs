@@ -81,6 +81,12 @@ pub struct TaskNode {
     /// Optional: metadata (for AI to attach context)
     #[serde(default)]
     pub metadata: HashMap<String, String>,
+
+    /// Optional: condition expression for conditional execution
+    /// Example: "{{test.exit_code}} == 0" — node only executes if condition is true
+    /// If condition is false, node is marked as Skipped
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub condition: Option<String>,
 }
 
 /// Task execution status
@@ -109,9 +115,29 @@ pub struct TaskGraph {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
 
+    /// Optional: when this graph started execution (set on first submit_graph)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+
+    /// Optional: persistent DAG identifier (survives restarts)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dag_id: Option<String>,
+
     /// Optional: description of the overall goal
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+
+    /// Optional: DAG-level timeout in seconds (entire DAG must complete within this time)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<u64>,
+
+    /// Optional: DAG-level priority (high / medium / low) - applies to all nodes unless overridden
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority: Option<String>,
+
+    /// Optional: DAG parameters for template substitution
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub parameters: HashMap<String, serde_json::Value>,
 }
 
 impl TaskGraph {
@@ -120,7 +146,12 @@ impl TaskGraph {
         Self {
             nodes,
             created_at: Some(chrono::Utc::now().to_rfc3339()),
+            started_at: None,
+            dag_id: None,
             description: None,
+            timeout: None,
+            priority: None,
+            parameters: HashMap::new(),
         }
     }
 
@@ -383,6 +414,7 @@ impl TaskNode {
             timeout: None,
             scope: None, // Phase 3: File access scope (default: None)
             metadata: HashMap::new(),
+            condition: None,
         }
     }
 

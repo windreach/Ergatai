@@ -46,8 +46,31 @@ struct YamlDag {
     name: Option<String>,
     /// DAG 描述（可选）
     description: Option<String>,
+    /// DAG 全局超时秒数（可选）- 整个 DAG 的截止时间
+    timeout: Option<u64>,
+    /// DAG 全局优先级（可选）- 应用于所有节点，除非节点自己指定优先级
+    priority: Option<String>,
+    /// 参数定义列表（可选）- 用于模板参数化
+    #[serde(default)]
+    parameters: Vec<YamlParameter>,
     /// 任务列表
     tasks: Vec<YamlTask>,
+}
+
+/// YAML 参数定义
+#[derive(Debug, Deserialize, Clone)]
+struct YamlParameter {
+    /// 参数名称
+    name: String,
+    /// 参数描述（可选）
+    description: Option<String>,
+    /// 默认值（可选）
+    default: Option<serde_yaml::Value>,
+    /// 是否必需（可选，默认 false）
+    #[serde(default)]
+    required: bool,
+    /// 参数类型（可选，用于验证）：string, number, boolean
+    param_type: Option<String>,
 }
 
 /// YAML 单个任务节点
@@ -78,6 +101,9 @@ struct YamlTask {
     retry: Option<u32>,
     /// 文件访问范围（glob 模式）
     scope: Option<String>,
+    /// 条件表达式（可选）- 只有条件为真时才执行此节点
+    /// 示例: "{{test.exit_code}} == 0"
+    condition: Option<String>,
     /// 额外自定义字段（通过 flatten 收集）
     #[serde(flatten)]
     metadata: HashMap<String, serde_yaml::Value>,
@@ -97,7 +123,14 @@ fn default_agent() -> String {
 /// - parent → depends_on 合并
 /// - scope glob 模式验证
 /// - 重复任务名检测
-pub fn parse_dag_yaml(content: &str) -> ErgataiResult<TaskGraph> {
+///
+/// # Arguments
+/// * `content` - YAML 内容
+/// * `params` - 可选的参数值映射，用于模板参数化
+///
+/// # Returns
+/// 解析后的 TaskGraph
+pub fn parse_dag_yaml(content: &str, params: Option<HashMap<String, serde_json::Value>>) -> ErgataiResult<TaskGraph> {
     let yaml_dag: YamlDag = serde_yaml::from_str(content).map_err(|e| {
         ErgataiError::InvalidArgument(format!("YAML parse error: {}", e))
     })?;
@@ -107,6 +140,9 @@ pub fn parse_dag_yaml(content: &str) -> ErgataiResult<TaskGraph> {
             "No tasks found in YAML definition".to_string(),
         ));
     }
+
+    // 验证和合并参数
+    let resolved_params = resolve_parameters(&yaml_dag.parameters, params)?;
 
     // 检查重复任务名
     let mut seen_names = std::collections::HashSet::new();
@@ -146,6 +182,9 @@ pub fn parse_dag_yaml(content: &str) -> ErgataiResult<TaskGraph> {
     for task in &yaml_dag.tasks {
         name_to_uuid.insert(task.name.clone(), Uuid::new_v4().to_string());
     }
+
+    // DAG-level priority (for propagation to nodes)
+    let dag_priority = yaml_dag.priority.clone();
 
     // 转换为 TaskNode
     let nodes: Vec<TaskNode> = yaml_dag
@@ -206,6 +245,9 @@ pub fn parse_dag_yaml(content: &str) -> ErgataiResult<TaskGraph> {
                 }
             });
 
+            // Priority propagation: node's own priority takes precedence over DAG-level
+            let priority = task.priority.or_else(|| dag_priority.clone());
+
             TaskNode {
                 id: uuid,
                 agent: task.agent,
@@ -217,15 +259,19 @@ pub fn parse_dag_yaml(content: &str) -> ErgataiResult<TaskGraph> {
                 result_path: None,
                 max_retries: task.retry.unwrap_or(0),
                 retry_count: 0,
-                priority: task.priority,
+                priority,
                 timeout: task.timeout,
                 scope,
                 metadata,
+                condition: task.condition,
             }
         })
         .collect();
 
-    let graph = TaskGraph::new(nodes);
+    let mut graph = TaskGraph::new(nodes);
+    graph.timeout = yaml_dag.timeout;
+    graph.priority = dag_priority;
+    graph.parameters = resolved_params;
     graph.validate()?;
 
     Ok(graph)
@@ -259,11 +305,110 @@ pub fn is_yaml_format(content: &str) -> bool {
 /// 自动检测格式并解析 DAG 定义
 ///
 /// 优先尝试 YAML 解析，如果不符合 YAML 格式则回退到 Markdown 解析。
-pub fn parse_dag_auto(content: &str) -> ErgataiResult<TaskGraph> {
+pub fn parse_dag_auto(content: &str, params: Option<HashMap<String, serde_json::Value>>) -> ErgataiResult<TaskGraph> {
     if is_yaml_format(content) {
-        parse_dag_yaml(content)
+        parse_dag_yaml(content, params)
     } else {
         crate::dag_parser::parse_dag_markdown(content)
+    }
+}
+
+/// 解析和验证参数
+///
+/// 根据参数定义 schema 和用户提供的参数值，进行验证和默认值填充。
+fn resolve_parameters(
+    schema: &[YamlParameter],
+    provided: Option<HashMap<String, serde_json::Value>>,
+) -> ErgataiResult<HashMap<String, serde_json::Value>> {
+    let provided = provided.unwrap_or_default();
+    let mut resolved = HashMap::new();
+    let mut valid_names = std::collections::HashSet::with_capacity(schema.len());
+
+    // Single pass: validate, apply defaults, and collect valid names
+    for param in schema {
+        valid_names.insert(param.name.clone());
+
+        if let Some(value) = provided.get(&param.name) {
+            // 验证参数类型
+            if let Some(ref param_type) = param.param_type {
+                validate_param_type(&param.name, value, param_type)?;
+            }
+            resolved.insert(param.name.clone(), value.clone());
+        } else if let Some(ref default) = param.default {
+            // 使用默认值
+            let json_value = yaml_to_json(default);
+            resolved.insert(param.name.clone(), json_value);
+        } else if param.required {
+            // 必需参数未提供
+            return Err(ErgataiError::InvalidArgument(format!(
+                "Required parameter '{}' not provided",
+                param.name
+            )));
+        }
+        // 非必需且无默认值的参数可以不出现
+    }
+
+    // Check for unknown parameters using the collected set
+    for key in provided.keys() {
+        if !valid_names.contains(key) {
+            return Err(ErgataiError::InvalidArgument(format!(
+                "Unknown parameter '{}'",
+                key
+            )));
+        }
+    }
+
+    Ok(resolved)
+}
+
+/// 验证参数类型
+fn validate_param_type(name: &str, value: &serde_json::Value, expected_type: &str) -> ErgataiResult<()> {
+    let is_valid = match expected_type.to_lowercase().as_str() {
+        "string" => value.is_string(),
+        "number" | "int" | "integer" | "float" => value.is_number(),
+        "boolean" | "bool" => value.is_boolean(),
+        _ => true, // 未知类型不验证
+    };
+
+    if !is_valid {
+        return Err(ErgataiError::InvalidArgument(format!(
+            "Parameter '{}' expected type '{}', got {:?}",
+            name, expected_type, value
+        )));
+    }
+    Ok(())
+}
+
+/// 将 YAML 值转换为 JSON 值
+fn yaml_to_json(value: &serde_yaml::Value) -> serde_json::Value {
+    match value {
+        serde_yaml::Value::Null => serde_json::Value::Null,
+        serde_yaml::Value::Bool(b) => serde_json::Value::Bool(*b),
+        serde_yaml::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                serde_json::Value::Number(serde_json::Number::from(i))
+            } else if let Some(f) = n.as_f64() {
+                serde_json::Number::from_f64(f)
+                    .map(serde_json::Value::Number)
+                    .unwrap_or(serde_json::Value::Null)
+            } else {
+                serde_json::Value::Null
+            }
+        }
+        serde_yaml::Value::String(s) => serde_json::Value::String(s.clone()),
+        serde_yaml::Value::Sequence(seq) => {
+            serde_json::Value::Array(seq.iter().map(yaml_to_json).collect())
+        }
+        serde_yaml::Value::Mapping(map) => {
+            let mut obj = serde_json::Map::new();
+            for (k, v) in map {
+                if let serde_yaml::Value::String(key) = k {
+                    obj.insert(key.clone(), yaml_to_json(v));
+                }
+            }
+            serde_json::Value::Object(obj)
+        }
+        _ => serde_json::Value::Null,
     }
 }
 
@@ -307,7 +452,7 @@ tasks:
     task: tasks/b.md
     depends_on: [Task A]
 "#;
-        let graph = parse_dag_yaml(yaml).unwrap();
+        let graph = parse_dag_yaml(yaml, None).unwrap();
         assert_eq!(graph.nodes.len(), 2);
 
         // 验证 UUID 格式
@@ -331,7 +476,7 @@ tasks:
   - name: Task A
     agent: agent-a
 "#;
-        let graph = parse_dag_yaml(yaml).unwrap();
+        let graph = parse_dag_yaml(yaml, None).unwrap();
         assert_eq!(graph.nodes.len(), 1);
     }
 
@@ -341,7 +486,7 @@ tasks:
 tasks:
   - name: Minimal
 "#;
-        let graph = parse_dag_yaml(yaml).unwrap();
+        let graph = parse_dag_yaml(yaml, None).unwrap();
         let node = &graph.nodes[0];
         assert_eq!(node.task, "Minimal");
         assert_eq!(node.agent, "agent"); // default
@@ -363,7 +508,7 @@ tasks:
     retry: 3
     scope: "src/**/*.rs"
 "#;
-        let graph = parse_dag_yaml(yaml).unwrap();
+        let graph = parse_dag_yaml(yaml, None).unwrap();
         let node = &graph.nodes[0];
         assert_eq!(node.agent, "agent-a");
         assert_eq!(node.input, Some("some input".to_string()));
@@ -385,7 +530,7 @@ tasks:
     parent: Root Task
     depends_on: [Root Task]
 "#;
-        let graph = parse_dag_yaml(yaml).unwrap();
+        let graph = parse_dag_yaml(yaml, None).unwrap();
         let child = &graph.nodes[1];
         // parent 与 depends_on 合并后只有一个唯一依赖
         assert_eq!(child.depends_on.len(), 1);
@@ -400,7 +545,7 @@ tasks:
   - name: Task A
     agent: agent-b
 "#;
-        let result = parse_dag_yaml(yaml);
+        let result = parse_dag_yaml(yaml, None);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Duplicate task name"));
     }
@@ -412,7 +557,7 @@ tasks:
   - name: Task A
     depends_on: [NonExistent]
 "#;
-        let result = parse_dag_yaml(yaml);
+        let result = parse_dag_yaml(yaml, None);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("unknown task"));
     }
@@ -420,7 +565,7 @@ tasks:
     #[test]
     fn test_yaml_empty_tasks() {
         let yaml = "tasks: []\n";
-        let result = parse_dag_yaml(yaml);
+        let result = parse_dag_yaml(yaml, None);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("No tasks found"));
     }
@@ -428,7 +573,7 @@ tasks:
     #[test]
     fn test_yaml_invalid_syntax() {
         let yaml = "this: is: not: valid: yaml: [";
-        let result = parse_dag_yaml(yaml);
+        let result = parse_dag_yaml(yaml, None);
         assert!(result.is_err());
     }
 
@@ -439,7 +584,7 @@ tasks:
   - name: Task A
     scope: "../secret/**"
 "#;
-        let graph = parse_dag_yaml(yaml).unwrap();
+        let graph = parse_dag_yaml(yaml, None).unwrap();
         assert_eq!(graph.nodes[0].scope, None); // 非法 scope 被忽略
     }
 
@@ -451,7 +596,7 @@ tasks:
     custom_key: custom_value
     another: 42
 "#;
-        let graph = parse_dag_yaml(yaml).unwrap();
+        let graph = parse_dag_yaml(yaml, None).unwrap();
         let node = &graph.nodes[0];
         assert_eq!(node.metadata.get("custom_key"), Some(&"custom_value".to_string()));
         assert_eq!(node.metadata.get("another"), Some(&"42".to_string()));
@@ -472,7 +617,7 @@ tasks:
   - name: Task A
     agent: agent-a
 "#;
-        let graph = parse_dag_auto(yaml).unwrap();
+        let graph = parse_dag_auto(yaml, None).unwrap();
         assert_eq!(graph.nodes.len(), 1);
     }
 
@@ -482,7 +627,7 @@ tasks:
 ## Task A
 - **agent**: agent-a
 "#;
-        let graph = parse_dag_auto(md).unwrap();
+        let graph = parse_dag_auto(md, None).unwrap();
         assert_eq!(graph.nodes.len(), 1);
     }
 
@@ -493,7 +638,7 @@ tasks:
   - name: Task A
     max_retries: 5
 "#;
-        let graph = parse_dag_yaml(yaml).unwrap();
+        let graph = parse_dag_yaml(yaml, None).unwrap();
         assert_eq!(graph.nodes[0].max_retries, 5);
     }
 
@@ -507,7 +652,7 @@ tasks:
   - name: D
     depends_on: [A, B, C]
 "#;
-        let graph = parse_dag_yaml(yaml).unwrap();
+        let graph = parse_dag_yaml(yaml, None).unwrap();
         let node_d = &graph.nodes[3];
         assert_eq!(node_d.depends_on.len(), 3);
     }
@@ -519,7 +664,7 @@ tasks:
   - name: "Task with special chars: @#$%"
     agent: agent-a
 "#;
-        let graph = parse_dag_yaml(yaml).unwrap();
+        let graph = parse_dag_yaml(yaml, None).unwrap();
         assert_eq!(graph.nodes[0].task, "Task with special chars: @#$%");
     }
 
@@ -547,7 +692,7 @@ tasks:
     agent: qa
     depends_on: [前端开发, 后端开发]
 "#;
-        let graph = parse_dag_yaml(yaml).unwrap();
+        let graph = parse_dag_yaml(yaml, None).unwrap();
         assert_eq!(graph.nodes.len(), 5);
         // 验证中文名称正确保留
         assert_eq!(graph.nodes[0].task, "需求分析");

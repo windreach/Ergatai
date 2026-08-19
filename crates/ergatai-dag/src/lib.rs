@@ -2,6 +2,7 @@
 //!
 //! Provides DAG-based task topology for AI-friendly workflow management.
 
+pub mod condition;
 pub mod context;
 pub mod dag_parser;
 pub mod dag_topology;
@@ -13,6 +14,7 @@ pub mod markdown_parser;
 pub mod tree_topology;
 
 // Re-export DAG types as primary
+pub use condition::Condition;
 pub use context::DagContext;
 pub use dag_parser::parse_dag_markdown;
 pub use dag_topology::{TaskGraph, TaskNode, TaskStatus};

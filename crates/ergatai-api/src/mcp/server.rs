@@ -622,7 +622,7 @@ impl ErgataiMcpServer {
 
         // Parse DAG definition (YAML or Markdown) → TaskGraph
         let graph =
-            ergatai_core::orchestration::parse_dag_auto(dag_definition).map_err(|e| {
+            ergatai_core::orchestration::parse_dag_auto(dag_definition, None).map_err(|e| {
                 ErrorData::invalid_params(format!("Failed to parse DAG definition: {}", e), None)
             })?;
 

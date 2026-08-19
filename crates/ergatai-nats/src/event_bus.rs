@@ -621,15 +621,15 @@ mod tests {
 
         let mut sub = bus.subscribe_all_node_complete().await.unwrap();
 
-        let mut outputs = HashMap::new();
-        outputs.insert("result".to_string(), "done".to_string());
+        let mut outputs = serde_json::Map::new();
+        outputs.insert("result".to_string(), serde_json::Value::String("done".to_string()));
 
         let payload = NodeCompletePayload {
             node_id: "n1".to_string(),
             task_id: "n1".to_string(),
             agent_name: "agent".to_string(),
             result_summary: Some("ok".to_string()),
-            outputs,
+            outputs: serde_json::Value::Object(outputs),
             result_file: None,
         };
 
@@ -643,7 +643,7 @@ mod tests {
                 .expect("deser failed");
 
         assert_eq!(received.node_id, "n1");
-        assert_eq!(received.outputs.get("result"), Some(&"done".to_string()));
+        assert_eq!(received.outputs.get("result"), Some(&serde_json::Value::String("done".to_string())));
     }
 
     /// Test NodeFailed publish + receive

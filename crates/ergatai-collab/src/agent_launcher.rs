@@ -645,7 +645,7 @@ Write your results in markdown:
                                     task_id: node_id_monitor.clone(),
                                     agent_name: agent_name_monitor.clone(),
                                     result_summary,
-                                    outputs: HashMap::new(),
+                                    outputs: serde_json::Value::Object(serde_json::Map::new()),
                                     result_file: result_file_path
                                         .map(|p| p.to_string_lossy().to_string()),
                                 };

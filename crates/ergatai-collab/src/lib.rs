@@ -10,7 +10,10 @@ pub mod task_scheduler; // Agent-to-agent message routing via NATS
 pub mod tmux; // Tmux-based agent management
 
 pub use agent_launcher::{AgentLauncher, AgentStatus, RunningAgent};
-pub use dag_scheduler::{clear_dag_scheduler, get_dag_scheduler, set_dag_scheduler, DagScheduler};
+pub use dag_scheduler::{
+    clear_dag_scheduler, clear_dag_scheduler_by_id, get_dag_scheduler, get_dag_scheduler_by_id,
+    list_dag_schedulers, set_dag_scheduler, DagScheduler,
+};
 pub use message_router::{extract_mentions, route_agent_message, scan_and_route_mentions};
 pub use plan_watcher::PollingWatcher;
 pub use task_coordinator::TaskCoordinator;

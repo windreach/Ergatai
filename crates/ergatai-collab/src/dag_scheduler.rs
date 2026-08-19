@@ -38,24 +38,62 @@ pub struct DagScheduler {
 
     /// Active timeout watchdog handles (node_id → JoinHandle)
     timeout_watchers: Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
+
+    /// DAG-level deadline (if timeout is set). When elapsed, all remaining nodes are failed.
+    deadline: Option<std::time::Instant>,
+
+    /// DAG-level timeout watchdog handle
+    dag_timeout_watcher: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 impl DagScheduler {
     /// Create a new DAG scheduler with an empty context
     pub fn new(project_root: PathBuf, graph: TaskGraph) -> Self {
-        Self::with_context(project_root, graph, DagContext::empty())
+        // Initialize context with parameters from graph
+        let context = DagContext::with_parameters(HashMap::new(), graph.parameters.clone());
+        Self::with_context(project_root, graph, context)
     }
 
     /// Create a new DAG scheduler with the given context
     pub fn with_context(project_root: PathBuf, graph: TaskGraph, context: DagContext) -> Self {
+        // Use persisted dag_id if available (for recovery), otherwise generate new one
+        let dag_id = graph.dag_id.clone().unwrap_or_else(|| format!("dag-{}", uuid::Uuid::new_v4()));
+
+        // Restore deadline from persisted started_at + timeout
+        let deadline = if let (Some(ref started_at), Some(timeout)) = (&graph.started_at, graph.timeout) {
+            // Parse RFC3339 timestamp and calculate remaining deadline
+            if let Ok(start_time) = chrono::DateTime::parse_from_rfc3339(started_at) {
+                let start_utc = start_time.with_timezone(&chrono::Utc);
+                let elapsed = chrono::Utc::now() - start_utc;
+                let timeout_duration = std::time::Duration::from_secs(timeout);
+                let elapsed_duration = std::time::Duration::from_secs(elapsed.num_seconds() as u64);
+                if elapsed_duration < timeout_duration {
+                    Some(std::time::Instant::now() + (timeout_duration - elapsed_duration))
+                } else {
+                    // Already expired
+                    Some(std::time::Instant::now())
+                }
+            } else {
+                // Fallback: treat as fresh start
+                Some(std::time::Instant::now() + std::time::Duration::from_secs(timeout))
+            }
+        } else if let Some(timeout) = graph.timeout {
+            // No started_at yet, fresh start
+            Some(std::time::Instant::now() + std::time::Duration::from_secs(timeout))
+        } else {
+            None
+        };
+
         Self {
             graph: Arc::new(Mutex::new(graph)),
             context: Arc::new(Mutex::new(context)),
             project_root: project_root.clone(),
             scheduler: global_scheduler(Some(project_root)),
-            dag_id: format!("dag-{}", uuid::Uuid::new_v4()),
+            dag_id,
             created_at: std::time::Instant::now(),
             timeout_watchers: Arc::new(Mutex::new(HashMap::new())),
+            deadline,
+            dag_timeout_watcher: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -71,7 +109,7 @@ impl DagScheduler {
     }
 
     /// Record outputs from a completed node into the context
-    pub async fn record_outputs(&self, node_id: &str, outputs: HashMap<String, String>) {
+    pub async fn record_outputs(&self, node_id: &str, outputs: serde_json::Value) {
         let mut ctx = self.context.lock().await;
         ctx.record_output(node_id, outputs);
     }
@@ -79,6 +117,28 @@ impl DagScheduler {
     /// Submit the DAG for execution
     /// Extracts all ready tasks and submits them to the scheduler
     pub async fn submit_graph(&self) -> ErgataiResult<Vec<String>> {
+        // Persist dag_id and started_at on first submission
+        {
+            let mut graph = self.graph.lock().await;
+            if graph.dag_id.is_none() {
+                graph.dag_id = Some(self.dag_id.clone());
+            }
+            if graph.started_at.is_none() {
+                graph.started_at = Some(chrono::Utc::now().to_rfc3339());
+            }
+        }
+
+        // Check if DAG-level deadline has passed
+        if let Some(deadline) = self.deadline {
+            if std::time::Instant::now() >= deadline {
+                tracing::error!(dag_id = %self.dag_id, "DAG deadline already passed before submission");
+                return Err(ErgataiError::internal("DAG deadline already passed"));
+            }
+        }
+
+        // Spawn DAG-level timeout watcher (idempotent — only spawns once)
+        self.spawn_dag_timeout_watcher().await;
+
         // Clear completed/failed agents from previous DAG runs (M14 fix)
         let launcher = super::agent_launcher::AgentLauncher::new(self.project_root.clone());
         launcher.clear_stale_agents().await?;
@@ -94,11 +154,33 @@ impl DagScheduler {
                 .filter(|n| n.status == TaskStatus::Pending)
                 .cloned()
                 .collect();
+
+            // Check conditions and skip nodes that don't meet their conditions
+            let mut filtered_ready = Vec::new();
+            for node in ready {
+                if let Some(ref condition_expr) = node.condition {
+                    let context = self.context.lock().await;
+                    let condition = ergatai_dag::Condition::new(condition_expr);
+                    if !condition.evaluate(&context) {
+                        tracing::info!(
+                            node_id = %node.id,
+                            condition = %condition_expr,
+                            "Node condition not met, marking as Skipped"
+                        );
+                        graph.update_status(&node.id, TaskStatus::Skipped)?;
+                        // Also skip downstream nodes that depend on this one
+                        Self::skip_downstream_nodes(&mut graph, &node.id)?;
+                        continue;
+                    }
+                }
+                filtered_ready.push(node);
+            }
+
             // Immediately preempt as Running to prevent duplicate submission
-            for n in &ready {
+            for n in &filtered_ready {
                 graph.update_status(&n.id, TaskStatus::Running)?;
             }
-            ready
+            filtered_ready
         };
 
         let mut submitted = Vec::with_capacity(ready_nodes.len());
@@ -143,7 +225,7 @@ impl DagScheduler {
             if let Some(conn) = ergatai_nats::get_nats_connection().await {
                 let bus = ergatai_nats::EventBus::new(conn);
                 let plan_content = tokio::fs::read_to_string(&plan_file).await?;
-                let dag_id = self.dag_id();
+                let dag_id = self.dag_id().to_string();
 
                 let payload = ergatai_nats::TaskSubmitPayload {
                     task_id: task_id.clone(),
@@ -172,7 +254,10 @@ impl DagScheduler {
         }
 
         // Fallback: direct task_scheduler call
-        let tid = self.scheduler.submit_task(plan_file).await?;
+        let priority = ergatai_lock::conflict_arbitration::priority_to_number(&node.priority)
+            .map(|p| p as u32)
+            .unwrap_or(2);
+        let tid = self.scheduler.submit_task_with_priority(plan_file, priority).await?;
 
         // Start timeout watchdog if timeout is configured
         if let Some(timeout_secs) = node.timeout {
@@ -183,8 +268,8 @@ impl DagScheduler {
     }
 
     /// Get the unique DAG identifier (UUID)
-    fn dag_id(&self) -> String {
-        self.dag_id.clone()
+    pub fn dag_id(&self) -> &str {
+        &self.dag_id
     }
 
     /// Get elapsed time since DAG creation (for duration reporting)
@@ -262,6 +347,96 @@ impl DagScheduler {
             handle.abort();
             tracing::debug!(node_id = node_id, "Cancelled timeout watchdog");
         }
+    }
+
+    /// Spawn DAG-level timeout watcher (idempotent — only spawns once).
+    ///
+    /// If the DAG has a `timeout` field, starts a background task that will
+    /// fail all remaining Pending/Running nodes when the deadline is reached.
+    async fn spawn_dag_timeout_watcher(&self) {
+        // Check if already spawned
+        {
+            let watcher = self.dag_timeout_watcher.lock().await;
+            if watcher.is_some() {
+                return;
+            }
+        }
+
+        // Get timeout from graph
+        let timeout_secs = {
+            let graph = self.graph.lock().await;
+            graph.timeout
+        };
+
+        let timeout_secs = match timeout_secs {
+            Some(t) if t > 0 => t,
+            _ => return, // No timeout configured
+        };
+
+        let scheduler = self.clone();
+        let dag_id = self.dag_id.clone();
+
+        let handle = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(timeout_secs)).await;
+
+            tracing::warn!(
+                dag_id = %dag_id,
+                timeout_secs = timeout_secs,
+                "DAG-level timeout reached, failing all remaining nodes"
+            );
+
+            if let Err(e) = scheduler.fail_all_remaining_nodes("DAG-level timeout reached").await {
+                tracing::error!(dag_id = %dag_id, error = %e, "Failed to handle DAG timeout");
+            }
+        });
+
+        let mut watcher = self.dag_timeout_watcher.lock().await;
+        *watcher = Some(handle);
+    }
+
+    /// Fail all Pending and Running nodes in the DAG (called on DAG timeout or cancellation).
+    ///
+    /// Marks all non-completed nodes as Failed with the given reason, and publishes
+    /// failure events for any Running nodes (so their concurrency permits are released).
+    pub async fn fail_all_remaining_nodes(&self, reason: &str) -> ErgataiResult<()> {
+        let nodes_to_fail: Vec<(String, String, TaskStatus)> = {
+            let graph = self.graph.lock().await;
+            graph
+                .nodes
+                .iter()
+                .filter(|n| n.status == TaskStatus::Pending || n.status == TaskStatus::Running)
+                .map(|n| (n.id.clone(), n.agent.clone(), n.status.clone()))
+                .collect()
+        };
+
+        for (node_id, agent, status) in nodes_to_fail {
+            tracing::info!(
+                node_id = %node_id,
+                agent = %agent,
+                previous_status = ?status,
+                reason = reason,
+                "Failing node due to DAG-level constraint"
+            );
+
+            // Cancel any node-level timeout watcher
+            self.cancel_timeout_watcher(&node_id).await;
+
+            // Cancel running task if it was Running (releases concurrency permit)
+            if status == TaskStatus::Running {
+                self.scheduler.cancel_running_task(&node_id).await;
+            }
+
+            // Mark as failed
+            if let Err(e) = self.on_node_failed(&node_id, reason).await {
+                tracing::warn!(
+                    node_id = %node_id,
+                    error = %e,
+                    "Failed to handle node failure during DAG timeout"
+                );
+            }
+        }
+
+        Ok(())
     }
 
     /// Start listening for DAG events via JetStream pull consumer
@@ -404,10 +579,15 @@ impl DagScheduler {
                 .unwrap_or(dep_id);
 
             if let Some(outputs) = ctx.get_node_outputs(dep_id) {
-                if !outputs.is_empty() {
+                // Check if the JSON value is a non-empty object
+                let is_non_empty_object = matches!(outputs, serde_json::Value::Object(obj) if !obj.is_empty());
+
+                if is_non_empty_object {
                     lines.push(format!("\n**{}** ({}) outputs:", dep_name, dep_id));
-                    for (k, v) in outputs {
-                        lines.push(format!("  - {}: {}", k, v));
+                    if let serde_json::Value::Object(obj) = outputs {
+                        for (k, v) in obj {
+                            lines.push(format!("  - {}: {}", k, v));
+                        }
                     }
                 } else {
                     lines.push(format!(
@@ -515,7 +695,7 @@ impl DagScheduler {
                     drop(graph);
 
                     let payload = ergatai_nats::DagCompletePayload {
-                        dag_id: self.dag_id(),
+                        dag_id: self.dag_id().to_string(),
                         total_nodes: total,
                         completed_nodes: completed,
                         failed_nodes: failed,
@@ -689,6 +869,35 @@ impl DagScheduler {
         Ok(())
     }
 
+    /// Skip all nodes that (transitively) depend on the skipped/failed node.
+    /// Static helper that works on a mutable graph reference (no self required).
+    fn skip_downstream_nodes(graph: &mut TaskGraph, failed_id: &str) -> ErgataiResult<()> {
+        // BFS to collect all transitively dependent pending nodes
+        let mut queue = vec![failed_id.to_string()];
+        let mut seen = std::collections::HashSet::new();
+
+        while let Some(current) = queue.pop() {
+            for node in &graph.nodes {
+                if node.depends_on.contains(&current)
+                    && node.status == TaskStatus::Pending
+                    && seen.insert(node.id.clone())
+                {
+                    queue.push(node.id.clone());
+                }
+            }
+        }
+
+        // Batch-update all skipped nodes
+        for node_id in &seen {
+            if let Some(node) = graph.find_node_mut(node_id) {
+                node.status = TaskStatus::Skipped;
+                tracing::info!("Skipped node {} (depends on skipped/failed {})", node_id, failed_id);
+            }
+        }
+
+        Ok(())
+    }
+
     /// Get current progress
     pub async fn progress(&self) -> f32 {
         let graph = self.graph.lock().await;
@@ -710,6 +919,8 @@ impl DagScheduler {
     /// Save graph and context to disk (serializes under lock, writes without holding it)
     async fn save_graph_unlocked(&self) -> ErgataiResult<()> {
         let ergatai_dir = self.project_root.join(".ergatai");
+        // Use per-DAG filenames to support multiple concurrent DAGs
+        let dag_id_safe = self.dag_id.replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '_', "_");
 
         // Serialize graph
         let graph_json = {
@@ -717,7 +928,7 @@ impl DagScheduler {
             serde_json::to_string(&*graph)
                 .map_err(|e| ErgataiError::json_with_source("Failed to serialize graph", e))?
         };
-        let graph_file = ergatai_dir.join("dag-state.json");
+        let graph_file = ergatai_dir.join(format!("dag-state-{}.json", dag_id_safe));
         tokio::fs::write(&graph_file, graph_json.as_bytes()).await?;
 
         // Serialize context
@@ -726,7 +937,7 @@ impl DagScheduler {
             serde_json::to_string(&*ctx)
                 .map_err(|e| ErgataiError::json_with_source("Failed to serialize context", e))?
         };
-        let context_file = ergatai_dir.join("dag-context.json");
+        let context_file = ergatai_dir.join(format!("dag-context-{}.json", dag_id_safe));
         tokio::fs::write(&context_file, context_json.as_bytes()).await?;
 
         Ok(())
@@ -734,11 +945,59 @@ impl DagScheduler {
 
     /// Load graph and context from disk (for recovery)
     pub async fn load_from_disk(project_root: PathBuf) -> ErgataiResult<Self> {
-        let graph_file = project_root.join(".ergatai").join("dag-state.json");
-        let graph = TaskGraph::load_from_file(&graph_file).await?;
+        // Try the legacy single-DAG filename first (backward compatibility)
+        let legacy_graph_file = project_root.join(".ergatai").join("dag-state.json");
+        if legacy_graph_file.exists() {
+            let graph = TaskGraph::load_from_file(&legacy_graph_file).await?;
+            let context_file = project_root.join(".ergatai").join("dag-context.json");
+            let context = if context_file.exists() {
+                DagContext::load_from_file(&context_file).await?
+            } else {
+                DagContext::empty()
+            };
+            return Ok(Self::with_context(project_root, graph, context));
+        }
 
-        // Restore context if available (it may not exist in older DAGs)
-        let context_file = project_root.join(".ergatai").join("dag-context.json");
+        // Load the most recent DAG (by modification time) from per-DAG files
+        let ergatai_dir = project_root.join(".ergatai");
+        let mut dag_files: Vec<PathBuf> = Vec::new();
+        if let Ok(mut entries) = tokio::fs::read_dir(&ergatai_dir).await {
+            while let Some(entry) = entries.next_entry().await? {
+                let path = entry.path();
+                if let Some(ext) = path.extension() {
+                    if ext.to_str() == Some("json") {
+                        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                            if name.starts_with("dag-state-") {
+                                dag_files.push(path);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if dag_files.is_empty() {
+            return Err(ErgataiError::NotFound("No DAG state files found".to_string()));
+        }
+
+        // Sort by modification time (most recent first)
+        dag_files.sort_by(|a, b| {
+            let a_time = a.metadata().and_then(|m| m.modified()).ok();
+            let b_time = b.metadata().and_then(|m| m.modified()).ok();
+            b_time.cmp(&a_time)
+        });
+
+        let graph_file = &dag_files[0];
+        let graph = TaskGraph::load_from_file(graph_file).await?;
+
+        // Derive context filename from graph filename
+        let context_file = graph_file
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.strip_prefix("dag-state-"))
+            .map(|id| ergatai_dir.join(format!("dag-context-{}", id)))
+            .ok_or_else(|| ErgataiError::NotFound("Invalid DAG state filename".to_string()))?;
+
         let context = if context_file.exists() {
             DagContext::load_from_file(&context_file).await?
         } else {
@@ -746,6 +1005,107 @@ impl DagScheduler {
         };
 
         Ok(Self::with_context(project_root, graph, context))
+    }
+
+    /// Load all DAGs from disk (for multi-DAG recovery)
+    pub async fn load_all_from_disk(project_root: PathBuf) -> ErgataiResult<Vec<Self>> {
+        let ergatai_dir = project_root.join(".ergatai");
+
+        // Collect all DAG state files
+        let mut dag_files: Vec<PathBuf> = Vec::new();
+        if let Ok(mut entries) = tokio::fs::read_dir(&ergatai_dir).await {
+            while let Some(entry) = entries.next_entry().await? {
+                let path = entry.path();
+                if let Some(ext) = path.extension() {
+                    if ext.to_str() == Some("json") {
+                        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                            if name.starts_with("dag-state-") {
+                                dag_files.push(path);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut schedulers = Vec::new();
+        for graph_file in dag_files {
+            match TaskGraph::load_from_file(&graph_file).await {
+                Ok(graph) => {
+                    // Derive context filename
+                    let context_file = graph_file
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .and_then(|n| n.strip_prefix("dag-state-"))
+                        .map(|id| ergatai_dir.join(format!("dag-context-{}", id)));
+
+                    let context = if let Some(ref ctx_file) = context_file {
+                        if ctx_file.exists() {
+                            DagContext::load_from_file(ctx_file).await.unwrap_or_else(|e| {
+                                tracing::warn!(file = ?ctx_file, error = %e, "Failed to load context file, using empty context");
+                                DagContext::empty()
+                            })
+                        } else {
+                            DagContext::empty()
+                        }
+                    } else {
+                        DagContext::empty()
+                    };
+
+                    schedulers.push(Self::with_context(project_root.clone(), graph, context));
+                }
+                Err(e) => {
+                    tracing::warn!(file = ?graph_file, error = %e, "Failed to load DAG state file");
+                }
+            }
+        }
+
+        // Also try loading legacy single-DAG file
+        let legacy_graph_file = project_root.join(".ergatai").join("dag-state.json");
+        if legacy_graph_file.exists() {
+            if let Ok(graph) = TaskGraph::load_from_file(&legacy_graph_file).await {
+                let context_file = project_root.join(".ergatai").join("dag-context.json");
+                let context = if context_file.exists() {
+                    DagContext::load_from_file(&context_file).await.unwrap_or_else(|e| {
+                        tracing::warn!(file = ?context_file, error = %e, "Failed to load legacy context file, using empty context");
+                        DagContext::empty()
+                    })
+                } else {
+                    DagContext::empty()
+                };
+                schedulers.push(Self::with_context(project_root.clone(), graph, context));
+            }
+        }
+
+        Ok(schedulers)
+    }
+
+    /// Rollback all Running nodes to Pending (for recovery after crash)
+    ///
+    /// When the server crashes, nodes left in Running state are actually stopped.
+    /// This method resets them to Pending so they can be resubmitted on recovery.
+    pub async fn rollback_running_nodes(&self) -> ErgataiResult<()> {
+        let mut graph = self.graph.lock().await;
+        let mut rolled_back = 0;
+        for node in &mut graph.nodes {
+            if node.status == TaskStatus::Running {
+                node.status = TaskStatus::Pending;
+                node.retry_count = 0; // Reset retry count for fresh start
+                rolled_back += 1;
+            }
+        }
+        drop(graph);
+
+        if rolled_back > 0 {
+            tracing::info!(
+                dag_id = %self.dag_id,
+                rolled_back,
+                "Rolled back Running nodes to Pending for recovery"
+            );
+            self.save_graph_unlocked().await?;
+        }
+
+        Ok(())
     }
 
     /// Get a JSON snapshot of the current graph state
@@ -815,7 +1175,9 @@ async fn handle_dag_event(js_msg: &async_nats::jetstream::Message, scheduler: &D
 
         tracing::info!(node_id = %payload.node_id, "Received JetStream node_complete event");
 
-        if !payload.outputs.is_empty() {
+        // Check if outputs is a non-empty object
+        let has_outputs = matches!(&payload.outputs, serde_json::Value::Object(obj) if !obj.is_empty());
+        if has_outputs {
             scheduler
                 .record_outputs(&payload.node_id, payload.outputs)
                 .await;
@@ -903,45 +1265,90 @@ async fn handle_dag_event(js_msg: &async_nats::jetstream::Message, scheduler: &D
     let _ = js_msg.ack().await;
 }
 
-// ── Global DAG Scheduler Singleton ──
+// ── Global DAG Scheduler Registry ──
 
 use std::sync::Mutex as StdMutex;
 
-static GLOBAL_DAG: std::sync::OnceLock<StdMutex<Option<DagScheduler>>> = std::sync::OnceLock::new();
+static GLOBAL_DAGS: std::sync::OnceLock<StdMutex<HashMap<String, DagScheduler>>> = std::sync::OnceLock::new();
 
-fn dag_slot() -> &'static StdMutex<Option<DagScheduler>> {
-    GLOBAL_DAG.get_or_init(|| StdMutex::new(None))
+fn dag_registry() -> &'static StdMutex<HashMap<String, DagScheduler>> {
+    GLOBAL_DAGS.get_or_init(|| StdMutex::new(HashMap::new()))
 }
 
-/// Set the active DAG scheduler (replaces any existing one)
+/// Set the active DAG scheduler (replaces any existing one with the same dag_id)
 pub fn set_dag_scheduler(scheduler: DagScheduler) {
-    match dag_slot().lock() {
-        Ok(mut guard) => *guard = Some(scheduler),
+    let dag_id = scheduler.dag_id().to_string();
+    match dag_registry().lock() {
+        Ok(mut guard) => { guard.insert(dag_id, scheduler); }
         Err(poisoned) => {
-            tracing::error!("Global DAG scheduler lock poisoned, recovering");
-            *poisoned.into_inner() = Some(scheduler);
+            tracing::error!("Global DAG registry lock poisoned, recovering");
+            poisoned.into_inner().insert(dag_id, scheduler);
         }
     }
 }
 
-/// Get a clone of the active DAG scheduler, if any
+/// Get a clone of the active DAG scheduler by dag_id, or the most recent one if dag_id is None
 pub fn get_dag_scheduler() -> Option<DagScheduler> {
-    match dag_slot().lock() {
-        Ok(guard) => guard.clone(),
+    get_dag_scheduler_by_id(None)
+}
+
+/// Get a clone of a specific DAG scheduler by dag_id
+pub fn get_dag_scheduler_by_id(dag_id: Option<&str>) -> Option<DagScheduler> {
+    match dag_registry().lock() {
+        Ok(guard) => {
+            if let Some(id) = dag_id {
+                guard.get(id).cloned()
+            } else {
+                // Return the most recently added DAG (last inserted)
+                guard.values().last().cloned()
+            }
+        }
         Err(poisoned) => {
-            tracing::error!("Global DAG scheduler lock poisoned, recovering");
-            poisoned.into_inner().clone()
+            tracing::error!("Global DAG registry lock poisoned, recovering");
+            let guard = poisoned.into_inner();
+            if let Some(id) = dag_id {
+                guard.get(id).cloned()
+            } else {
+                guard.values().last().cloned()
+            }
         }
     }
 }
 
-/// Clear the active DAG scheduler
-pub fn clear_dag_scheduler() {
-    match dag_slot().lock() {
-        Ok(mut guard) => *guard = None,
+/// List all active DAG schedulers
+pub fn list_dag_schedulers() -> Vec<DagScheduler> {
+    match dag_registry().lock() {
+        Ok(guard) => guard.values().cloned().collect(),
         Err(poisoned) => {
-            tracing::error!("Global DAG scheduler lock poisoned, recovering");
-            *poisoned.into_inner() = None;
+            tracing::error!("Global DAG registry lock poisoned, recovering");
+            poisoned.into_inner().values().cloned().collect()
+        }
+    }
+}
+
+/// Clear a specific DAG scheduler by dag_id, or all if dag_id is None
+pub fn clear_dag_scheduler() {
+    clear_dag_scheduler_by_id(None)
+}
+
+/// Clear a specific DAG scheduler by dag_id
+pub fn clear_dag_scheduler_by_id(dag_id: Option<&str>) {
+    match dag_registry().lock() {
+        Ok(mut guard) => {
+            if let Some(id) = dag_id {
+                guard.remove(id);
+            } else {
+                guard.clear();
+            }
+        }
+        Err(poisoned) => {
+            tracing::error!("Global DAG registry lock poisoned, recovering");
+            let mut guard = poisoned.into_inner();
+            if let Some(id) = dag_id {
+                guard.remove(id);
+            } else {
+                guard.clear();
+            }
         }
     }
 }
@@ -1077,12 +1484,12 @@ mod tests {
         let scheduler = DagScheduler::with_context(temp_dir.path().to_path_buf(), graph, ctx);
 
         // Simulate: node n1 completes with outputs
-        let mut outputs = HashMap::new();
+        let mut outputs = serde_json::Map::new();
         outputs.insert(
             "review_result".to_string(),
-            "3 issues found: unused imports".to_string(),
+            serde_json::Value::String("3 issues found: unused imports".to_string()),
         );
-        scheduler.record_outputs("n1", outputs).await;
+        scheduler.record_outputs("n1", serde_json::Value::Object(outputs)).await;
 
         // Now generate plan for n2 and verify template was rendered
         let graph = scheduler.graph.lock().await;
@@ -1161,11 +1568,10 @@ mod tests {
         let scheduler = DagScheduler::new(PathBuf::from("/tmp/ctx"), graph);
 
         scheduler.set_global("greeting", "hello").await;
+        let mut outputs = serde_json::Map::new();
+        outputs.insert("result".to_string(), serde_json::Value::String("done".to_string()));
         scheduler
-            .record_outputs(
-                "n1",
-                HashMap::from([("result".to_string(), "done".to_string())]),
-            )
+            .record_outputs("n1", serde_json::Value::Object(outputs))
             .await;
 
         let ctx = scheduler.context();
@@ -1173,10 +1579,14 @@ mod tests {
         assert_eq!(ctx.get_global("greeting"), Some("hello"));
         let outputs = ctx.get_node_outputs("n1");
         assert!(outputs.is_some());
-        assert_eq!(
-            outputs.unwrap().get("result").map(|s| s.as_str()),
-            Some("done")
-        );
+        if let Some(serde_json::Value::Object(obj)) = outputs {
+            assert_eq!(
+                obj.get("result").and_then(|v| v.as_str()),
+                Some("done")
+            );
+        } else {
+            panic!("Expected Object");
+        }
     }
 
     #[tokio::test]
@@ -1377,11 +1787,10 @@ mod tests {
             TaskNode::new("n2", "a", "B").with_dependencies(vec!["n1".into()]),
         ]);
         let scheduler = DagScheduler::new(PathBuf::from("/tmp/upstream"), graph);
+        let mut outputs = serde_json::Map::new();
+        outputs.insert("key1".to_string(), serde_json::Value::String("value1".to_string()));
         scheduler
-            .record_outputs(
-                "n1",
-                HashMap::from([("key1".to_string(), "value1".to_string())]),
-            )
+            .record_outputs("n1", serde_json::Value::Object(outputs))
             .await;
 
         let node = scheduler

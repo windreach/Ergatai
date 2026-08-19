@@ -262,26 +262,6 @@ impl NatsServer {
     }
 }
 
-/// Shared NATS server for all tests in the process.
-///
-/// Instead of each test spawning its own nats-server process (wasteful,
-/// causes port conflicts), all tests share a single server instance.
-/// Tests isolate data via unique stream/consumer names.
-///
-/// # Lifecycle
-///
-/// Uses `Box::leak` to keep the server alive until process exit. This is intentional:
-/// - The NATS child process lives for the entire test run
-/// - Drop is never called on the leaked server (by design)
-/// - When the test process exits, the OS cleans up child processes
-///
-/// **Note**: If tests are interrupted (Ctrl+C, timeout), NATS processes may remain
-/// as zombies until manually cleaned up. Use `cleanup_test_servers()` or run
-/// `pkill -9 nats-server` to clean them up.
-///
-/// For production use, create `NatsServer` instances directly (not via this function)
-/// so Drop can properly clean up resources.
-
 /// Cleanup function to kill all NATS server processes started by tests
 ///
 /// Call this at the end of test suites or use `pkill -9 nats-server` manually.

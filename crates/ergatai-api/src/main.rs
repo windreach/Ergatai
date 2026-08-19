@@ -9,6 +9,7 @@
 //! ergatai-api --port 3000
 //! ```
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -16,7 +17,7 @@ use std::sync::{Arc, OnceLock};
 use anyhow::Result;
 use axum::{
     body::Body,
-    extract::State,
+    extract::{Query, State},
     http::{header, Request, StatusCode},
     middleware::{self, Next},
     response::IntoResponse,
@@ -24,7 +25,9 @@ use axum::{
     Json, Router,
 };
 use clap::Parser;
-use ergatai_core::cross_agent::{get_dag_scheduler, set_dag_scheduler, DagScheduler};
+use ergatai_core::cross_agent::{
+    get_dag_scheduler, get_dag_scheduler_by_id, list_dag_schedulers, set_dag_scheduler, DagScheduler,
+};
 use ergatai_core::nats;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
@@ -532,6 +535,42 @@ async fn async_main(args: Args) -> Result<()> {
                     "✅ File access control initialized (multi-agent file locking + fanotify enforcement)"
                 );
             }
+
+            // Recover any in-flight DAGs from disk (survives server restarts)
+            // If DAGs were running when the server crashed, this reloads them,
+            // rolls back Running nodes to Pending, and resubmits them.
+            match DagScheduler::load_all_from_disk(project_root.clone()).await {
+                Ok(schedulers) if !schedulers.is_empty() => {
+                    tracing::info!("🔄 Recovering {} DAG(s) from disk...", schedulers.len());
+                    for scheduler in schedulers {
+                        tracing::info!(dag_id = %scheduler.dag_id(), "Recovering DAG...");
+                        if let Err(e) = scheduler.rollback_running_nodes().await {
+                            tracing::warn!(dag_id = %scheduler.dag_id(), "Failed to rollback running nodes: {}", e);
+                        }
+                        // Resubmit pending nodes to continue execution
+                        match scheduler.submit_graph().await {
+                            Ok(submitted) => {
+                                tracing::info!(
+                                    dag_id = %scheduler.dag_id(),
+                                    resubmitted = submitted.len(),
+                                    "✅ DAG recovery complete, resubmitted pending nodes"
+                                );
+                                // Store the recovered scheduler in the global registry
+                                set_dag_scheduler(scheduler);
+                            }
+                            Err(e) => {
+                                tracing::error!(dag_id = %scheduler.dag_id(), "Failed to resubmit recovered DAG: {}", e);
+                            }
+                        }
+                    }
+                }
+                Ok(_) => {
+                    tracing::debug!("No DAG state found on disk (fresh start)");
+                }
+                Err(e) => {
+                    tracing::debug!("No DAG state found on disk: {}", e);
+                }
+            }
         }
         Err(e) => {
             tracing::error!("❌ Failed to initialize NATS: {}", e);
@@ -579,6 +618,7 @@ async fn async_main(args: Args) -> Result<()> {
         // DAG (existing)
         .route("/api/v1/dag", post(submit_dag))
         .route("/api/v1/dag/status", get(dag_status))
+        .route("/api/v1/dags", get(list_dags))
         // MCP Streamable HTTP endpoints (per-agent paths for correct binding)
         .nest_service("/mcp/agent-1", mcp_service_1)
         .nest_service("/mcp/agent-2", mcp_service_2)
@@ -760,11 +800,22 @@ struct AgentSummary {
 }
 
 #[derive(Debug, Serialize)]
+struct NodeStatusInfo {
+    id: String,
+    agent: String,
+    task: String,
+    status: String,
+    depends_on: Vec<String>,
+    output: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize)]
 struct DagStatusResponse {
     running: bool,
     progress: Option<f32>,
     status_prompt: Option<String>,
     is_complete: Option<bool>,
+    nodes: Option<Vec<NodeStatusInfo>>,
 }
 
 // ── Middleware ──
@@ -851,6 +902,16 @@ fn validate_cwd(cwd: &str) -> Result<PathBuf, String> {
 /// Accepts a YAML or Markdown-formatted DAG definition as the request body.
 /// YAML format is recommended. The system auto-detects the format.
 /// Parses it into a TaskGraph, creates a DagScheduler, and starts execution.
+/// Request body for DAG submission
+#[derive(Deserialize)]
+struct SubmitDagRequest {
+    /// DAG definition (YAML or Markdown)
+    definition: String,
+    /// Optional parameters for template substitution
+    #[serde(default)]
+    parameters: Option<HashMap<String, serde_json::Value>>,
+}
+
 async fn submit_dag(body: String) -> impl IntoResponse {
     // Check if a DAG is already running
     if let Some(existing) = get_dag_scheduler() {
@@ -864,8 +925,16 @@ async fn submit_dag(body: String) -> impl IntoResponse {
         }
     }
 
+    // Try to parse as JSON first (new format with parameters)
+    let (definition, parameters) = if let Ok(req) = serde_json::from_str::<SubmitDagRequest>(&body) {
+        (req.definition, req.parameters)
+    } else {
+        // Fallback to plain string (old format)
+        (body, None)
+    };
+
     // Parse DAG definition (YAML or Markdown) → TaskGraph
-    let graph = match ergatai_core::orchestration::parse_dag_auto(&body) {
+    let graph = match ergatai_core::orchestration::parse_dag_auto(&definition, parameters) {
         Ok(g) => g,
         Err(e) => {
             return (
@@ -906,8 +975,17 @@ async fn submit_dag(body: String) -> impl IntoResponse {
 /// GET /api/v1/dag/status — DAG scheduler status.
 ///
 /// Returns whether a DAG is currently running and, if so, its progress.
-async fn dag_status() -> impl IntoResponse {
-    let scheduler: Option<DagScheduler> = get_dag_scheduler();
+#[derive(Deserialize)]
+struct DagStatusQuery {
+    dag_id: Option<String>,
+}
+
+async fn dag_status(Query(query): Query<DagStatusQuery>) -> impl IntoResponse {
+    let scheduler: Option<DagScheduler> = if let Some(dag_id) = &query.dag_id {
+        get_dag_scheduler_by_id(Some(dag_id))
+    } else {
+        get_dag_scheduler()
+    };
 
     let Some(scheduler) = scheduler else {
         return Json(DagStatusResponse {
@@ -915,6 +993,7 @@ async fn dag_status() -> impl IntoResponse {
             progress: None,
             status_prompt: None,
             is_complete: None,
+            nodes: None,
         });
     };
 
@@ -922,10 +1001,76 @@ async fn dag_status() -> impl IntoResponse {
     let status_prompt = scheduler.status_prompt().await;
     let is_complete = scheduler.is_complete().await;
 
+    // Get per-node details from graph snapshot
+    let nodes = match scheduler.graph_snapshot().await {
+        Ok(snapshot_json) => {
+            if let Ok(snapshot) = serde_json::from_str::<serde_json::Value>(&snapshot_json) {
+                if let Some(nodes_array) = snapshot.get("nodes").and_then(|n| n.as_array()) {
+                    let nodes_info: Vec<NodeStatusInfo> = nodes_array
+                        .iter()
+                        .filter_map(|node| {
+                            Some(NodeStatusInfo {
+                                id: node.get("id")?.as_str()?.to_string(),
+                                agent: node.get("agent")?.as_str()?.to_string(),
+                                task: node.get("task")?.as_str()?.to_string(),
+                                status: node.get("status")?.as_str()?.to_string(),
+                                depends_on: node
+                                    .get("depends_on")
+                                    .and_then(|d| d.as_array())
+                                    .map(|arr| {
+                                        arr.iter()
+                                            .filter_map(|v| v.as_str().map(String::from))
+                                            .collect()
+                                    })
+                                    .unwrap_or_default(),
+                                output: None, // TODO: get from context if needed
+                            })
+                        })
+                        .collect();
+                    Some(nodes_info)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }
+        Err(_) => None,
+    };
+
     Json(DagStatusResponse {
         running: true,
         progress: Some(progress),
         status_prompt: Some(status_prompt),
         is_complete: Some(is_complete),
+        nodes,
     })
+}
+
+#[derive(Serialize)]
+struct DagInfo {
+    dag_id: String,
+    progress: f32,
+    is_complete: bool,
+    status_prompt: String,
+}
+
+async fn list_dags() -> impl IntoResponse {
+    let schedulers = list_dag_schedulers();
+
+    let mut dags = Vec::new();
+    for scheduler in schedulers {
+        let progress = scheduler.progress().await;
+        let is_complete = scheduler.is_complete().await;
+        let status_prompt = scheduler.status_prompt().await;
+
+        dags.push(DagInfo {
+            dag_id: scheduler.dag_id().to_string(),
+            progress,
+            is_complete,
+            status_prompt,
+        });
+    }
+
+    Json(dags)
 }

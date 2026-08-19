@@ -7,7 +7,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use ergatai_error::{ErgataiError, ErgataiResult};
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 
 use super::agent_launcher::AgentLauncher;
 use super::task_coordinator::{AgentAssignment, TaskCoordinator, TaskPlan};
@@ -15,6 +15,10 @@ use super::task_coordinator::{AgentAssignment, TaskCoordinator, TaskPlan};
 /// Queue file format version — increment when PendingTask schema changes.
 /// Migration logic in load_from_disk handles older versions.
 const QUEUE_FILE_VERSION: u32 = 1;
+
+/// Default concurrency limit — maximum number of tasks running simultaneously.
+/// Applies across all agents; prevents resource exhaustion from unlimited parallelism.
+const DEFAULT_CONCURRENCY_LIMIT: usize = 8;
 
 /// Versioned queue file format.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,21 +59,40 @@ pub struct PendingTask {
     pub priority: u32,
 }
 
+/// Active processing entry: (task_id, agent_name, optional_permit)
+///
+/// The permit is held only by the first agent of each task; additional agents
+/// from the same task have None. Dropping the entry releases the semaphore slot.
+type ProcessingEntry = (String, String, Option<OwnedSemaphorePermit>);
+
 /// Task Scheduler - coordinates task distribution (global singleton)
 pub struct TaskScheduler {
     project_root: PathBuf,
     strategy: ScheduleStrategy,
     /// Pending tasks waiting to be scheduled (in-memory, persisted to disk on changes)
     pending_tasks: Arc<Mutex<Vec<PendingTask>>>,
-    /// Active processing: list of (task_id, agent_name) pairs
-    processing: Arc<Mutex<Vec<(String, String)>>>,
+    /// Active processing entries
+    processing: Arc<Mutex<Vec<ProcessingEntry>>>,
     queue_file: PathBuf,
+    /// Maximum number of tasks that can run concurrently.
+    concurrency_limit: usize,
+    /// Semaphore enforcing the concurrency limit. Each running task holds one permit.
+    semaphore: Arc<Semaphore>,
 }
 
 impl TaskScheduler {
     /// Create a new task scheduler (private, use global_scheduler() instead)
-    fn new(project_root: PathBuf, strategy: ScheduleStrategy) -> Self {
+    fn new(
+        project_root: PathBuf,
+        strategy: ScheduleStrategy,
+        concurrency_limit: usize,
+    ) -> Self {
         let queue_file = project_root.join(".ergatai").join(".scheduler-queue.json");
+        let limit = if concurrency_limit == 0 {
+            DEFAULT_CONCURRENCY_LIMIT
+        } else {
+            concurrency_limit
+        };
 
         Self {
             project_root,
@@ -77,6 +100,8 @@ impl TaskScheduler {
             pending_tasks: Arc::new(Mutex::new(Vec::new())),
             processing: Arc::new(Mutex::new(Vec::new())),
             queue_file,
+            concurrency_limit: limit,
+            semaphore: Arc::new(Semaphore::new(limit)),
         }
     }
 
@@ -170,7 +195,15 @@ impl TaskScheduler {
     }
 
     /// Submit a new task for scheduling
-    pub async fn submit_task(&self, plan_file: PathBuf) -> ErgataiResult<String> {
+    /// Submit a task for scheduling with explicit priority
+    ///
+    /// Priority is a u32 value where higher numbers = higher priority.
+    /// Typical mapping: high=3, medium=2, low=1
+    pub async fn submit_task_with_priority(
+        &self,
+        plan_file: PathBuf,
+        priority: u32,
+    ) -> ErgataiResult<String> {
         use std::time::{SystemTime, UNIX_EPOCH};
 
         // Load from disk once (idempotent, only loads if pending_tasks is empty)
@@ -197,7 +230,7 @@ impl TaskScheduler {
             plan_file,
             target_agent,
             submitted_at: now,
-            priority: 1,
+            priority,
         };
 
         // Try to schedule immediately
@@ -215,21 +248,44 @@ impl TaskScheduler {
         Ok(task_id)
     }
 
+    pub async fn submit_task(&self, plan_file: PathBuf) -> ErgataiResult<String> {
+        // Default to medium priority (2) for backward compatibility
+        self.submit_task_with_priority(plan_file, 2).await
+    }
+
     /// Try to schedule a task immediately
+    ///
+    /// Acquires a concurrency permit before launching. If the global concurrency
+    /// limit is reached, returns `Ok(false)` — the task will be retried later
+    /// by the background scheduler loop.
     async fn try_schedule_task(&self, task: &PendingTask, plan: &TaskPlan) -> ErgataiResult<bool> {
+        // Try to acquire a concurrency permit (non-blocking)
+        let permit = match self.semaphore.clone().try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                tracing::info!(
+                    task_id = %task.task_id,
+                    limit = self.concurrency_limit,
+                    "Concurrency limit reached, queueing task"
+                );
+                return Ok(false);
+            }
+        };
+
         let availability = self.check_agent_availability(&task.target_agent).await;
 
         match availability {
             AgentAvailability::Available | AgentAvailability::NotRunning => {
-                // Agent is free, launch task
-                self.launch_task(task, plan).await?;
+                // Agent is free, launch task (pass permit to store in processing list)
+                self.launch_task(task, plan, permit).await?;
                 Ok(true)
             }
             AgentAvailability::Busy { current_task_id } => {
                 // Agent is busy, handle based on strategy
                 match self.strategy {
                     ScheduleStrategy::WaitForAgent | ScheduleStrategy::QueueTask => {
-                        // Queue task, will be picked up later
+                        // Drop permit — task goes to queue, will be retried later
+                        drop(permit);
                         Ok(false)
                     }
                     ScheduleStrategy::Parallel => {
@@ -240,7 +296,7 @@ impl TaskScheduler {
                             task.target_agent,
                             current_task_id
                         );
-                        self.launch_task(task, plan).await?;
+                        self.launch_task(task, plan, permit).await?;
                         Ok(true)
                     }
                 }
@@ -248,8 +304,14 @@ impl TaskScheduler {
         }
     }
 
-    /// Launch a task (start agent)
-    async fn launch_task(&self, _task: &PendingTask, plan: &TaskPlan) -> ErgataiResult<()> {
+    /// Launch a task (start agent). The concurrency permit is stored alongside
+    /// the task entry and released when the task is removed from processing.
+    async fn launch_task(
+        &self,
+        _task: &PendingTask,
+        plan: &TaskPlan,
+        permit: OwnedSemaphorePermit,
+    ) -> ErgataiResult<()> {
         let coordinator = TaskCoordinator::new(self.project_root.clone());
         let launcher = AgentLauncher::new(self.project_root.clone());
 
@@ -259,13 +321,31 @@ impl TaskScheduler {
         // Launch agents
         let agent_ids = launcher.launch_agents(plan).await?;
 
-        // Track processing: store (task_id, agent_name) pairs
+        // Parse all agent IDs first to avoid ownership issues with the permit
+        let parsed_agents: Vec<(String, String)> = agent_ids
+            .iter()
+            .filter_map(|id| {
+                AgentLauncher::parse_agent_id(id)
+                    .map(|(t, a)| (t.to_string(), a.to_string()))
+            })
+            .collect();
+
+        // Store (task_id, agent_name, permit) triples in processing list.
+        // The concurrency limit applies per-task, not per-agent.
+        // Only the first agent holds the permit; additional agents from the same
+        // task are tracked but don't consume extra semaphore slots.
         let mut processing = self.processing.lock().await;
-        for agent_id in &agent_ids {
-            if let Some((task_id, agent_name)) = AgentLauncher::parse_agent_id(agent_id) {
-                processing.push((task_id.to_string(), agent_name.to_string()));
+
+        if let Some((task_id, agent_name)) = parsed_agents.first().cloned() {
+            // First agent holds the permit for this task
+            processing.push((task_id, agent_name, Some(permit)));
+
+            // Remaining agents (if any) are tracked but don't hold permits
+            for (task_id, agent_name) in parsed_agents.into_iter().skip(1) {
+                processing.push((task_id, agent_name, None));
             }
         }
+        // If no agents parsed, permit is dropped here (normal drop)
 
         Ok(())
     }
@@ -275,7 +355,7 @@ impl TaskScheduler {
         // Check our local processing list for exact match on agent_name
         let processing = self.processing.lock().await;
 
-        for (task_id, name) in processing.iter() {
+        for (task_id, name, _) in processing.iter() {
             if name == agent_name {
                 // Agent is processing a task
                 return AgentAvailability::Busy {
@@ -294,11 +374,13 @@ impl TaskScheduler {
 
         // Collect and sort tasks, then release lock immediately to avoid
         // holding it across await points (file I/O below)
+        // Sort by priority DESCENDING (higher number = higher priority),
+        // then by submitted_at ASCENDING (FIFO for same priority)
         let mut tasks: Vec<PendingTask> = {
             let mut pending = self.pending_tasks.lock().await;
             pending.sort_by(|a, b| {
-                a.priority
-                    .cmp(&b.priority)
+                b.priority
+                    .cmp(&a.priority)
                     .then(a.submitted_at.cmp(&b.submitted_at))
             });
             pending.drain(..).collect()
@@ -371,10 +453,82 @@ impl TaskScheduler {
         Ok(removed)
     }
 
-    /// Mark task as completed (remove from processing)
+    /// Mark task as completed (remove from processing, releasing its concurrency permit)
     pub async fn mark_completed(&self, task_id: &str) {
         let mut processing = self.processing.lock().await;
-        processing.retain(|(tid, _)| tid != task_id);
+        let before = processing.len();
+        processing.retain(|(tid, _, _)| tid != task_id);
+        let removed = before - processing.len();
+        if removed > 0 {
+            drop(processing);
+            tracing::debug!(
+                task_id = task_id,
+                available = self.semaphore.available_permits(),
+                "Task completed, concurrency permit released"
+            );
+        }
+    }
+
+    /// Cancel a currently running task (remove from processing, releasing its permit).
+    /// Also stops the agent via AgentRuntime (sends Ctrl+C, waits, then kills if needed).
+    /// Returns `true` if the task was found and removed.
+    pub async fn cancel_running_task(&self, task_id: &str) -> bool {
+        let mut processing = self.processing.lock().await;
+        let before = processing.len();
+
+        // Find and remove the entry, capturing agent_name for stopping
+        let mut agent_name_to_stop = None;
+        processing.retain(|(tid, agent_name, _)| {
+            if tid == task_id {
+                agent_name_to_stop = Some(agent_name.clone());
+                false
+            } else {
+                true
+            }
+        });
+
+        let removed = before - processing.len();
+        drop(processing); // Release lock before calling external code
+
+        if removed > 0 {
+            tracing::info!(
+                task_id = task_id,
+                available = self.semaphore.available_permits(),
+                "Running task cancelled, concurrency permit released"
+            );
+
+            // Stop the agent via AgentRuntime
+            if let Some(agent_name) = agent_name_to_stop {
+                let agent_id = format!("{}|{}", task_id, agent_name);
+                let runtime = ergatai_runtime::get_agent_runtime();
+                if let Err(e) = runtime.stop_agent(&agent_id).await {
+                    tracing::warn!(
+                        task_id = task_id,
+                        agent_id = agent_id,
+                        error = %e,
+                        "Failed to stop agent (may have already exited)"
+                    );
+                }
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Current concurrency limit (max simultaneous tasks)
+    pub fn concurrency_limit(&self) -> usize {
+        self.concurrency_limit
+    }
+
+    /// Number of available concurrency slots (how many more tasks can start right now)
+    pub async fn available_concurrency(&self) -> usize {
+        self.semaphore.available_permits()
+    }
+
+    /// Number of currently running tasks
+    pub async fn running_count(&self) -> usize {
+        self.processing.lock().await.len()
     }
 
     /// Start background scheduler loop (auto-process pending tasks)
@@ -663,7 +817,11 @@ pub fn global_scheduler(project_root: Option<PathBuf>) -> Arc<TaskScheduler> {
     GLOBAL_SCHEDULER
         .get_or_init(|| {
             let root = project_root.unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-            let scheduler = Arc::new(TaskScheduler::new(root, ScheduleStrategy::WaitForAgent));
+            let scheduler = Arc::new(TaskScheduler::new(
+                root,
+                ScheduleStrategy::WaitForAgent,
+                DEFAULT_CONCURRENCY_LIMIT,
+            ));
 
             // Start background scheduler (polling fallback)
             scheduler.start_background_scheduler();
@@ -680,10 +838,29 @@ pub fn global_scheduler(project_root: Option<PathBuf>) -> Arc<TaskScheduler> {
 mod tests {
     use super::*;
 
+    /// Test helper — creates a scheduler with a high concurrency limit (no blocking)
+    /// and a temp directory as project root. Tests acquire a permit to push into
+    /// the processing list.
+    fn test_scheduler(root: &std::path::Path) -> TaskScheduler {
+        TaskScheduler::new(root.to_path_buf(), ScheduleStrategy::WaitForAgent, 128)
+    }
+
+    /// Acquire one semaphore permit for storing in the processing list during tests.
+    /// Returns Some(permit) for the first agent of a task, None for additional agents.
+    async fn test_permit(scheduler: &TaskScheduler) -> Option<OwnedSemaphorePermit> {
+        Some(
+            scheduler
+                .semaphore
+                .clone()
+                .try_acquire_owned()
+                .expect("test permit"),
+        )
+    }
+
     #[tokio::test]
     async fn test_scheduler_creation() {
         let temp_dir = std::env::temp_dir().join("test-scheduler");
-        let scheduler = TaskScheduler::new(temp_dir.clone(), ScheduleStrategy::WaitForAgent);
+        let scheduler = test_scheduler(&temp_dir);
         assert_eq!(scheduler.pending_count().await, 0);
         std::fs::remove_dir_all(&temp_dir).ok();
     }
@@ -700,10 +877,7 @@ mod tests {
     #[tokio::test]
     async fn test_agent_availability_initially_available() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let scheduler = TaskScheduler::new(
-            temp_dir.path().to_path_buf(),
-            ScheduleStrategy::WaitForAgent,
-        );
+        let scheduler = test_scheduler(temp_dir.path());
         let avail = scheduler.check_agent_availability("any-agent").await;
         assert_eq!(avail, AgentAvailability::Available);
     }
@@ -711,16 +885,16 @@ mod tests {
     #[tokio::test]
     async fn test_agent_availability_busy_after_processing_added() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let scheduler = TaskScheduler::new(
-            temp_dir.path().to_path_buf(),
-            ScheduleStrategy::WaitForAgent,
-        );
+        let scheduler = test_scheduler(temp_dir.path());
         // Simulate an agent currently processing a task
-        scheduler
-            .processing
-            .lock()
-            .await
-            .push(("task-1".to_string(), "alice".to_string()));
+        {
+            let mut p = scheduler.processing.lock().await;
+            p.push((
+                "task-1".to_string(),
+                "alice".to_string(),
+                test_permit(&scheduler).await,
+            ));
+        } // lock dropped here
 
         let avail = scheduler.check_agent_availability("alice").await;
         assert!(matches!(
@@ -736,20 +910,20 @@ mod tests {
     #[tokio::test]
     async fn test_mark_completed_removes_from_processing() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let scheduler = TaskScheduler::new(
-            temp_dir.path().to_path_buf(),
-            ScheduleStrategy::WaitForAgent,
-        );
-        scheduler
-            .processing
-            .lock()
-            .await
-            .push(("task-1".to_string(), "alice".to_string()));
-        scheduler
-            .processing
-            .lock()
-            .await
-            .push(("task-2".to_string(), "bob".to_string()));
+        let scheduler = test_scheduler(temp_dir.path());
+        {
+            let mut p = scheduler.processing.lock().await;
+            p.push((
+                "task-1".to_string(),
+                "alice".to_string(),
+                test_permit(&scheduler).await,
+            ));
+            p.push((
+                "task-2".to_string(),
+                "bob".to_string(),
+                test_permit(&scheduler).await,
+            ));
+        } // lock dropped here
 
         scheduler.mark_completed("task-1").await;
 
@@ -761,10 +935,7 @@ mod tests {
     #[tokio::test]
     async fn test_mark_completed_idempotent() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let scheduler = TaskScheduler::new(
-            temp_dir.path().to_path_buf(),
-            ScheduleStrategy::WaitForAgent,
-        );
+        let scheduler = test_scheduler(temp_dir.path());
         // Marking a non-existent task should not error or panic
         scheduler.mark_completed("does-not-exist").await;
         assert!(scheduler.processing.lock().await.is_empty());
@@ -776,10 +947,7 @@ mod tests {
         tokio::fs::create_dir_all(temp_dir.path().join(".ergatai"))
             .await
             .unwrap();
-        let scheduler = TaskScheduler::new(
-            temp_dir.path().to_path_buf(),
-            ScheduleStrategy::WaitForAgent,
-        );
+        let scheduler = test_scheduler(temp_dir.path());
         scheduler.pending_tasks.lock().await.push(PendingTask {
             task_id: "task-1".to_string(),
             plan_file: PathBuf::from("/tmp/p.md"),
@@ -796,10 +964,7 @@ mod tests {
     #[tokio::test]
     async fn test_cancel_task_returns_false_when_not_found() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let scheduler = TaskScheduler::new(
-            temp_dir.path().to_path_buf(),
-            ScheduleStrategy::WaitForAgent,
-        );
+        let scheduler = test_scheduler(temp_dir.path());
         let removed = scheduler.cancel_task("no-such-task").await.unwrap();
         assert!(!removed);
     }
@@ -807,10 +972,7 @@ mod tests {
     #[tokio::test]
     async fn test_list_pending_returns_clone() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let scheduler = TaskScheduler::new(
-            temp_dir.path().to_path_buf(),
-            ScheduleStrategy::WaitForAgent,
-        );
+        let scheduler = test_scheduler(temp_dir.path());
         scheduler.pending_tasks.lock().await.push(PendingTask {
             task_id: "t1".to_string(),
             plan_file: PathBuf::from("a.md"),
@@ -839,10 +1001,7 @@ mod tests {
         tokio::fs::create_dir_all(temp_dir.path().join(".ergatai"))
             .await
             .unwrap();
-        let scheduler = TaskScheduler::new(
-            temp_dir.path().to_path_buf(),
-            ScheduleStrategy::WaitForAgent,
-        );
+        let scheduler = test_scheduler(temp_dir.path());
 
         scheduler.pending_tasks.lock().await.push(PendingTask {
             task_id: "t1".to_string(),
@@ -855,10 +1014,7 @@ mod tests {
         scheduler.save_to_disk().await.unwrap();
 
         // Create a fresh scheduler pointing to the same file, load
-        let scheduler2 = TaskScheduler::new(
-            temp_dir.path().to_path_buf(),
-            ScheduleStrategy::WaitForAgent,
-        );
+        let scheduler2 = test_scheduler(temp_dir.path());
         scheduler2.load_from_disk().await.unwrap();
 
         let tasks = scheduler2.list_pending().await;
@@ -872,10 +1028,7 @@ mod tests {
     #[tokio::test]
     async fn test_load_from_disk_no_file_is_ok() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let scheduler = TaskScheduler::new(
-            temp_dir.path().to_path_buf(),
-            ScheduleStrategy::WaitForAgent,
-        );
+        let scheduler = test_scheduler(temp_dir.path());
         // No queue file exists — should not error
         scheduler.load_from_disk().await.unwrap();
         assert_eq!(scheduler.pending_count().await, 0);
@@ -895,10 +1048,7 @@ mod tests {
             .await
             .unwrap();
 
-        let scheduler = TaskScheduler::new(
-            temp_dir.path().to_path_buf(),
-            ScheduleStrategy::WaitForAgent,
-        );
+        let scheduler = test_scheduler(temp_dir.path());
         let result = scheduler.load_from_disk().await;
         assert!(result.is_err());
     }
@@ -919,10 +1069,7 @@ mod tests {
         ]"#;
         tokio::fs::write(&queue_file, legacy).await.unwrap();
 
-        let scheduler = TaskScheduler::new(
-            temp_dir.path().to_path_buf(),
-            ScheduleStrategy::WaitForAgent,
-        );
+        let scheduler = test_scheduler(temp_dir.path());
         scheduler.load_from_disk().await.unwrap();
         let tasks = scheduler.list_pending().await;
         assert_eq!(tasks.len(), 1);
@@ -946,10 +1093,7 @@ mod tests {
         }"#;
         tokio::fs::write(&queue_file, newer).await.unwrap();
 
-        let scheduler = TaskScheduler::new(
-            temp_dir.path().to_path_buf(),
-            ScheduleStrategy::WaitForAgent,
-        );
+        let scheduler = test_scheduler(temp_dir.path());
         scheduler.load_from_disk().await.unwrap();
         assert_eq!(scheduler.pending_count().await, 0);
     }
@@ -960,10 +1104,7 @@ mod tests {
         tokio::fs::create_dir_all(temp_dir.path().join(".ergatai"))
             .await
             .unwrap();
-        let scheduler = TaskScheduler::new(
-            temp_dir.path().to_path_buf(),
-            ScheduleStrategy::WaitForAgent,
-        );
+        let scheduler = test_scheduler(temp_dir.path());
 
         // Pre-populate in memory
         scheduler.pending_tasks.lock().await.push(PendingTask {
@@ -1008,10 +1149,7 @@ mod tests {
         tokio::fs::create_dir_all(temp_dir.path().join(".ergatai"))
             .await
             .unwrap();
-        let scheduler = TaskScheduler::new(
-            temp_dir.path().to_path_buf(),
-            ScheduleStrategy::WaitForAgent,
-        );
+        let scheduler = test_scheduler(temp_dir.path());
         let count = scheduler.process_pending().await.unwrap();
         assert_eq!(count, 0);
     }
@@ -1024,10 +1162,7 @@ mod tests {
         tokio::fs::create_dir_all(temp_dir.path().join(".ergatai"))
             .await
             .unwrap();
-        let scheduler = TaskScheduler::new(
-            temp_dir.path().to_path_buf(),
-            ScheduleStrategy::WaitForAgent,
-        );
+        let scheduler = test_scheduler(temp_dir.path());
 
         {
             let mut pending = scheduler.pending_tasks.lock().await;
@@ -1062,10 +1197,7 @@ mod tests {
         tokio::fs::create_dir_all(temp_dir.path().join(".ergatai"))
             .await
             .unwrap();
-        let scheduler = TaskScheduler::new(
-            temp_dir.path().to_path_buf(),
-            ScheduleStrategy::WaitForAgent,
-        );
+        let scheduler = test_scheduler(temp_dir.path());
         scheduler.pending_tasks.lock().await.push(PendingTask {
             task_id: "t1".to_string(),
             plan_file: PathBuf::from("p.md"),
@@ -1076,10 +1208,7 @@ mod tests {
         scheduler.cancel_task("t1").await.unwrap();
 
         // Verify disk state matches
-        let scheduler2 = TaskScheduler::new(
-            temp_dir.path().to_path_buf(),
-            ScheduleStrategy::WaitForAgent,
-        );
+        let scheduler2 = test_scheduler(temp_dir.path());
         scheduler2.load_from_disk().await.unwrap();
         assert_eq!(scheduler2.pending_count().await, 0);
     }
@@ -1087,17 +1216,84 @@ mod tests {
     #[tokio::test]
     async fn test_agent_availability_multiple_tasks() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let scheduler = TaskScheduler::new(
-            temp_dir.path().to_path_buf(),
-            ScheduleStrategy::WaitForAgent,
-        );
+        let scheduler = test_scheduler(temp_dir.path());
         {
             let mut p = scheduler.processing.lock().await;
-            p.push(("t1".to_string(), "alice".to_string()));
-            p.push(("t2".to_string(), "alice".to_string()));
+            p.push((
+                "t1".to_string(),
+                "alice".to_string(),
+                test_permit(&scheduler).await,
+            ));
+            p.push((
+                "t2".to_string(),
+                "alice".to_string(),
+                test_permit(&scheduler).await,
+            ));
         }
         // Should report busy with whichever match is found first
         let avail = scheduler.check_agent_availability("alice").await;
         assert!(matches!(avail, AgentAvailability::Busy { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_concurrency_limit_enforced() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        // Create a scheduler with a small concurrency limit
+        let scheduler = TaskScheduler::new(temp_dir.path().to_path_buf(), ScheduleStrategy::WaitForAgent, 2);
+
+        assert_eq!(scheduler.concurrency_limit(), 2);
+        assert_eq!(scheduler.available_concurrency().await, 2);
+        assert_eq!(scheduler.running_count().await, 0);
+
+        // Acquire both permits (simulate 2 tasks running)
+        let permit1 = scheduler.semaphore.clone().try_acquire_owned().unwrap();
+        let permit2 = scheduler.semaphore.clone().try_acquire_owned().unwrap();
+
+        // Third permit should fail (concurrency limit reached)
+        assert!(scheduler.semaphore.clone().try_acquire_owned().is_err());
+        assert_eq!(scheduler.available_concurrency().await, 0);
+
+        // Release one permit
+        drop(permit1);
+        assert_eq!(scheduler.available_concurrency().await, 1);
+
+        // Now we can acquire one more
+        let permit3 = scheduler.semaphore.clone().try_acquire_owned();
+        assert!(permit3.is_ok());
+
+        // Clean up
+        drop(permit2);
+        drop(permit3);
+        assert_eq!(scheduler.available_concurrency().await, 2);
+    }
+
+    #[tokio::test]
+    async fn test_mark_completed_releases_permit() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let scheduler = TaskScheduler::new(temp_dir.path().to_path_buf(), ScheduleStrategy::WaitForAgent, 2);
+
+        // Start with 2 available slots
+        assert_eq!(scheduler.available_concurrency().await, 2);
+
+        // Add a running task with a permit
+        {
+            let mut p = scheduler.processing.lock().await;
+            p.push((
+                "task-1".to_string(),
+                "alice".to_string(),
+                test_permit(&scheduler).await,
+            ));
+        }
+
+        // Now only 1 slot available
+        assert_eq!(scheduler.available_concurrency().await, 1);
+        assert_eq!(scheduler.running_count().await, 1);
+
+        // Mark as completed — permit should be released
+        scheduler.mark_completed("task-1").await;
+
+        // Back to 2 available slots
+        assert_eq!(scheduler.available_concurrency().await, 2);
+        assert_eq!(scheduler.running_count().await, 0);
     }
 }
