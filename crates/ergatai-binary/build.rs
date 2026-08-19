@@ -225,38 +225,38 @@ fn download_and_extract(
         return Err(msg.into());
     }
 
-    let dest_path = dest_dir.join(binary_name);
-
-    if url.ends_with(".tar.gz") || url.ends_with(".tgz") {
+    let dest_path = if url.ends_with(".tar.gz") || url.ends_with(".tgz") {
         // Extract full archive (preserves bin/, libexec/, share/ structure
-        // that rmux needs at runtime), then copy the CLI binary to dest_path.
+        // that rmux needs at runtime). The runtime finder will locate the
+        // binary inside the versioned directory (e.g., rmux-0.10.0-linux-x86_64/bin/rmux).
+        // Do NOT create a standalone copy - it breaks relative path lookups for libexec/.
         extract_tar_gz(&bytes, dest_dir)?;
-        copy_binary_from_extracted(dest_dir, binary_name, &dest_path)?;
+        // Return the path inside the versioned directory for consistency
+        find_extracted_binary_path(dest_dir, binary_name)
+            .unwrap_or_else(|| dest_dir.join(binary_name))
     } else if url.ends_with(".zip") {
         extract_zip(&bytes, dest_dir, binary_name)?;
+        dest_dir.join(binary_name)
     } else {
         // Assume raw binary
-        fs::write(&dest_path, &bytes)?;
-    }
+        let path = dest_dir.join(binary_name);
+        fs::write(&path, &bytes)?;
+        path
+    };
 
     Ok(dest_path)
 }
 
 /// After extracting a tar.gz archive, locate the CLI binary inside the
-/// versioned directory (e.g., `rmux-0.10.0-linux-x86_64/bin/rmux`) and copy
-/// it to `dest_path` so the runtime finder can locate it at a stable path.
-fn copy_binary_from_extracted(
-    dest_dir: &Path,
-    binary_name: &str,
-    dest_path: &Path,
-) -> Result<(), Box<dyn std::error::Error>> {
+/// versioned directory (e.g., `rmux-0.10.0-linux-x86_64/bin/rmux`).
+/// Returns None if the binary cannot be found.
+fn find_extracted_binary_path(dest_dir: &Path, binary_name: &str) -> Option<PathBuf> {
     // Find the top-level archive directory (e.g., rmux-0.10.0-linux-x86_64)
-    let archive_dir = fs::read_dir(dest_dir)?
+    let archive_dir = fs::read_dir(dest_dir)
+        .ok()?
         .filter_map(|e| e.ok())
         .map(|e| e.path())
-        .find(|p| p.is_dir());
-
-    let archive_dir = archive_dir.ok_or("No directory found in extracted archive")?;
+        .find(|p| p.is_dir())?;
 
     // Check for binary in bin/ subdir first, then at archive root
     let candidates = [
@@ -266,26 +266,11 @@ fn copy_binary_from_extracted(
 
     for source in &candidates {
         if source.exists() {
-            fs::copy(source, dest_path)?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = fs::set_permissions(dest_path, fs::Permissions::from_mode(0o755));
-            }
-            return Ok(());
+            return Some(source.clone());
         }
     }
 
-    Err(format!(
-        "Binary '{}' not found in archive (searched: {})",
-        binary_name,
-        candidates
-            .iter()
-            .map(|p| p.display().to_string())
-            .collect::<Vec<_>>()
-            .join(", ")
-    )
-    .into())
+    None
 }
 
 /// Returns `true` if `entry_name` is a safe path to extract under `dest_dir`.

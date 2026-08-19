@@ -265,16 +265,64 @@ async fn handle_message(msg: &async_nats::jetstream::Message) {
         "Delivering agent message via NATS consumer"
     );
 
+    // ── Resolve sender and recipient runtime IDs for batch detection ──
+    let from_runtime_id = runtime.resolve_agent_id(from).await
+        .unwrap_or_else(|| from.clone());
+    let to_runtime_id = runtime.resolve_agent_id(to).await
+        .unwrap_or_else(|| to.clone());
+
+    // ── Batch aggregator: check if this reply should be collected ──
+    // If the recipient (to) initiated a batch and the sender (from) is a target,
+    // collect this reply instead of delivering immediately.
+    let batch_aggregator = super::get_batch_aggregator();
+    let batch_result = batch_aggregator
+        .on_reply(&from_runtime_id, &to_runtime_id, formatted_message)
+        .await;
+
+    match batch_result {
+        Some(true) => {
+            // Reply collected to batch, will be merged later
+            info!(
+                from = from,
+                to = to,
+                from_runtime = %from_runtime_id,
+                to_runtime = %to_runtime_id,
+                "Reply collected to batch, will be merged with other replies"
+            );
+            // Ack the message (it's been "handled" by collecting to batch)
+            if let Err(e) = msg.ack().await {
+                warn!("Failed to ack batch-collected message: {}", e);
+            }
+            return;
+        }
+        Some(false) => {
+            // Batch already flushed, deliver this reply individually
+            info!(
+                from = from,
+                to = to,
+                "Batch already flushed, delivering reply individually"
+            );
+            // Fall through to normal delivery
+        }
+        None => {
+            // Not part of any batch, deliver normally
+            debug!(
+                from = from,
+                to = to,
+                "Message not part of any batch, delivering normally"
+            );
+            // Fall through to normal delivery
+        }
+    }
+
     // ── Deliver via AgentRuntime injection (rmux/tmux send_text) ──
     // Uses the terminal multiplexer backend to inject text directly into the
     // target agent's pane, simulating keyboard input.
 
-    // Resolve MCP agent ID to runtime agent ID for logging
-    let runtime_id = runtime.resolve_agent_id(to).await;
     info!(
         from = from,
         to = to,
-        runtime_id = ?runtime_id,
+        runtime_id = ?to_runtime_id,
         "Delivering message: MCP target → runtime resolution"
     );
 

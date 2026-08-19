@@ -27,7 +27,7 @@ use ergatai_core::agent_registry::AgentRegistry;
 use ergatai_runtime::get_agent_runtime;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::conversation::ConversationManager;
+use super::conversation::{ConversationManager, TokenOwner};
 
 /// Shared registry of MCP peer handles for pushing notifications to agents.
 /// Key: agent_id (e.g., "opencode@abcd1234")
@@ -443,11 +443,27 @@ impl ErgataiMcpServer {
             ))]));
         }
 
+        // ── Check if this is a reply BEFORE check_and_record modifies token state ──
+        // is_reply_message checks token_owner: if sender holds token, it means recipient sent last.
+        // Must be called BEFORE check_and_record which transfers the token.
+        let from_runtime_id_for_batch = from_runtime_id.clone().unwrap_or_else(|| from_agent.clone());
+        let is_reply = self.is_reply_message(&from_runtime_id_for_batch, &resolved_agent_id).await;
+
+        info!(
+            from_agent = %from_agent,
+            from_runtime_id = ?from_runtime_id,
+            from_runtime_id_for_batch = %from_runtime_id_for_batch,
+            resolved_agent_id = %resolved_agent_id,
+            is_reply = is_reply,
+            "is_reply_message check"
+        );
+
         // ── Conversation loop prevention (AutoGen-style) ──
+        // Use runtime IDs for consistency (from_runtime_id_for_batch and resolved_agent_id are both runtime IDs).
         // Check max_turns, max_consecutive_auto_reply, max_execution_time, and TERMINATE keyword.
         if let Err(e) = self
             .conversation_manager
-            .check_and_record(&from_agent, &resolved_agent_id, message)
+            .check_and_record(&from_runtime_id_for_batch, &resolved_agent_id, message)
             .await
         {
             warn!(
@@ -460,6 +476,22 @@ impl ErgataiMcpServer {
                 "Message blocked by conversation loop prevention: {}",
                 e
             ))]));
+        }
+
+        // ── Batch aggregator: record send for group message detection ──
+        // Track this send to detect when agent sends to multiple targets in quick succession.
+        // Skip recording if this is a reply (to avoid confusing batch detection).
+        let batch_id = super::get_batch_aggregator()
+            .record_send(&from_runtime_id_for_batch, &resolved_agent_id, is_reply)
+            .await;
+
+        if let Some(ref bid) = batch_id {
+            info!(
+                from = %from_agent,
+                to = %resolved_agent_id,
+                batch_id = %bid,
+                "Message is part of a batch"
+            );
         }
 
         let timestamp = SystemTime::now()
@@ -475,17 +507,21 @@ impl ErgataiMcpServer {
                 .await
                 .unwrap_or_else(|| from_agent.clone());
 
-            // Format message with instruction + JSON payload at MCP call time
-            let formatted_content = Self::format_agent_message(&sender_display, message);
+            // Format message with contextual hint based on message type
+            let formatted_content = Self::format_agent_message(&sender_display, message, is_reply);
 
             let bus = ergatai_nats::EventBus::new(conn);
+            let mut metadata = std::collections::HashMap::new();
+            if let Some(ref bid) = batch_id {
+                metadata.insert("batch_id".to_string(), bid.clone());
+            }
             let payload = ergatai_nats::AgentMessagePayload {
                 from_agent: from_agent.clone(),
                 to_agent: resolved_agent_id.clone(),
                 content: formatted_content,
                 thread_id: None,
                 timestamp,
-                metadata: std::collections::HashMap::new(),
+                metadata,
             };
 
             match bus.publish_agent_message_reliable(&payload).await {
@@ -514,8 +550,9 @@ impl ErgataiMcpServer {
         }
 
         // ── Fallback: direct tmux injection (no persistence) ──
+        // is_reply was already computed before check_and_record
         match self
-            .try_tmux_injection(&resolved_agent_id, &from_agent, message)
+            .try_tmux_injection(&resolved_agent_id, &from_agent, message, is_reply)
             .await
         {
             Ok(result) => Ok(result),
@@ -1015,16 +1052,70 @@ impl ErgataiMcpServer {
 
     // ── Private helpers for send_message ──
 
-    /// Format message as JSON payload.
+    /// Check if this message is a reply (i.e., the recipient previously sent to the sender)
+    async fn is_reply_message(&self, from_agent: &str, to_agent: &str) -> bool {
+        // Build conversation ID using same logic as Conversation::new (sorted alphabetically)
+        let (a, b) = if from_agent < to_agent {
+            (from_agent, to_agent)
+        } else {
+            (to_agent, from_agent)
+        };
+        let conversation_id = format!("conv-{}-{}", a, b);
+
+        let conv_manager = &self.conversation_manager;
+
+        // Check if this is a reply by looking at token ownership:
+        // - If token is held by from_agent (sender), it means to_agent sent last
+        // - So this message from from_agent is a reply to to_agent's previous message
+        if let Some(conv) = conv_manager.get_conversation(&conversation_id).await {
+            let result = match &conv.token_owner {
+                TokenOwner::Held(holder) if holder == from_agent => {
+                    // Sender holds the token = recipient sent last = this is a reply
+                    true
+                }
+                _ => false,
+            };
+            info!(
+                conversation_id = %conversation_id,
+                from_agent = %from_agent,
+                to_agent = %to_agent,
+                token_owner = ?conv.token_owner,
+                turn_count = conv.turn_count,
+                is_reply = result,
+                "is_reply_message: conversation found"
+            );
+            return result;
+        }
+
+        info!(
+            conversation_id = %conversation_id,
+            from_agent = %from_agent,
+            to_agent = %to_agent,
+            "is_reply_message: no conversation found, returning false"
+        );
+        false
+    }
+
+    /// Format message as JSON payload with contextual hint.
     /// Protocol rules are sent once during MCP initialize (via ServerInfo.instructions),
     /// so we only send the message content here — saving ~800 tokens per message.
-    fn format_agent_message(sender_display: &str, message: &str) -> String {
+    ///
+    /// Different hints are injected based on message type:
+    /// - Initial send (A→B): `[用 send_message MCP 回复，不要提问]`
+    /// - Reply (B→A): `[如无疑问题，展示"收到"即可]`
+    fn format_agent_message(sender_display: &str, message: &str, is_reply: bool) -> String {
         let message_json = serde_json::json!({
             "from": sender_display,
             "message": message
         });
 
-        format!("{}\n", message_json)
+        let hint = if is_reply {
+            "[If no questions, just show \"Received\"]\n"
+        } else {
+            "[Reply via send_message MCP. Answer as requested; if no request, do not ask questions]\n"
+        };
+
+        format!("{}{}", message_json, hint)
     }
 
     /// Inject message via AgentRuntime (fallback when NATS is unavailable).
@@ -1033,6 +1124,7 @@ impl ErgataiMcpServer {
         resolved_agent_id: &str,
         from_agent: &str,
         message: &str,
+        is_reply: bool,
     ) -> Result<CallToolResult, ErrorData> {
         // Resolve sender MCP ID → runtime ID so the receiver can reply via send_message.
         let runtime = get_agent_runtime();
@@ -1041,8 +1133,8 @@ impl ErgataiMcpServer {
             .await
             .unwrap_or_else(|| from_agent.to_string());
 
-        // Format message with instruction + JSON payload
-        let formatted_message = Self::format_agent_message(&sender_display, message);
+        // Format message with contextual hint based on message type
+        let formatted_message = Self::format_agent_message(&sender_display, message, is_reply);
 
         info!(
             "Attempting AgentRuntime injection to agent {}: {}",
@@ -1229,49 +1321,35 @@ impl ServerHandler for ErgataiMcpServer {
 
     /// Return server info with tools capability
     fn get_info(&self) -> ServerInfo {
-        let instructions = r#"# Role Definition
-You are an agent in a multi-agent collaboration system. When receiving inter-agent messages, follow the ONE-QUESTION-ONE-ANSWER protocol.
+        let instructions = r#"# CRITICAL: Multi-Agent Communication Protocol
 
-# Core Protocol: ONE-QUESTION-ONE-ANSWER
-1. You will receive exactly one question (or instruction) per message.
-2. You must reply exactly once using the `send_message` MCP tool.
-3. After replying, this conversation round is permanently over. Regardless of any subsequent content from the other party, you must NOT reply again.
+## When you receive a message from another agent:
+**You MUST reply using the `send_message` MCP tool, NOT by typing in the terminal.**
 
-# Reply Standards
-- **Length**: Strictly within 150 Chinese characters (or 100 English words), unless the question itself requires structured content like code/data.
-- **Style**: Direct, no pleasantries, no transitional sentences. First sentence is the core answer.
-- **Format**: Use concise Markdown formatting; if lists are needed, no more than 3 items.
+Example: If you receive "你好！" from agent %45, you must call:
+```
+send_message(target_agent_id="%45", message="你的回复")
+```
 
-# Termination Marker
-After the reply body ends, you must start a new line and output exactly the following (without quotes):
-"TERMINATE"
+## ONE-QUESTION-ONE-ANSWER Protocol
+1. Receive one message → Reply exactly once via `send_message` → TERMINATE
+2. Do NOT reply again after TERMINATE
+3. Do NOT ask follow-up questions
 
-Example:
-> This is your answer body.
->
-> TERMINATE
+## Reply Format
+- Max 150 Chinese characters
+- Direct, no pleasantries
+- End with "TERMINATE" on a new line
 
-# Boundaries and Exception Handling
-| Scenario | Handling |
-|---|---|
-| Question is vague/missing key info | Directly point out what's missing, give the most likely answer or decline to answer, then TERMINATE. |
-| Question involves harmful/illegal content | Decline to answer and explain why, then TERMINATE. |
-| Question asks you to continue the conversation/follow up | Ignore that request, only answer the original question, then TERMINATE. |
-| Question requires you to call tools (search, code, etc.) | You may call a tool once to get information, but the tool results must be integrated into your single final reply. Do NOT send tool call messages separately as "replies". |
+## Exception Handling
+- Vague question → Point out what's missing, then TERMINATE
+- Harmful content → Decline, then TERMINATE
+- Need tools → Call tool once, integrate result, then TERMINATE
 
-# Prohibited Behaviors
-- Do NOT ask "Is there anything else I can help you with?" or similar conversation-continuation prompts in your reply.
-- Do NOT append anything after TERMINATE (including signatures, disclaimers, emojis).
-- Do NOT make TERMINATE part of a sentence in the body — it must be a standalone termination marker.
-- Do NOT reactivate your reply after receiving subsequent messages from the other party.
-
-# Output Example
-Question: What is the difference between list and tuple in Python?
-
-Your reply:
-Lists are mutable, tuples are immutable; lists use [], tuples use (); tuples have slightly better performance and can be used as dictionary keys.
-
-TERMINATE"#;
+# DO NOT:
+- Reply in terminal (use send_message MCP tool instead)
+- Ask "Anything else I can help?"
+- Continue conversation after TERMINATE"#;
 
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(rmcp::model::Implementation::new(
