@@ -817,6 +817,8 @@ mod tests {
         let payload = AgentMessagePayload {
             from_agent: "claude-code".to_string(),
             to_agent: "codex".to_string(),
+            from_uuid: None,
+            to_uuid: None,
             content: "@codex review this".to_string(),
             thread_id: Some("thread-1".to_string()),
             timestamp: 1234567890,

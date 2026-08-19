@@ -502,10 +502,13 @@ impl ErgataiMcpServer {
         // ── Primary path: publish to NATS JetStream (reliable) ──
         if let Some(conn) = ergatai_nats::get_nats_connection().await {
             // Resolve sender MCP ID → runtime ID for the reply target
-            let sender_display = runtime
+            let sender_runtime_id = runtime
                 .resolve_agent_id(&from_agent)
                 .await
                 .unwrap_or_else(|| from_agent.clone());
+
+            // Get human-readable display name (e.g., "frontend-dev (%72)")
+            let sender_display = Self::get_agent_display_name(&runtime, &sender_runtime_id).await;
 
             // Format message with contextual hint based on message type
             let formatted_content = Self::format_agent_message(&sender_display, message, is_reply);
@@ -515,9 +518,16 @@ impl ErgataiMcpServer {
             if let Some(ref bid) = batch_id {
                 metadata.insert("batch_id".to_string(), bid.clone());
             }
+
+            // Get agent UUIDs for stable routing
+            let from_uuid = runtime.get_agent(&from_runtime_id_for_batch).await.map(|info| info.agent_uuid);
+            let to_uuid = runtime.get_agent(&resolved_agent_id).await.map(|info| info.agent_uuid);
+
             let payload = ergatai_nats::AgentMessagePayload {
                 from_agent: from_agent.clone(),
                 to_agent: resolved_agent_id.clone(),
+                from_uuid,
+                to_uuid,
                 content: formatted_content,
                 thread_id: None,
                 timestamp,
@@ -1096,6 +1106,19 @@ impl ErgataiMcpServer {
         false
     }
 
+    /// Get human-readable agent display name.
+    ///
+    /// Returns the display_name if set (e.g., "frontend-dev"),
+    /// otherwise falls back to the runtime ID (e.g., "%72").
+    async fn get_agent_display_name(runtime: &ergatai_runtime::AgentRuntime, agent_id: &str) -> String {
+        if let Some(info) = runtime.get_agent(agent_id).await {
+            if let Some(ref display_name) = info.display_name {
+                return display_name.clone();
+            }
+        }
+        agent_id.to_string()
+    }
+
     /// Format message as JSON payload with contextual hint.
     /// Protocol rules are sent once during MCP initialize (via ServerInfo.instructions),
     /// so we only send the message content here — saving ~800 tokens per message.
@@ -1128,10 +1151,13 @@ impl ErgataiMcpServer {
     ) -> Result<CallToolResult, ErrorData> {
         // Resolve sender MCP ID → runtime ID so the receiver can reply via send_message.
         let runtime = get_agent_runtime();
-        let sender_display = runtime
+        let sender_runtime_id = runtime
             .resolve_agent_id(from_agent)
             .await
             .unwrap_or_else(|| from_agent.to_string());
+
+        // Get human-readable display name (e.g., "frontend-dev (%72)")
+        let sender_display = Self::get_agent_display_name(&runtime, &sender_runtime_id).await;
 
         // Format message with contextual hint based on message type
         let formatted_message = Self::format_agent_message(&sender_display, message, is_reply);

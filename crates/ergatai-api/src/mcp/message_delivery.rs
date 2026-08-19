@@ -250,26 +250,55 @@ async fn handle_message(msg: &async_nats::jetstream::Message) {
         }
     }
 
-    // ── Resolve sender MCP ID → runtime ID for logging ──
+    // ── Resolve sender and recipient runtime IDs for batch detection ──
+    // Priority: UUID (stable) > pane ID (dynamic, may be stale)
     let runtime = get_agent_runtime();
 
     // The message content is already formatted by the MCP server (server.rs)
     // with instruction + JSON payload. Just deliver it as-is.
     let formatted_message = payload.content.as_str();
 
-    debug!(
-        from = from,
-        to = to,
-        message_len = formatted_message.len(),
-        message_preview = formatted_message.get(..200).unwrap_or(formatted_message),
-        "Delivering agent message via NATS consumer"
-    );
+    let to_runtime_id = if let Some(ref to_uuid) = payload.to_uuid {
+        // Try UUID first (stable across pane restarts)
+        match runtime.resolve_agent_uuid(to_uuid).await {
+            Some(id) => {
+                debug!(
+                    to_uuid = %to_uuid,
+                    resolved_id = %id,
+                    "Resolved target via UUID"
+                );
+                id
+            }
+            None => {
+                // UUID not found, fall back to pane ID
+                warn!(
+                    to_uuid = %to_uuid,
+                    to_agent = %payload.to_agent,
+                    "UUID not found, falling back to pane ID"
+                );
+                runtime.resolve_agent_id(&payload.to_agent).await
+                    .unwrap_or_else(|| payload.to_agent.clone())
+            }
+        }
+    } else {
+        // No UUID, use pane ID (legacy message)
+        runtime.resolve_agent_id(&payload.to_agent).await
+            .unwrap_or_else(|| payload.to_agent.clone())
+    };
 
-    // ── Resolve sender and recipient runtime IDs for batch detection ──
-    let from_runtime_id = runtime.resolve_agent_id(from).await
-        .unwrap_or_else(|| from.clone());
-    let to_runtime_id = runtime.resolve_agent_id(to).await
-        .unwrap_or_else(|| to.clone());
+    let from_runtime_id = if let Some(ref from_uuid) = payload.from_uuid {
+        // Try UUID resolution first, fallback to pane ID
+        if let Some(id) = runtime.resolve_agent_uuid(from_uuid).await {
+            id
+        } else {
+            runtime.resolve_agent_id(&payload.from_agent).await
+                .unwrap_or_else(|| payload.from_agent.clone())
+        }
+    } else {
+        // No UUID, use pane ID (legacy message)
+        runtime.resolve_agent_id(&payload.from_agent).await
+            .unwrap_or_else(|| payload.from_agent.clone())
+    };
 
     // ── Batch aggregator: check if this reply should be collected ──
     // If the recipient (to) initiated a batch and the sender (from) is a target,
@@ -326,7 +355,7 @@ async fn handle_message(msg: &async_nats::jetstream::Message) {
         "Delivering message: MCP target → runtime resolution"
     );
 
-    match runtime.inject_message(to, formatted_message).await {
+    match runtime.inject_message(&to_runtime_id, formatted_message).await {
         Ok(()) => {
             info!(
                 from = from,

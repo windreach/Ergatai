@@ -108,10 +108,14 @@ pub struct DagCompletePayload {
 /// routes via NATS, and forwards to the target agent's ACP session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentMessagePayload {
-    /// Source agent ID (sender)
+    /// Source agent ID (sender) - pane ID for backward compatibility
     pub from_agent: String,
-    /// Target agent ID (receiver)
+    /// Target agent ID (receiver) - pane ID for backward compatibility
     pub to_agent: String,
+    /// Source agent UUID (stable identifier, for routing)
+    pub from_uuid: Option<String>,
+    /// Target agent UUID (stable identifier, for routing)
+    pub to_uuid: Option<String>,
     /// Message content (the text mentioning @target_agent)
     pub content: String,
     /// Optional: conversation thread ID (for multi-turn dialogs)
@@ -613,6 +617,8 @@ mod tests {
             DagEvent::AgentMessage(AgentMessagePayload {
                 from_agent: "claude-code".to_string(),
                 to_agent: "codex".to_string(),
+                from_uuid: None,
+                to_uuid: None,
                 content: "@codex please review this code".to_string(),
                 thread_id: Some("thread-123".to_string()),
                 timestamp: 1234567890,
@@ -636,6 +642,8 @@ mod tests {
         let payload = AgentMessagePayload {
             from_agent: "claude-code".to_string(),
             to_agent: "codex".to_string(),
+            from_uuid: Some("uuid-claude-123".to_string()),
+            to_uuid: Some("uuid-codex-456".to_string()),
             content: "@codex please review this code".to_string(),
             thread_id: Some("thread-123".to_string()),
             timestamp: 1234567890,
@@ -658,6 +666,8 @@ mod tests {
         let payload = AgentMessagePayload {
             from_agent: "agent-a".to_string(),
             to_agent: "agent-b".to_string(),
+            from_uuid: None,
+            to_uuid: None,
             content: "hello".to_string(),
             thread_id: None,
             timestamp: 0,
@@ -768,6 +778,8 @@ mod tests {
         let payload = AgentMessagePayload {
             from_agent: "a".to_string(),
             to_agent: "b".to_string(),
+            from_uuid: None,
+            to_uuid: None,
             content: "".to_string(),
             thread_id: None,
             timestamp: 0,
@@ -785,6 +797,8 @@ mod tests {
         let payload = AgentMessagePayload {
             from_agent: "a".to_string(),
             to_agent: "b".to_string(),
+            from_uuid: None,
+            to_uuid: None,
             content: long_content.clone(),
             thread_id: None,
             timestamp: 0,
@@ -802,6 +816,8 @@ mod tests {
         let payload = AgentMessagePayload {
             from_agent: "agent-1".to_string(),
             to_agent: "agent-2".to_string(),
+            from_uuid: None,
+            to_uuid: None,
             content: "Hello\nWorld\t\"quotes\" and \\slashes\\".to_string(),
             thread_id: None,
             timestamp: 0,

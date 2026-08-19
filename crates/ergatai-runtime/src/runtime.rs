@@ -58,6 +58,9 @@ pub fn init_agent_runtime(
 pub struct AgentRuntime {
     backend: Arc<dyn AgentRuntimeBackend>,
     registry: Arc<RwLock<HashMap<String, AgentInfo>>>,
+    /// Reverse index: agent UUID → runtime agent ID (pane ID).
+    /// Enables O(1) UUID resolution for stable message routing.
+    uuid_index: Arc<RwLock<HashMap<String, String>>>,
     /// Reverse index: MCP agent ID → runtime agent ID.
     /// Enables resolving MCP IDs (e.g., "opencode@abcd1234") to runtime IDs
     /// (e.g., "%198") for message injection.
@@ -79,6 +82,7 @@ impl AgentRuntime {
         Self {
             backend,
             registry: Arc::new(RwLock::new(HashMap::new())),
+            uuid_index: Arc::new(RwLock::new(HashMap::new())),
             mcp_index: Arc::new(RwLock::new(HashMap::new())),
             pending_mcp: Arc::new(RwLock::new(Vec::new())),
             binding_mutex: Arc::new(Mutex::new(())),
@@ -134,8 +138,10 @@ impl AgentRuntime {
             .await?;
 
         let agent_id = handle.agent_id.clone();
+        let agent_uuid = uuid::Uuid::new_v4().to_string();
 
         let info = AgentInfo {
+            agent_uuid: agent_uuid.clone(),
             agent_id: agent_id.clone(),
             display_name: None,
             workspace_id: spec.id,
@@ -147,6 +153,7 @@ impl AgentRuntime {
         };
 
         self.registry.write().await.insert(agent_id.clone(), info);
+        self.uuid_index.write().await.insert(agent_uuid, agent_id.clone());
         self.spawn_monitor(agent_id.clone(), handle);
 
         info!(agent_id = agent_id, "Agent launched");
@@ -185,6 +192,9 @@ impl AgentRuntime {
             .await
             .remove(agent_id)
             .ok_or_else(|| ErgataiError::internal(format!("Agent {} not found", agent_id)))?;
+
+        // Clean up UUID index
+        self.uuid_index.write().await.remove(&info.agent_uuid);
 
         if let Err(e) = self.backend.stop_agent(&info.handle).await {
             warn!(agent_id = agent_id, error = %e, "Failed to stop agent backend");
@@ -274,7 +284,9 @@ impl AgentRuntime {
         agent_id: String,
         handle: AgentHandle,
     ) -> ErgataiResult<()> {
+        let agent_uuid = uuid::Uuid::new_v4().to_string();
         let info = AgentInfo {
+            agent_uuid: agent_uuid.clone(),
             agent_id: agent_id.clone(),
             display_name: None,
             workspace_id: handle.workspace.id.clone(),
@@ -285,6 +297,7 @@ impl AgentRuntime {
             mcp_agent_id: None,
         };
         self.registry.write().await.insert(agent_id.clone(), info);
+        self.uuid_index.write().await.insert(agent_uuid, agent_id.clone());
         debug!(agent_id = agent_id, "Registered discovered agent");
         Ok(())
     }
@@ -300,13 +313,17 @@ impl AgentRuntime {
     pub async fn discover_and_register_agents(&self) -> ErgataiResult<usize> {
         let discovered = self.backend.discover_agents().await?;
         let mut count = 0;
+        let mut new_uuids = Vec::new();
         let mut registry = self.registry.write().await;
         for (agent_id, handle) in discovered {
             // Atomic check-and-insert under a single write lock acquisition.
             // entry().or_insert() ensures no TOCTOU gap between contains_key and insert.
             registry.entry(agent_id.clone()).or_insert_with(|| {
                 count += 1;
+                let agent_uuid = uuid::Uuid::new_v4().to_string();
+                new_uuids.push((agent_uuid.clone(), agent_id.clone()));
                 AgentInfo {
+                    agent_uuid: agent_uuid.clone(),
                     agent_id: agent_id.clone(),
                     display_name: None,
                     workspace_id: handle.workspace.id.clone(),
@@ -319,6 +336,14 @@ impl AgentRuntime {
             });
         }
         drop(registry);
+
+        // Update UUID index for newly registered agents
+        if !new_uuids.is_empty() {
+            let mut uuid_index = self.uuid_index.write().await;
+            for (uuid, agent_id) in new_uuids {
+                uuid_index.insert(uuid, agent_id);
+            }
+        }
 
         if count > 0 {
             info!(count = count, "Discovered and registered new agents");
@@ -620,6 +645,28 @@ impl AgentRuntime {
         registry
             .get(runtime_id)
             .and_then(|info| info.mcp_agent_id.clone())
+    }
+
+    /// Resolve agent UUID to current runtime ID (pane ID).
+    ///
+    /// This enables stable message routing: messages are addressed by UUID,
+    /// which survives pane restarts. The UUID maps to the current pane ID.
+    ///
+    /// Uses O(1) hash map lookup via uuid_index for efficient resolution.
+    pub async fn resolve_agent_uuid(&self, agent_uuid: &str) -> Option<String> {
+        let index = self.uuid_index.read().await;
+        index.get(agent_uuid).cloned()
+    }
+
+    /// Set agent UUID (for testing purposes only).
+    #[cfg(test)]
+    pub async fn set_agent_uuid_for_test(&self, agent_id: &str, uuid: &str) -> ErgataiResult<()> {
+        let mut registry = self.registry.write().await;
+        let info = registry
+            .get_mut(agent_id)
+            .ok_or_else(|| ErgataiError::internal(format!("Agent {} not found", agent_id)))?;
+        info.agent_uuid = uuid.to_string();
+        Ok(())
     }
 
     /// Update agent state.

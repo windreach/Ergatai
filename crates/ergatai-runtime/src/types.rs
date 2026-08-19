@@ -147,7 +147,11 @@ pub struct BackendCapabilities {
 /// Agent information tracked by the runtime facade.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentInfo {
-    /// Unique agent ID (runtime-generated, e.g., "%198" for rmux panes)
+    /// Stable agent UUID (persistent across pane restarts, used for message routing)
+    pub agent_uuid: String,
+
+    /// Dynamic pane ID (e.g., "%72", used for terminal injection)
+    /// Changes when the pane dies and a new pane is created.
     pub agent_id: String,
 
     /// Human-readable display name (user-defined, optional)
@@ -449,6 +453,7 @@ mod tests {
     #[test]
     fn test_agent_info_construction() {
         let info = AgentInfo {
+            agent_uuid: "550e8400-e29b-41d4-a716-446655440000".to_string(),
             agent_id: "agent-1".to_string(),
             display_name: None,
             workspace_id: "ws-1".to_string(),
@@ -468,6 +473,7 @@ mod tests {
             mcp_agent_id: None,
         };
         assert_eq!(info.agent_id, "agent-1");
+        assert_eq!(info.agent_uuid, "550e8400-e29b-41d4-a716-446655440000");
         assert_eq!(info.workspace_id, "ws-1");
         assert_eq!(info.state, AgentState::Running);
         assert!(info.task_id.is_none());
@@ -476,6 +482,7 @@ mod tests {
     #[test]
     fn test_agent_info_with_task() {
         let info = AgentInfo {
+            agent_uuid: "550e8400-e29b-41d4-a716-446655440001".to_string(),
             agent_id: "agent-1".to_string(),
             display_name: None,
             workspace_id: "ws-1".to_string(),
