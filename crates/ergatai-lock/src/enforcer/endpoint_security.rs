@@ -26,7 +26,7 @@ use super::backend::{EnforcementResult, EnforcerBackend, FileAccessEvent, Platfo
 /// 2. Full Disk Access permission granted
 /// 3. Binary signed with `com.apple.developer.endpoint-security.client` entitlement
 pub struct EndpointSecurityBackend {
-    project_root: PathBuf,
+    _project_root: PathBuf,
 }
 
 impl EndpointSecurityBackend {
