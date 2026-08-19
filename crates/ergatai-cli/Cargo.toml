@@ -11,7 +11,7 @@ path = "src/main.rs"
 ergatai-error = { path = "../ergatai-error" }
 
 clap = { workspace = true, features = ["derive"] }
-reqwest = { version = "0.11", features = ["json"] }
+reqwest = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-tungstenite = "0.20"
 serde = { workspace = true }
