@@ -175,8 +175,7 @@ ergatai/
 ├── docs/                  # Documentation
 │   ├── getting-started/   # User guides
 │   ├── guide/             # CLI, MCP configuration
-│   ├── architecture/      # System design
-│   └── dev/               # Internal development docs
+│   └── architecture/      # System design
 ├── assets/                # Static assets (logo, etc.)
 ── install.sh             # Installation script
 ```

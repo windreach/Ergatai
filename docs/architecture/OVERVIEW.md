@@ -211,4 +211,3 @@ File Access Control (ergatai-lock)
 - [Installation Guide](../getting-started/INSTALL.md)
 - [CLI Guide](../guide/CLI.md)
 - [MCP Configuration](../guide/MCP.md)
-- Internal dev docs: `docs/dev/`
