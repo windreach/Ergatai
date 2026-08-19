@@ -29,6 +29,15 @@ pub struct DagScheduler {
 
     /// Reference to the global task scheduler
     scheduler: Arc<TaskScheduler>,
+
+    /// Unique DAG identifier (UUID, generated at construction)
+    dag_id: String,
+
+    /// DAG creation timestamp (for duration tracking)
+    created_at: std::time::Instant,
+
+    /// Active timeout watchdog handles (node_id → JoinHandle)
+    timeout_watchers: Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
 }
 
 impl DagScheduler {
@@ -44,6 +53,9 @@ impl DagScheduler {
             context: Arc::new(Mutex::new(context)),
             project_root: project_root.clone(),
             scheduler: global_scheduler(Some(project_root)),
+            dag_id: format!("dag-{}", uuid::Uuid::new_v4()),
+            created_at: std::time::Instant::now(),
+            timeout_watchers: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -149,21 +161,107 @@ impl DagScheduler {
 
                 bus.publish_task_submit(&payload).await?;
                 tracing::info!(task_id = task_id, "Submitted node via NATS event");
+
+                // Start timeout watchdog if timeout is configured
+                if let Some(timeout_secs) = node.timeout {
+                    self.spawn_timeout_watcher(&task_id, timeout_secs, &node.agent);
+                }
+
                 return Ok(task_id);
             }
         }
 
         // Fallback: direct task_scheduler call
         let tid = self.scheduler.submit_task(plan_file).await?;
+
+        // Start timeout watchdog if timeout is configured
+        if let Some(timeout_secs) = node.timeout {
+            self.spawn_timeout_watcher(&tid, timeout_secs, &node.agent);
+        }
+
         Ok(tid)
     }
 
-    /// Get a DAG identifier (derived from project root)
+    /// Get the unique DAG identifier (UUID)
     fn dag_id(&self) -> String {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        self.project_root.hash(&mut hasher);
-        format!("dag-{:x}", hasher.finish())
+        self.dag_id.clone()
+    }
+
+    /// Get elapsed time since DAG creation (for duration reporting)
+    fn elapsed_secs(&self) -> u64 {
+        self.created_at.elapsed().as_secs()
+    }
+
+    /// Spawn a timeout watchdog for a node.
+    ///
+    /// If the node has a `timeout` (in seconds), starts a background task that
+    /// will mark the node as failed after the timeout elapses. The watchdog is
+    /// automatically cancelled when the node completes or fails normally.
+    fn spawn_timeout_watcher(&self, node_id: &str, timeout_secs: u64, agent_name: &str) {
+        if timeout_secs == 0 {
+            return;
+        }
+
+        let node_id_owned = node_id.to_string();
+        let node_id_for_store = node_id.to_string();
+        let agent_name = agent_name.to_string();
+        let scheduler = self.clone();
+        let watchers = self.timeout_watchers.clone();
+
+        let handle = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(timeout_secs)).await;
+
+            // Timeout elapsed — check if node is still running
+            let graph = scheduler.graph.lock().await;
+            if let Some(node) = graph.find_node(&node_id_owned) {
+                if node.status == TaskStatus::Running {
+                    tracing::warn!(
+                        node_id = %node_id_owned,
+                        timeout_secs = timeout_secs,
+                        agent = %agent_name,
+                        "Node timed out, marking as failed"
+                    );
+                    drop(graph);
+
+                    // Remove from watcher map before triggering failure
+                    {
+                        let mut w = watchers.lock().await;
+                        w.remove(&node_id_owned);
+                    }
+
+                    // Trigger failure handling
+                    if let Err(e) = scheduler
+                        .on_node_failed(
+                            &node_id_owned,
+                            &format!("Task timed out after {} seconds", timeout_secs),
+                        )
+                        .await
+                    {
+                        tracing::error!(
+                            node_id = %node_id_owned,
+                            error = %e,
+                            "Failed to handle timeout for node"
+                        );
+                    }
+                }
+            }
+        });
+
+        // Store the handle in the watchers map (via detached spawn to avoid blocking)
+        let watchers_store = self.timeout_watchers.clone();
+        tokio::spawn(async move {
+            let mut w = watchers_store.lock().await;
+            w.insert(node_id_for_store, handle);
+        });
+    }
+
+    /// Cancel the timeout watchdog for a node (called on normal completion/failure)
+    async fn cancel_timeout_watcher(&self, node_id: &str) {
+        let mut watchers = self.timeout_watchers.lock().await;
+        if let Some(handle) = watchers.remove(node_id) {
+            handle.abort();
+            tracing::debug!(node_id = node_id, "Cancelled timeout watchdog");
+        }
     }
 
     /// Start listening for DAG events via JetStream pull consumer
@@ -332,6 +430,9 @@ impl DagScheduler {
         node_id: &str,
         result_path: Option<String>,
     ) -> ErgataiResult<Vec<String>> {
+        // Cancel timeout watchdog (node completed normally)
+        self.cancel_timeout_watcher(node_id).await;
+
         // Update completed node status AND atomically preempt ready nodes as Running
         // within a single lock acquisition to prevent TOCTOU duplicate submission.
         let ready_nodes: Vec<TaskNode> = {
@@ -418,7 +519,7 @@ impl DagScheduler {
                         total_nodes: total,
                         completed_nodes: completed,
                         failed_nodes: failed,
-                        duration_secs: 0, // TODO: track start time
+                        duration_secs: self.elapsed_secs(),
                     };
                     if let Err(e) = bus.publish_dag_complete(&payload).await {
                         tracing::error!(error = %e, "Failed to publish DAG complete event");
@@ -439,6 +540,9 @@ impl DagScheduler {
     /// status and return early without consuming retry budget or
     /// double-submitting the task.
     pub async fn on_node_failed(&self, node_id: &str, error: &str) -> ErgataiResult<()> {
+        // Cancel timeout watchdog (node already failed)
+        self.cancel_timeout_watcher(node_id).await;
+
         // All state inspection + transition under one lock hold.
         // `retry_decision` is `Some((node_clone, retry_count))` when we should retry,
         // or `None` when retries are exhausted (node marked Failed inside the lock).
@@ -478,11 +582,23 @@ impl DagScheduler {
         }; // Lock released
 
         if let Some((node_clone, retry_count)) = retry_decision {
+            // Exponential backoff with jitter: base * 2^(retry_count-1) + random(0, base)
+            let base_delay = 3u64; // seconds
+            let exponential = base_delay * (1u64 << (retry_count - 1).min(6)); // cap at 2^6 = 64
+            let jitter = rand_delay(base_delay);
+            let delay = std::time::Duration::from_secs(exponential + jitter);
+
             tracing::info!(
-                "Node {} failed, retrying (attempt {})",
+                "Node {} failed, retrying in {:?} (attempt {}, backoff {}s + jitter {}s)",
                 node_id,
-                retry_count
+                delay,
+                retry_count,
+                exponential,
+                jitter,
             );
+
+            // Wait before retrying (no locks held)
+            tokio::time::sleep(delay).await;
 
             // Submit without holding lock
             match self.generate_and_submit(&node_clone).await {
@@ -638,6 +754,19 @@ impl DagScheduler {
         serde_json::to_string(&*graph)
             .map_err(|e| ErgataiError::json_with_source("Failed to serialize graph", e))
     }
+}
+
+/// Generate a random delay value in [0, max_secs) for jitter.
+///
+/// Uses a simple approach without external rand crate: hash the current
+/// time with a counter to get pseudo-random bits.
+fn rand_delay(max_secs: u64) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    std::time::SystemTime::now().hash(&mut hasher);
+    // Add thread id for extra entropy across concurrent retries
+    std::thread::current().id().hash(&mut hasher);
+    hasher.finish() % max_secs
 }
 
 /// Initialize the JetStream pull consumer for DAG events on the DAG_EVENTS stream.
@@ -995,19 +1124,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_dag_id_is_deterministic() {
+    async fn test_dag_id_is_unique() {
         let graph = sample_graph();
         let path = PathBuf::from("/tmp/project-x");
         let s1 = DagScheduler::new(path.clone(), graph.clone());
         let s2 = DagScheduler::new(path, TaskGraph::new(vec![]));
-        assert_eq!(s1.dag_id(), s2.dag_id());
+        // Each scheduler gets a unique UUID-based dag_id
+        assert_ne!(s1.dag_id(), s2.dag_id());
         assert!(s1.dag_id().starts_with("dag-"));
+        // UUID format: dag-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+        assert!(s1.dag_id().len() > 10);
     }
 
     #[tokio::test]
     async fn test_dag_id_differs_for_different_paths() {
         let s1 = DagScheduler::new(PathBuf::from("/tmp/a"), sample_graph());
         let s2 = DagScheduler::new(PathBuf::from("/tmp/b"), sample_graph());
+        // Different schedulers always have different IDs (UUID-based)
         assert_ne!(s1.dag_id(), s2.dag_id());
     }
 

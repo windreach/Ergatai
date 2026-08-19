@@ -40,6 +40,7 @@ use crate::dag_topology::{TaskGraph, TaskNode, TaskStatus};
 
 /// YAML 顶层结构
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)] // Schema fields: name/description are optional metadata, consumed by serde
 struct YamlDag {
     /// DAG 名称（可选）
     name: Option<String>,

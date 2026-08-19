@@ -145,7 +145,7 @@ impl TaskScheduler {
         Ok(())
     }
 
-    /// Save pending tasks to disk
+    /// Save pending tasks to disk (atomic: write-to-temp + rename)
     pub async fn save_to_disk(&self) -> ErgataiResult<()> {
         let tasks = self.pending_tasks.lock().await.clone();
         let queue_file = QueueFile {
@@ -153,7 +153,19 @@ impl TaskScheduler {
             tasks,
         };
         let content = serde_json::to_string_pretty(&queue_file)?;
-        tokio::fs::write(&self.queue_file, content).await?;
+
+        // Atomic write: write to temp file first, then rename
+        let temp_file = self.queue_file.with_extension("json.tmp");
+        tokio::fs::write(&temp_file, content.as_bytes()).await?;
+        if let Err(e) = tokio::fs::rename(&temp_file, &self.queue_file).await {
+            // Clean up temp file on rename failure
+            let _ = tokio::fs::remove_file(&temp_file).await;
+            return Err(ErgataiError::internal_with_source(
+                "Failed to atomically rename queue file",
+                e,
+            ));
+        }
+
         Ok(())
     }
 
