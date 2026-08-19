@@ -597,7 +597,7 @@ impl ErgataiMcpServer {
     }
 
     /// Submit a DAG workflow for multi-agent collaboration
-    #[tool(description = "Submit a DAG workflow for multi-agent collaboration")]
+    #[tool(description = "Submit a DAG workflow for multi-agent collaboration. Accepts YAML format (recommended) or legacy Markdown format. The system auto-detects the format.")]
     async fn submit_orchestration(
         &self,
         params: Parameters<SubmitOrchestrationParams>,

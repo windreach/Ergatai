@@ -21,35 +21,49 @@ Use DAG orchestration when:
 
 {{agent_list}}
 
-## DAG Markdown Format
+## DAG YAML Format (Recommended)
 
-When you decide to orchestrate, output a DAG specification in this exact format:
+When you decide to orchestrate, output a DAG specification in YAML format:
 
-```markdown
-# Task: [Brief description]
+```yaml
+tasks:
+  - name: Task A
+    agent: claude-code
+    task: Analyze the authentication module and identify issues
+    input: "{{global.user_query}}"
+    output: analysis_report, security_issues
 
-## Task A: [Human-readable name]
-- **agent**: [agent-id]
-- **task**: [Brief description of what this agent should do]
-- **depends_on**: []
-- **input**: {{global.user_query}}
-- **output**: [key1], [key2]
-
-## Task B: [Human-readable name]
-- **agent**: [agent-id]
-- **task**: [Brief description]
-- **depends_on**: [Task A]
-- **input**: Results from Task A: {{Task A.key1}}
-- **output**: [key1]
+  - name: Task B
+    agent: codex
+    task: Implement the recommended fixes based on the analysis
+    depends_on: [Task A]
+    input: "{{Task A.analysis_report}}"
+    output: refactored_code, changes_made
 ```
 
-### Field Reference
+### Node Fields
 
-- **agent**: Use agent ID from the available agents list above
-- **task**: Clear, actionable description for the agent
-- **depends_on**: List of task names this depends on (empty `[]` for root tasks)
-- **input**: Use `{{global.user_query}}` for original query, `{{TaskName.key}}` for upstream outputs
-- **output**: Comma-separated list of output keys this task will produce
+| Field | Required | Description |
+|-------|----------|-------------|
+| `name` | ✅ Yes | Task name, used for `depends_on` references |
+| `agent` | | Executor agent ID (from available agents list) |
+| `task` | | Task description file path or inline description |
+| `depends_on` | | List of upstream task names |
+| `input` | | Input template, supports `{{global.user_query}}` and `{{TaskName.key}}` |
+| `output` | | Output key(s) this task produces |
+| `priority` | | Task priority (e.g., high, normal, low) |
+| `timeout` | | Timeout in seconds |
+| `retry` | | Max retry count on failure |
+| `scope` | | File access scope (glob pattern, e.g., `src/auth/**`) |
+
+### Minimal Node
+
+Only `name` is required:
+
+```yaml
+tasks:
+  - name: Code Review
+```
 
 ### Template Variables
 
@@ -61,55 +75,103 @@ When you decide to orchestrate, output a DAG specification in this exact format:
 
 ### Example 1: Code Analysis + Refactoring
 
-```markdown
-# Task: Refactor authentication module
+```yaml
+tasks:
+  - name: Analyze Auth Code
+    agent: claude-code
+    task: Analyze the authentication module in src/auth/ and identify security issues, code smells, and improvement opportunities
+    input: "{{global.user_query}}"
+    output: analysis_report, security_issues
 
-## Task A: Analyze current auth code
-- **agent**: claude-code
-- **task**: Analyze the authentication module in src/auth/ and identify security issues, code smells, and improvement opportunities
-- **depends_on**: []
-- **input**: {{global.user_query}}
-- **output**: analysis_report, security_issues
-
-## Task B: Implement fixes
-- **agent**: codex
-- **task**: Implement the recommended fixes based on the analysis
-- **depends_on**: [Task A]
-- **input**: {{Task A.analysis_report}}
-- **output**: refactored_code, changes_made
+  - name: Implement Fixes
+    agent: codex
+    task: Implement the recommended fixes based on the analysis
+    depends_on: [Analyze Auth Code]
+    input: "{{Analyze Auth Code.analysis_report}}"
+    output: refactored_code, changes_made
 ```
 
 ### Example 2: Parallel Testing
 
+```yaml
+tasks:
+  - name: Utils Unit Tests
+    agent: codex
+    task: Write unit tests for src/utils/
+    input: "{{global.user_query}}"
+    output: test_files, coverage
+    scope: "src/utils/**"
+
+  - name: Services Unit Tests
+    agent: codex
+    task: Write unit tests for src/services/
+    input: "{{global.user_query}}"
+    output: test_files, coverage
+    scope: "src/services/**"
+
+  - name: Integration Tests
+    agent: claude-code
+    task: Write integration tests based on unit test results
+    depends_on: [Utils Unit Tests, Services Unit Tests]
+    input: "{{Utils Unit Tests.coverage}}, {{Services Unit Tests.coverage}}"
+    output: integration_tests
+    scope: "tests/**"
+```
+
+### Example 3: Full-Featured (Chinese)
+
+```yaml
+name: 功能实现流程
+description: 多 agent 协作实现新功能
+
+tasks:
+  - name: 需求分析
+    agent: pm
+    task: 分析用户需求并输出需求文档
+    input: "{{global.user_query}}"
+    output: requirements
+
+  - name: 架构设计
+    agent: architect
+    depends_on: [需求分析]
+    input: "{{需求分析.requirements}}"
+    output: design_doc
+
+  - name: 前端开发
+    agent: frontend-dev
+    depends_on: [架构设计]
+    scope: "src/frontend/**"
+    input: "{{架构设计.design_doc}}"
+
+  - name: 后端开发
+    agent: backend-dev
+    depends_on: [架构设计]
+    scope: "src/backend/**"
+    input: "{{架构设计.design_doc}}"
+
+  - name: 集成测试
+    agent: qa
+    depends_on: [前端开发, 后端开发]
+    scope: "tests/**"
+```
+
+## Markdown Format (Legacy)
+
+The system also supports the legacy Markdown format for backward compatibility:
+
 ```markdown
-# Task: Add comprehensive tests
-
-## Task A: Unit tests for utils
-- **agent**: codex
-- **task**: Write unit tests for src/utils/
-- **depends_on**: []
-- **input**: {{global.user_query}}
-- **output**: test_files, coverage
-
-## Task B: Unit tests for services
-- **agent**: codex
-- **task**: Write unit tests for src/services/
-- **depends_on**: []
-- **input**: {{global.user_query}}
-- **output**: test_files, coverage
-
-## Task C: Integration tests
+## Task A: Analyze code
 - **agent**: claude-code
-- **task**: Write integration tests based on unit test results
-- **depends_on**: [Task A, Task B]
-- **input**: {{Task A.coverage}}, {{Task B.coverage}}
-- **output**: integration_tests
+- **task**: Analyze src/auth/
+- **depends_on**: []
+- **input**: {{global.user_query}}
+- **output**: analysis_report
 ```
 
 ## How to Submit
 
 When you generate a DAG specification:
-1. Output the complete markdown wrapped in a code block with language tag `dag`
+1. Output the complete YAML wrapped in a `yaml` code block
 2. The system will automatically detect and execute it
 3. You'll see progress updates as tasks complete
 
@@ -117,12 +179,18 @@ Example output:
 ````
 Here's the orchestration plan:
 
-```dag
-# Task: Refactor user module
+```yaml
+tasks:
+  - name: Analyze Code
+    agent: claude-code
+    task: Analyze src/auth/ for security issues
+    input: "{{global.user_query}}"
+    output: report
 
-## Task A: Analyze code
-- **agent**: claude-code
-- **task**: ...
+  - name: Implement Fixes
+    agent: codex
+    depends_on: [Analyze Code]
+    input: "{{Analyze Code.report}}"
 ```
 
 I'll start the orchestration now.
@@ -135,6 +203,7 @@ I'll start the orchestration now.
 3. **Define clear outputs** — downstream tasks depend on them
 4. **Use appropriate agents** — match task requirements to agent strengths
 5. **Keep it simple** — don't over-engineer; 2-5 tasks is usually optimal
+6. **Use `scope`** to limit file access — prevents agents from touching unrelated code
 
 ---
 

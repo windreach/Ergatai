@@ -848,7 +848,8 @@ fn validate_cwd(cwd: &str) -> Result<PathBuf, String> {
 
 /// POST /api/v1/dag — submit a DAG workflow for execution.
 ///
-/// Accepts a markdown-formatted DAG definition as the request body.
+/// Accepts a YAML or Markdown-formatted DAG definition as the request body.
+/// YAML format is recommended. The system auto-detects the format.
 /// Parses it into a TaskGraph, creates a DagScheduler, and starts execution.
 async fn submit_dag(body: String) -> impl IntoResponse {
     // Check if a DAG is already running
