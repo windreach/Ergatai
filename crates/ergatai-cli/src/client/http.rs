@@ -94,12 +94,14 @@ impl ErgataiClient {
         &self,
         workspace_id: &str,
         command: &str,
+        work_dir: Option<&str>,
         instruction: Option<&str>,
     ) -> Result<SpawnAgentResponse> {
         let url = format!("{}/api/v1/agents", self.base_url);
         let body = SpawnAgentRequest {
             workspace_id: workspace_id.to_string(),
             command: command.to_string(),
+            work_dir: work_dir.map(|s| s.to_string()),
             instruction: instruction.map(|s| s.to_string()),
         };
         let req = self.client.post(&url).json(&body);
@@ -210,6 +212,7 @@ struct CreateWorkspaceRequest {
 struct SpawnAgentRequest {
     workspace_id: String,
     command: String,
+    work_dir: Option<String>,
     instruction: Option<String>,
 }
 
@@ -331,6 +334,7 @@ mod tests {
         let req = SpawnAgentRequest {
             workspace_id: "ws-1".to_string(),
             command: "claude".to_string(),
+            work_dir: Some("/tmp/work".to_string()),
             instruction: Some("fix the bug".to_string()),
         };
         let json = serde_json::to_string(&req).unwrap();
@@ -344,6 +348,7 @@ mod tests {
         let req = SpawnAgentRequest {
             workspace_id: "ws-1".to_string(),
             command: "claude".to_string(),
+            work_dir: None,
             instruction: None,
         };
         let json = serde_json::to_string(&req).unwrap();

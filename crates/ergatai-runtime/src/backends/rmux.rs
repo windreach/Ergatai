@@ -91,6 +91,17 @@ pub struct RmuxBackend {
     /// Per-workspace "anchor pane" — the pane we split from for the next agent.
     /// This creates a linear layout: [agent1][agent2][agent3]...
     anchor_panes: Arc<RwLock<HashMap<String, Pane>>>,
+    /// Per-workspace work_dir cache — populated by create_workspace so that
+    /// list_workspaces can return work_dir in metadata, and start_agent can
+    /// find it even when reusing an existing workspace.
+    work_dir_cache: Arc<RwLock<HashMap<String, String>>>,
+    /// Workspaces created during this server run — used by start_agent to
+    /// distinguish "just created" from "pre-existing" sessions. This prevents
+    /// reattaching to the default shell in a freshly created session.
+    fresh_workspaces: Arc<RwLock<std::collections::HashSet<String>>>,
+    /// Last time a health check was performed on the rmux connection.
+    /// Used to avoid checking on every call — only check if stale (30s threshold).
+    last_health_check: Arc<Mutex<std::time::Instant>>,
 }
 
 impl RmuxBackend {
@@ -104,6 +115,9 @@ impl RmuxBackend {
             rmux: Arc::new(Mutex::new(None)),
             panes: Arc::new(RwLock::new(HashMap::new())),
             anchor_panes: Arc::new(RwLock::new(HashMap::new())),
+            work_dir_cache: Arc::new(RwLock::new(HashMap::new())),
+            fresh_workspaces: Arc::new(RwLock::new(std::collections::HashSet::new())),
+            last_health_check: Arc::new(Mutex::new(std::time::Instant::now())),
         }
     }
 
@@ -132,8 +146,26 @@ impl RmuxBackend {
     }
 
     /// Build the full session name from prefix + workspace ID.
+    /// Sanitizes the workspace ID to ensure it's safe for rmux session names.
     fn session_name(&self, workspace_id: &str) -> String {
-        let safe_id = workspace_id.replace(['|', ':', '.'], "-");
+        // Replace invalid characters with hyphens
+        // Valid: alphanumeric, hyphens, underscores
+        let safe_id: String = workspace_id
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '-'
+                }
+            })
+            .collect();
+        // Remove leading/trailing hyphens and collapse multiple hyphens
+        let safe_id = safe_id
+            .split('-')
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join("-");
         format!("{}-{}", self.session_prefix, safe_id)
     }
 
@@ -141,10 +173,44 @@ impl RmuxBackend {
     ///
     /// Returns an `Arc<Rmux>` — cheap to clone, shares the daemon connection.
     /// Uses the configured endpoint (or platform default if none set).
+    ///
+    /// If the cached connection is stale (daemon restarted), clears it and reconnects.
+    /// Health checks are throttled to at most once per 30 seconds to avoid overhead.
     async fn get_rmux(&self) -> ErgataiResult<Arc<Rmux>> {
         let mut guard = self.rmux.lock().await;
+
+        // Check if we have a cached connection
         if let Some(rmux) = guard.as_ref() {
-            return Ok(rmux.clone());
+            // Throttle health checks to avoid overhead on every call.
+            // Only check if more than 30 seconds have passed since last check.
+            const HEALTH_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+            let should_check = {
+                let mut last_check = self.last_health_check.lock().await;
+                if last_check.elapsed() >= HEALTH_CHECK_INTERVAL {
+                    *last_check = std::time::Instant::now();
+                    true
+                } else {
+                    false
+                }
+            };
+
+            if should_check {
+                // Quick health check - try a lightweight operation
+                match rmux.list_sessions().await {
+                    Ok(_) => return Ok(rmux.clone()),
+                    Err(e) => {
+                        // Connection is stale, clear it and reconnect
+                        warn!(
+                            error = %e,
+                            "Cached rmux connection is stale, reconnecting"
+                        );
+                        *guard = None;
+                    }
+                }
+            } else {
+                // Skip health check, use cached connection
+                return Ok(rmux.clone());
+            }
         }
 
         info!(
@@ -164,28 +230,63 @@ impl RmuxBackend {
         Ok(arc)
     }
 
-    /// Ensure a session exists for the given workspace, returning a Session handle.
+    /// Ensure a session exists for the given workspace, returning a Session handle
+    /// and a boolean indicating whether the session was freshly created.
+    ///
+    /// Checks if the session already exists first to avoid calling `CreateOrReuse`
+    /// policy, which internally uses `new-session -A` and creates a new window
+    /// even when reusing an existing session.
     async fn ensure_session_handle(
         &self,
         rmux: &Rmux,
         workspace_id: &str,
-    ) -> ErgataiResult<Session> {
+        work_dir: Option<&str>,
+    ) -> ErgataiResult<(Session, bool)> {
         let name_str = self.session_name(workspace_id);
         let name = SessionName::new(&name_str).map_err(|e| {
             ErgataiError::internal(format!("Invalid session name '{}': {}", name_str, e))
         })?;
 
-        let session = rmux
-            .ensure_session(
-                EnsureSession::named(name)
-                    .policy(EnsureSessionPolicy::CreateOrReuse)
-                    .detached(false) // Don't detach - ensures pane(0,0) exists
-                    .size(TerminalSizeSpec::new(self.width, self.height)),
-            )
-            .await
-            .map_err(|e| ErgataiError::internal(format!("rmux ensure_session failed: {}", e)))?;
+        // Check if session already exists — if so, attach without creating a new window.
+        // This avoids the SDK's `CreateOrReuse` which internally calls `new-session -A`
+        // and creates a duplicate window in the existing session.
+        // `rmux.session()` uses `reuse_only()` internally — Ok means session exists.
+        if let Ok(existing) = rmux.session(name.clone()).await {
+            debug!(session = name_str, "Reusing existing session (attach only)");
+            return Ok((existing, false));
+        }
 
-        Ok(session)
+        // Session doesn't exist — create it with a default shell in pane(0,0).
+        let mut builder = EnsureSession::named(name.clone())
+            .detached(false)
+            .size(TerminalSizeSpec::new(self.width, self.height));
+
+        if let Some(dir) = work_dir {
+            builder = builder.working_directory(dir.to_string());
+        }
+
+        // Handle TOCTOU race: if another task creates the session between our
+        // check above and this create, ensure_session may fail. Retry by
+        // checking if the session now exists.
+        match rmux.ensure_session(builder).await {
+            Ok(session) => Ok((session, true)),
+            Err(e) => {
+                // Check if session was created by another task
+                if let Ok(existing) = rmux.session(name).await {
+                    debug!(
+                        session = name_str,
+                        error = %e,
+                        "Session created concurrently, reusing"
+                    );
+                    Ok((existing, false))
+                } else {
+                    Err(ErgataiError::internal(format!(
+                        "rmux ensure_session failed: {}",
+                        e
+                    )))
+                }
+            }
+        }
     }
 
     /// Sanitize a message for safe terminal injection.
@@ -1397,17 +1498,38 @@ impl AgentRuntimeBackend for RmuxBackend {
             "Creating rmux session workspace"
         );
 
-        let session = self.ensure_session_handle(&rmux, &spec.id).await?;
+        // Create session with detached=false to get default shell in pane(0,0).
+        // launch_agent ensures this is only called once per workspace.
+        let (_session, freshly_created) = self
+            .ensure_session_handle(&rmux, &spec.id, Some(spec.work_dir.to_str().unwrap_or(".")))
+            .await?;
 
-        let created = session.was_created();
         debug!(
             session = session_name,
-            created = created,
+            created = freshly_created,
             "rmux session ensured"
         );
 
         let mut metadata = HashMap::new();
         metadata.insert("session".to_string(), session_name.clone());
+        // Store work_dir in metadata so start_agent can use it for .cwd()
+        metadata.insert(
+            "work_dir".to_string(),
+            spec.work_dir.to_string_lossy().to_string(),
+        );
+
+        // Cache work_dir so list_workspaces can return it and start_agent
+        // can find it when reusing an existing workspace.
+        self.work_dir_cache.write().await.insert(
+            spec.id.clone(),
+            spec.work_dir.to_string_lossy().to_string(),
+        );
+
+        // Mark as freshly created so start_agent knows to spawn (not reattach).
+        // Only if the rmux session was actually created here (not reused).
+        if freshly_created {
+            self.fresh_workspaces.write().await.insert(spec.id.clone());
+        }
 
         Ok(WorkspaceHandle {
             id: spec.id,
@@ -1434,43 +1556,134 @@ impl AgentRuntimeBackend for RmuxBackend {
         }
 
         let rmux = self.get_rmux().await?;
-        let session = self.ensure_session_handle(&rmux, &handle.id).await?;
+        // Read work_dir from metadata (stored during create_workspace)
+        let work_dir = handle.metadata.get("work_dir").map(|s| s.as_str());
+        let (session, _freshly_created) = self.ensure_session_handle(&rmux, &handle.id, work_dir).await?;
         let session_name = self.session_name(&handle.id);
 
-        // Determine whether this is the first agent in this workspace
         let mut anchors = self.anchor_panes.write().await;
-        let is_first = !anchors.contains_key(&handle.id);
+
+        // Check if this workspace was JUST created in this server run.
+        // If so, always spawn (the existing pane is just the default shell).
+        // Otherwise, check for existing running agent panes to reattach.
+        let is_fresh = self.fresh_workspaces.read().await.contains(&handle.id);
+        if !is_fresh {
+            let all_discovered = rmux.find_panes().all().await.unwrap_or_default();
+            for dp in &all_discovered {
+                if dp.session_name.as_str() == session_name {
+                    if let PaneProcessState::Running { .. } = dp.process {
+                        // Found an existing running pane in this session — reuse it
+                        let pane = session.pane(dp.window_index, dp.pane_index);
+                        info!(
+                            session = session_name,
+                            pane_index = dp.pane_index,
+                            "Reattaching to existing agent pane"
+                        );
+                        anchors.entry(handle.id.clone()).or_insert_with(|| pane.clone());
+                        let agent_id = format!("agent-{}", uuid::Uuid::new_v4().as_simple());
+                        return Ok(AgentHandle {
+                            agent_id,
+                            workspace: handle.clone(),
+                            process_id: None,
+                            metadata: {
+                                let mut m = HashMap::new();
+                                m.insert("reattached".to_string(), "true".to_string());
+                                m
+                            },
+                        });
+                    }
+                }
+            }
+        }
+
+        let is_first = is_fresh || !anchors.contains_key(&handle.id);
 
         let agent_pane = if is_first {
-            // First agent: reuse pane(0, 0) and respawn with the agent command
+            // First agent: respawn pane(0,0) with the agent command.
+            // create_workspace already created the session with a default shell
+            // in pane(0,0); we replace it with the agent command.
             let pane = session.pane(0, 0);
-            pane.shell(command)
+            let mut builder = pane
+                .shell(command)
                 .kill_existing(true)
-                .title(format!("agent-{}", handle.id))
+                .title(format!("agent-{}", handle.id));
+            if let Some(dir) = work_dir {
+                builder = builder.cwd(dir);
+            }
+            builder
                 .await
-                .map_err(|e| ErgataiError::internal(format!("rmux shell respawn failed: {}", e)))?;
+                .map_err(|e| ErgataiError::internal(format!("rmux shell spawn failed: {}", e)))?;
             pane
         } else {
             // Subsequent agents: split from the anchor pane to create a new one
-            let anchor = anchors.get(&handle.id).ok_or_else(|| {
-                ErgataiError::internal("Anchor pane missing for non-first agent".to_string())
-            })?;
-            let new_pane = anchor
-                .split(SplitDirection::Right)
-                .await
-                .map_err(|e| ErgataiError::internal(format!("rmux split failed: {}", e)))?;
-            new_pane
-                .shell(command)
-                .kill_existing(true)
-                .title(format!("agent-{}", handle.id))
-                .await
-                .map_err(|e| ErgataiError::internal(format!("rmux shell spawn failed: {}", e)))?;
-            new_pane
+            // But first check if the anchor pane still exists (it may have been cleaned up)
+            let anchor = anchors.get(&handle.id).cloned();
+
+            if let Some(anchor) = anchor {
+                // Try to split from anchor; if it fails (pane no longer exists), fall back
+                match anchor.split(SplitDirection::Right).await {
+                    Ok(new_pane) => {
+                        let mut builder = new_pane
+                            .shell(command)
+                            .kill_existing(true)
+                            .title(format!("agent-{}", handle.id));
+                        if let Some(dir) = work_dir {
+                            builder = builder.cwd(dir);
+                        }
+                        builder
+                            .await
+                            .map_err(|e| ErgataiError::internal(format!("rmux shell spawn failed: {}", e)))?;
+                        new_pane
+                    }
+                    Err(e) => {
+                        // Anchor pane no longer exists, fall back to first-agent behavior
+                        warn!(
+                            workspace = handle.id,
+                            error = %e,
+                            "Anchor pane no longer exists, falling back to pane(0,0)"
+                        );
+                        let pane = session.pane(0, 0);
+                        let mut builder = pane
+                            .shell(command)
+                            .kill_existing(true)
+                            .title(format!("agent-{}", handle.id));
+                        if let Some(dir) = work_dir {
+                            builder = builder.cwd(dir);
+                        }
+                        builder
+                            .await
+                            .map_err(|e| ErgataiError::internal(format!("rmux shell respawn failed: {}", e)))?;
+                        pane
+                    }
+                }
+            } else {
+                // No anchor stored, use first-agent behavior
+                warn!(
+                    workspace = handle.id,
+                    "No anchor pane found, falling back to pane(0,0)"
+                );
+                let pane = session.pane(0, 0);
+                let mut builder = pane
+                    .shell(command)
+                    .kill_existing(true)
+                    .title(format!("agent-{}", handle.id));
+                if let Some(dir) = work_dir {
+                    builder = builder.cwd(dir);
+                }
+                builder
+                    .await
+                    .map_err(|e| ErgataiError::internal(format!("rmux shell respawn failed: {}", e)))?;
+                pane
+            }
         };
 
         // Update the anchor to the new pane (linear layout)
         anchors.insert(handle.id.clone(), agent_pane.clone());
         drop(anchors);
+
+        // Remove from fresh_workspaces — the agent has been spawned, so
+        // subsequent start_agent calls should treat this as a pre-existing session.
+        self.fresh_workspaces.write().await.remove(&handle.id);
 
         info!(
             session = session_name,
@@ -1779,6 +1992,7 @@ impl AgentRuntimeBackend for RmuxBackend {
         let _ = probe_session.kill().await;
 
         let prefix = format!("{}-", self.session_prefix);
+        let work_dir_cache = self.work_dir_cache.read().await;
         let workspaces = session_names
             .into_iter()
             .filter(|name| name.as_str().starts_with(&prefix))
@@ -1790,6 +2004,10 @@ impl AgentRuntimeBackend for RmuxBackend {
                     .to_string();
                 let mut metadata = HashMap::new();
                 metadata.insert("session".to_string(), name_str);
+                // Include work_dir from cache so launch_agent can reuse it
+                if let Some(work_dir) = work_dir_cache.get(&id) {
+                    metadata.insert("work_dir".to_string(), work_dir.clone());
+                }
                 WorkspaceHandle {
                     id,
                     backend: "rmux".to_string(),

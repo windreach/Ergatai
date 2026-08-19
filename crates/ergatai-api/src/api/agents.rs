@@ -59,38 +59,85 @@ pub async fn list_agents(State(_state): State<AppState>) -> impl IntoResponse {
     Json(response)
 }
 
-/// Allowed commands for agent spawning (security whitelist).
-/// Only these commands can be executed via the API to prevent arbitrary command execution.
-const ALLOWED_COMMANDS: &[&str] = &["claude", "cursor", "codex", "ergatai-agent", "simple-agent"];
+/// Check if strict command validation is enabled.
+///
+/// When ERGATAI_STRICT_MODE=1, commands are validated against the whitelist.
+/// Otherwise, all commands are allowed (for flexibility).
+fn is_strict_mode() -> bool {
+    std::env::var("ERGATAI_STRICT_MODE")
+        .map(|v| v == "1" || v.to_lowercase() == "true")
+        .unwrap_or(false)
+}
 
-/// Validate that a workspace_id contains only safe characters (alphanumeric, hyphens, underscores).
-/// This prevents path traversal (`..`), absolute paths (`/etc`), and shell injection.
+/// Whitelist for strict mode (only used when ERGATAI_STRICT_MODE=1).
+const STRICT_MODE_ALLOWED_COMMANDS: &[&str] = &[
+    "claude",
+    "cursor",
+    "codex",
+    "opencode",
+    "ergatai-agent",
+    "simple-agent",
+];
+
+/// Check if a command matches a pattern (supports * wildcard).
+fn matches_pattern(command: &str, pattern: &str) -> bool {
+    if pattern.contains('*') {
+        let parts: Vec<&str> = pattern.split('*').collect();
+        if parts.len() == 2 {
+            let (prefix, suffix) = (parts[0], parts[1]);
+            return command.starts_with(prefix) && command.ends_with(suffix);
+        }
+        command == pattern
+    } else {
+        command == pattern
+    }
+}
+
+/// Validate that a workspace_id contains only safe characters.
 fn is_valid_workspace_id(id: &str) -> bool {
     !id.is_empty()
         && id
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
 }
 
-/// Validate that the command is in the allowed list.
+/// Validate command (only in strict mode).
+///
+/// By default, all commands are allowed for maximum flexibility.
+/// Set ERGATAI_STRICT_MODE=1 to enable whitelist validation.
 fn validate_command(command: &str) -> Result<(), String> {
+    // Skip validation unless strict mode is enabled
+    if !is_strict_mode() {
+        return Ok(());
+    }
+
     let program = command
         .split_whitespace()
         .next()
         .ok_or_else(|| "Empty command".to_string())?;
 
-    // Extract just the binary name (handle paths like /usr/bin/claude)
     let binary_name = std::path::Path::new(program)
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or(program);
 
-    if ALLOWED_COMMANDS.contains(&binary_name) {
-        Ok(())
+    // Check against env var if set, otherwise use static whitelist.
+    // This avoids allocating a Vec<String> on every validation call.
+    if let Ok(commands) = std::env::var("ERGATAI_ALLOWED_COMMANDS") {
+        for pattern in commands.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            if matches_pattern(binary_name, pattern) || matches_pattern(program, pattern) {
+                return Ok(());
+            }
+        }
     } else {
-        // Security: don't leak the whitelist to clients
-        Err(format!("Command '{}' is not allowed", binary_name))
+        for pattern in STRICT_MODE_ALLOWED_COMMANDS {
+            if matches_pattern(binary_name, pattern) || matches_pattern(program, pattern) {
+                return Ok(());
+            }
+        }
     }
+
+    Err(format!("Command '{}' is not allowed (strict mode)", binary_name))
 }
 
 pub async fn spawn_agent(

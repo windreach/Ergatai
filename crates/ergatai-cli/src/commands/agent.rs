@@ -17,7 +17,7 @@ pub async fn handle(action: AgentAction, api_url: &str, token: Option<&str>) -> 
             instruction,
         } => {
             let response = client
-                .spawn_agent(&workspace, &command, instruction.as_deref())
+                .spawn_agent(&workspace, &command, None, instruction.as_deref())
                 .await?;
             println!("Spawned agent: {}", response.agent_id);
         }

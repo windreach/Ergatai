@@ -161,7 +161,7 @@ struct Args {
     /// For rmux: rmux session names will be `{prefix}-{workspace_id}`.
     /// For tmux: tmux session names will be `{prefix}-{workspace_id}`.
     /// Can also be set via ERGATAI_TMUX_SESSION environment variable.
-    #[arg(long, env = "ERGATAI_TMUX_SESSION", default_value = "ergatai-opencode")]
+    #[arg(long, env = "ERGATAI_TMUX_SESSION", default_value = "ergatai")]
     session_prefix: String,
 }
 
@@ -280,7 +280,7 @@ async fn async_main(args: Args) -> Result<()> {
 
     // Initialize AgentRuntime with selected backend
     // Backend choice: --runtime-backend rmux|tmux (default: rmux)
-    // Session prefix: --session-prefix or ERGATAI_TMUX_SESSION (default: ergatai-opencode)
+    // Session prefix: --session-prefix or ERGATAI_TMUX_SESSION (default: ergatai)
     let runtime_backend_name = args.runtime_backend.to_lowercase();
     let runtime_backend: std::sync::Arc<dyn ergatai_runtime::AgentRuntimeBackend> =
         match runtime_backend_name.as_str() {

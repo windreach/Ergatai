@@ -956,6 +956,7 @@ dependencies = [
  "ergatai-error",
  "futures",
  "futures-util",
+ "libc",
  "md5",
  "serde",
  "serde_json",

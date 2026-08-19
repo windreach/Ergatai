@@ -164,13 +164,13 @@ fn start_daemon_if_needed(rmux_path: &Path) -> ErgataiResult<()> {
         "Starting rmux daemon"
     );
 
-    // Start daemon using `rmux daemon --background`
-    // This ensures rmux sets up its libexec helpers correctly
+    // Start daemon using `rmux new-session -d` (detached session starts the server).
+    // rmux 0.10.x does not have a `daemon` subcommand — creating a detached
+    // session is the canonical way to bring up the server.
     let result = Command::new(rmux_path)
-        .arg("daemon")
-        .arg("--background")
+        .args(["new-session", "-d", "-s", "__ergatai_daemon__"])
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
         .spawn();
 
     match result {
@@ -178,24 +178,47 @@ fn start_daemon_if_needed(rmux_path: &Path) -> ErgataiResult<()> {
             // Hand the child off to a dedicated std thread for the diagnostic
             // wait. This keeps the current function non-blocking for callers
             // (including async contexts like `restart_daemon`).
+            let rmux_path = rmux_path.to_path_buf();
             std::thread::spawn(move || {
                 let mut child = child;
                 std::thread::sleep(std::time::Duration::from_millis(500));
                 match child.try_wait() {
-                    Ok(Some(status)) => {
+                    Ok(Some(status)) if !status.success() => {
+                        // Read stderr to get the error message
+                        let stderr = child.stderr.take().map(|mut s| {
+                            let mut buf = String::new();
+                            use std::io::Read;
+                            let _ = s.read_to_string(&mut buf);
+                            buf
+                        }).unwrap_or_default();
                         tracing::warn!(
                             status = %status,
-                            "rmux daemon exited immediately (another instance may already be running)"
+                            stderr = %stderr.trim(),
+                            path = %rmux_path.display(),
+                            "rmux daemon exited immediately with error"
                         );
                     }
+                    Ok(Some(_status)) => {
+                        // `rmux new-session -d` exits 0 after starting the server — this is expected.
+                        tracing::debug!("rmux daemon launcher exited (server started in background)");
+                    }
                     Ok(None) => {
+                        // Child is still running (daemon process), which is good.
+                        // We need to detach from it properly to avoid zombie.
+                        // On Unix, we can use libc::setsid() or just let it be inherited by init
+                        // when this thread exits. But we should call wait() to reap if it exits later.
                         tracing::info!("rmux daemon started successfully");
+                        // Detach: wait for the child in a separate thread to prevent zombie
+                        std::thread::spawn(move || {
+                            let _ = child.wait();
+                        });
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "Failed to check daemon status");
+                        // Still need to reap the child to avoid zombie
+                        let _ = child.wait();
                     }
                 }
-                // `child` is dropped here; on Unix the zombie is reaped by init.
             });
         }
         Err(e) => {

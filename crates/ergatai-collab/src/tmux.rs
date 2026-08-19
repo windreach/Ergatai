@@ -24,7 +24,7 @@ use tracing::{debug, info, trace, warn};
 /// Default tmux session name. Override with `ERGATAI_TMUX_SESSION`.
 /// Matches the API server's default so `TmuxManager::default()` works
 /// out-of-the-box with `ergatai-api`.
-const DEFAULT_SESSION_NAME: &str = "ergatai-opencode";
+const DEFAULT_SESSION_NAME: &str = "ergatai";
 
 /// Maximum message size in bytes for tmux injection.
 /// tmux `send-keys` has practical limits; oversized messages are rejected.

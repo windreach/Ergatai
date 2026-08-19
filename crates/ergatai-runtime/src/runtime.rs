@@ -105,7 +105,29 @@ impl AgentRuntime {
         command: &str,
         instruction: Option<&str>,
     ) -> ErgataiResult<String> {
-        let workspace = self.backend.create_workspace(spec.clone()).await?;
+        // Check if workspace already exists (e.g., created by CLI POST /api/v1/workspaces).
+        // Avoid calling create_workspace again to prevent duplicate session creation
+        // via SDK's `new-session -A` which can create a new window.
+        let existing_workspaces = self.backend.list_workspaces().await.unwrap_or_default();
+        let workspace = if existing_workspaces.iter().any(|w| w.id == spec.id) {
+            debug!(workspace_id = spec.id, "Reusing existing workspace");
+            let mut ws = existing_workspaces
+                .into_iter()
+                .find(|w| w.id == spec.id)
+                .unwrap();
+            // Ensure work_dir from spec is in metadata (may be missing if
+            // server restarted and in-memory cache was lost).
+            if !ws.metadata.contains_key("work_dir") {
+                ws.metadata.insert(
+                    "work_dir".to_string(),
+                    spec.work_dir.to_string_lossy().to_string(),
+                );
+            }
+            ws
+        } else {
+            self.backend.create_workspace(spec.clone()).await?
+        };
+
         let handle = self
             .backend
             .start_agent(&workspace, command, instruction)

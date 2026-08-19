@@ -4,7 +4,6 @@
 
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::Mutex;
 use std::time::Duration;
 
 use tokio::time::{sleep, timeout};
@@ -282,7 +281,6 @@ impl NatsServer {
 ///
 /// For production use, create `NatsServer` instances directly (not via this function)
 /// so Drop can properly clean up resources.
-static SHARED_TEST_SERVER: Mutex<Option<&'static NatsServer>> = Mutex::new(None);
 
 /// Cleanup function to kill all NATS server processes started by tests
 ///
@@ -302,34 +300,150 @@ pub fn cleanup_test_servers() {
 /// The server process lives until the test process exits.
 ///
 /// Fixed: Release lock before async operations to prevent deadlock.
+///
+/// # Zombie Process Prevention
+///
+/// Registers an `atexit` handler to kill the child nats-server process when
+/// the test process exits. This prevents zombie processes from accumulating
+/// when tests are interrupted (Ctrl+C, timeout, etc.).
 pub async fn shared_test_server() -> ErgataiResult<&'static NatsServer> {
-    // Check if already initialized (quick path without holding lock during async)
+    use tokio::sync::OnceCell;
+
+    // Use OnceCell to ensure only one server is started, even with concurrent calls.
+    // This avoids the race condition where multiple threads pass the initial check,
+    // each starts a server, and all but one are leaked.
+    static SHARED_SERVER: OnceCell<&'static NatsServer> = OnceCell::const_new();
+
+    let server = SHARED_SERVER
+        .get_or_init(|| async {
+            // Clean up any zombie nats-server processes from previous test runs.
+            // This is a safety net for cases where the atexit handler didn't run
+            // (e.g., process was killed with SIGKILL).
+            cleanup_stale_test_servers();
+
+            // Start server with a unique temp store directory
+            let store_dir = std::env::temp_dir()
+                .join("ergatai-test-nats")
+                .join(format!("pid-{}", std::process::id()));
+            // Clean any stale data from previous runs with the same PID
+            let _ = std::fs::remove_dir_all(&store_dir);
+
+            let server = match NatsServer::start_with_store_dir(store_dir).await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to start shared test NATS server");
+                    // Panic to fail fast - tests require NATS
+                    panic!("Failed to start shared test NATS server: {}", e);
+                }
+            };
+
+            let child_pid = server.child.as_ref().map(|c| c.id());
+            let leaked: &'static NatsServer = Box::leak(Box::new(server));
+
+            // Register atexit handler to kill the child process on normal exit.
+            // This prevents zombie processes when tests complete normally.
+            if let Some(pid) = child_pid {
+                register_cleanup_handler(pid);
+            }
+
+            leaked
+        })
+        .await;
+
+    Ok(*server)
+}
+
+/// Clean up stale nats-server processes from previous test runs.
+///
+/// Looks for nats-server processes with store dirs in the test directory
+/// and kills them. This is a safety net for cases where the atexit handler
+/// didn't run (e.g., process was killed with SIGKILL).
+fn cleanup_stale_test_servers() {
+    use std::process::Command;
+
+    let test_dir = std::env::temp_dir().join("ergatai-test-nats");
+    if !test_dir.exists() {
+        return;
+    }
+
+    // Find nats-server processes with test store dirs
+    let output = match Command::new("pgrep")
+        .args(["-f", "ergatai-test-nats"])
+        .output()
     {
-        let guard = SHARED_TEST_SERVER.lock().unwrap();
-        if let Some(server) = *guard {
-            return Ok(server);
+        Ok(o) => o,
+        Err(_) => return,
+    };
+
+    if !output.status.success() {
+        return; // No processes found
+    }
+
+    let pids: Vec<u32> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.trim().parse().ok())
+        .collect();
+
+    for pid in pids {
+        // Only kill processes that are using test store dirs
+        let cmdline_path = format!("/proc/{}/cmdline", pid);
+        if let Ok(cmdline) = std::fs::read_to_string(&cmdline_path) {
+            if cmdline.contains("ergatai-test-nats") {
+                let _ = Command::new("kill")
+                    .args(["-9", &pid.to_string()])
+                    .output();
+            }
         }
     }
-    // Lock released here before async operation
+}
 
-    // Start server with a unique temp store directory
-    let store_dir = std::env::temp_dir()
-        .join("ergatai-test-nats")
-        .join(format!("pid-{}", std::process::id()));
-    // Clean any stale data from previous runs with the same PID
-    let _ = std::fs::remove_dir_all(&store_dir);
+/// Register an atexit handler to kill the child nats-server process.
+///
+/// Uses libc::atexit to ensure the child is killed when the test process
+/// exits normally. This prevents zombie processes from accumulating.
+#[cfg(unix)]
+mod atexit_cleanup {
+    use std::sync::Once;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
-    let server = NatsServer::start_with_store_dir(store_dir).await?;
-    let leaked: &'static NatsServer = Box::leak(Box::new(server));
+    static REGISTER_ATEXIT: Once = Once::new();
+    static CHILD_PID: AtomicU32 = AtomicU32::new(0);
 
-    // Re-acquire lock to store the server
-    let mut guard = SHARED_TEST_SERVER.lock().unwrap();
-    // Double-check in case another thread initialized while we were starting the server
-    if let Some(existing) = *guard {
-        return Ok(existing);
+    pub(super) fn register(pid: u32) {
+        // Store PID atomically before registering atexit, so the handler
+        // always sees a valid value even if called concurrently.
+        CHILD_PID.store(pid, Ordering::SeqCst);
+
+        REGISTER_ATEXIT.call_once(|| {
+            // SAFETY: atexit is safe to call with a valid extern "C" function pointer.
+            // The handler reads CHILD_PID via atomic load, which is sound.
+            unsafe {
+                let _ = libc::atexit(cleanup_at_exit);
+            }
+        });
     }
-    *guard = Some(leaked);
-    Ok(leaked)
+
+    extern "C" fn cleanup_at_exit() {
+        use std::process::Command;
+        // Atomic load is safe from any thread context, including atexit.
+        let pid = CHILD_PID.load(Ordering::SeqCst);
+        if pid > 0 {
+            let _ = Command::new("kill")
+                .args(["-9", &pid.to_string()])
+                .output();
+        }
+    }
+}
+
+#[cfg(unix)]
+fn register_cleanup_handler(pid: u32) {
+    atexit_cleanup::register(pid);
+}
+
+#[cfg(not(unix))]
+fn register_cleanup_handler(_pid: u32) {
+    // On non-Unix platforms, we can't register atexit handlers easily.
+    // The cleanup_stale_test_servers() function will handle cleanup on next run.
 }
 
 impl Drop for NatsServer {
