@@ -6,7 +6,7 @@ authors.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "ergatai-api"
+name = "ergatai-server"
 path = "src/main.rs"
 
 [dependencies]

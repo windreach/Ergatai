@@ -10,7 +10,7 @@ By participating in this project, you agree to abide by our code of conduct: res
 
 ### Reporting Bugs
 
-1. First, check if the issue already exists in [Issues](https://github.com/yourusername/ergatai/issues)
+1. First, check if the issue already exists in [Issues](https://github.com/windreach/Ergatai/issues)
 2. If not, create a new issue including:
    - Clear title
    - Detailed description
@@ -32,7 +32,7 @@ By participating in this project, you agree to abide by our code of conduct: res
 1. **Fork the repository**
    ```bash
    # Fork on GitHub, then clone
-   git clone https://github.com/yourusername/ergatai.git
+   git clone https://github.com/windreach/Ergatai.git
    cd ergatai
    ```
 
@@ -148,7 +148,7 @@ cargo build --release --workspace
 
 ```bash
 # Start the API server
-cargo run --bin ergatai-api -- --port 3000
+cargo run --bin ergatai-server -- --port 3000
 
 # In another terminal, run the example agent
 cargo run -p simple-agent -- --port 8080 --agent-id my-agent --ergatai http://localhost:3000
@@ -159,16 +159,26 @@ cargo run -p simple-agent -- --port 8080 --agent-id my-agent --ergatai http://lo
 ```
 ergatai/
 ├── crates/
-│   ├── ergatai-core/      # Core library
-│   ├── ergatai-api/       # API server
-│   ├── ergatai-nats/      # NATS messaging
-│   ├── ergatai-dag/       # DAG orchestration
-│   ├── ergatai-lock/      # File access control
-│   └── ...
+│   ├── ergatai-api/       # MCP server + REST API (binary: ergatai-server)
+│   ├── ergatai-cli/       # CLI tool (binaries: ergatai, ega)
+│   ├── ergatai-runtime/   # Agent runtime (discovery, injection, lifecycle)
+│   ├── ergatai-nats/      # Embedded NATS server + JetStream streams
+│   ├── ergatai-collab/    # Multi-agent collaboration (DAG scheduling)
+│   ├── ergatai-dag/       # DAG parser, scheduler, dependency resolution
+│   ├── ergatai-lock/      # Token-based file access control
+│   ├── ergatai-agent/     # Agent config, discovery, hosted agents
+│   ├── ergatai-core/      # Core library — business logic facade
+│   ├── ergatai-error/     # Shared error types
+│   └── ergatai-binary/    # Binary resources (rmux, nats-server)
 ├── examples/
-│   └── simple-agent/      # Example agent
+│   └── simple-agent/      # Example MCP agent
 ├── docs/                  # Documentation
-└── tests/                 # Integration tests
+│   ├── getting-started/   # User guides
+│   ├── guide/             # CLI, MCP configuration
+│   ├── architecture/      # System design
+│   └── dev/               # Internal development docs
+├── assets/                # Static assets (logo, etc.)
+── install.sh             # Installation script
 ```
 
 ## Code Review Process

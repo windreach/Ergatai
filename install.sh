@@ -6,18 +6,19 @@
 #   curl -sSL ... | bash -s -- v0.1.0 /usr/local/bin
 #
 # What this does:
-#   1. Downloads BOTH binaries from GitHub Releases:
-#        - `ergatai`     (CLI) — user-facing tool for managing workspaces/agents,
-#                                wraps rmux commands via the API server
-#        - `ergatai-api` (server) — HTTP/MCP server that manages rmux-daemon,
-#                                   nats-server, and exposes the MCP API to agents
+#   1. Downloads TWO binaries from GitHub Releases:
+#        - `ergatai`        (CLI) — user-facing tool for managing workspaces/agents,
+#                                  wraps rmux commands via the API server
+#        - `ergatai-server` (server) — HTTP/MCP server that manages rmux-daemon,
+#                                  nats-server, and exposes the MCP API to agents
 #   2. Installs them to the target directory (default: /usr/local/bin)
-#   3. Grants CAP_SYS_ADMIN to `ergatai-api` only — REQUIRED for kernel-level
+#   3. Creates symlink: `ega` -> `ergatai` (short alias)
+#   4. Grants CAP_SYS_ADMIN to `ergatai-server` only — REQUIRED for kernel-level
 #      file locking via fanotify. The CLI does not need any special capabilities.
 #
 # Architecture:
 #   ┌────────────────────┐        ┌────────────────────┐
-#   │   ergatai (CLI)    │─HTTP─►│  ergatai-api (API) │
+#   │   ergatai (CLI)    │─HTTP─►│ergatai-server (API)│
 #   │  workspace/agent   │        │  MCP + HTTP server │
 #   │  management        │        │                    │
 #   └────────────────────┘        │  ┌─ fanotify ───┐  │  ← needs CAP_SYS_ADMIN
@@ -36,7 +37,7 @@ VERSION="${1:-latest}"
 INSTALL_DIR="${2:-/usr/local/bin}"
 REPO="windreach/Ergatai"
 CLI_NAME="ergatai"
-SERVER_NAME="ergatai-api"
+SERVER_NAME="ergatai-server"
 
 # ── Preflight checks ────────────────────────────────────────────────────────
 
@@ -88,7 +89,8 @@ echo "   Arch:      $ARCH"
 echo "   Install:   $INSTALL_DIR/"
 echo ""
 echo "   Binaries to install:"
-echo "     • $CLI_NAME     (CLI — manages workspaces/agents, wraps rmux)"
+echo "     • $CLI_NAME      (CLI — manages workspaces/agents, wraps rmux)"
+echo "     • ega            (symlink → $CLI_NAME, short alias)"
 echo "     • $SERVER_NAME  (server — MCP/HTTP API, needs CAP_SYS_ADMIN)"
 echo ""
 
@@ -133,7 +135,17 @@ install_binary() {
 install_binary "$TMP_CLI" "$CLI_NAME"
 install_binary "$TMP_SERVER" "$SERVER_NAME"
 
+# Create symlink: ega -> ergatai
+CLI_TARGET="$INSTALL_DIR/$CLI_NAME"
+EGA_TARGET="$INSTALL_DIR/ega"
+if [[ -w "$INSTALL_DIR" ]]; then
+    ln -sf "$CLI_TARGET" "$EGA_TARGET"
+else
+    sudo ln -sf "$CLI_TARGET" "$EGA_TARGET"
+fi
+
 echo "   ✓ $CLI_NAME     (CLI)"
+echo "   ✓ ega           (symlink → $CLI_NAME)"
 echo "   ✓ $SERVER_NAME  (server)"
 
 # ── Grant CAP_SYS_ADMIN to SERVER only (REQUIRED for kernel-level file locking) ─
