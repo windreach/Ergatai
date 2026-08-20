@@ -88,6 +88,45 @@ impl EventBus {
         self.connection.publish_jetstream(&subject, json).await
     }
 
+    /// Informational log for a node that has consumed 50% of its timeout budget.
+    ///
+    /// MVP: log-only — no NATS round-trip. The warn/escalate tiers exist so
+    /// operators can grep the logs for early signals of a node about to fail.
+    /// Phase 3 may promote this to a real NATS subject for dashboards.
+    pub async fn publish_node_warned(
+        &self,
+        dag_id: &str,
+        node_id: &str,
+        elapsed_secs: u64,
+    ) -> ErgataiResult<()> {
+        tracing::warn!(
+            dag_id = dag_id,
+            node_id = node_id,
+            elapsed_secs = elapsed_secs,
+            "node timeout warning — 50% of budget consumed"
+        );
+        Ok(())
+    }
+
+    /// Informational log for a node that has consumed 80% of its timeout budget.
+    ///
+    /// Logged at ERROR level so it surfaces in production log aggregation even
+    /// when WARN is filtered. MVP: log-only — no NATS round-trip.
+    pub async fn publish_node_escalated(
+        &self,
+        dag_id: &str,
+        node_id: &str,
+        elapsed_secs: u64,
+    ) -> ErgataiResult<()> {
+        tracing::error!(
+            dag_id = dag_id,
+            node_id = node_id,
+            elapsed_secs = elapsed_secs,
+            "node timeout escalated — 80% of budget consumed"
+        );
+        Ok(())
+    }
+
     /// Publish an agent-to-agent message
     ///
     /// Routes the message to the target agent's inbox subject.

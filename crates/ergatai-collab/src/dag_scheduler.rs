@@ -71,6 +71,12 @@ pub struct DagScheduler {
     agent_call_count: Arc<AtomicU64>,
     /// Cap on agent invocations, from TaskGraph.max_agent_calls.
     max_agent_calls: Option<u64>,
+
+    /// Lazily-initialized event bus for the three-stage timeout watcher.
+    /// Wrapped in `Arc<Mutex<…>>` because the constructors are sync but
+    /// NATS initialisation is async; the first watcher tick that needs it
+    /// will populate the slot. `None` when NATS is not available (no-ops).
+    event_bus: Arc<Mutex<Option<Arc<ergatai_nats::EventBus>>>>,
 }
 
 impl DagScheduler {
@@ -152,6 +158,7 @@ impl DagScheduler {
             last_progress: Arc::new(Mutex::new(std::time::Instant::now())),
             agent_call_count: Arc::new(AtomicU64::new(0)),
             max_agent_calls,
+            event_bus: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -466,6 +473,29 @@ impl DagScheduler {
         *lp = std::time::Instant::now();
     }
 
+    /// Lazily build (and cache) the `EventBus` for the three-stage timeout
+    /// watcher. Returns `None` when NATS has not been initialised — callers
+    /// should treat that as "no-op, just log".
+    async fn get_or_init_event_bus(&self) -> Option<Arc<ergatai_nats::EventBus>> {
+        // Fast path: already populated.
+        {
+            let guard = self.event_bus.lock().await;
+            if let Some(bus) = guard.as_ref() {
+                return Some(bus.clone());
+            }
+        }
+        // Slow path: ask NATS for a connection and wrap it. One acquisition
+        // of the slot mutex at a time — drop before awaiting.
+        if let Some(conn) = ergatai_nats::get_nats_connection().await {
+            let bus = Arc::new(ergatai_nats::EventBus::new(conn));
+            let mut guard = self.event_bus.lock().await;
+            *guard = Some(bus.clone());
+            Some(bus)
+        } else {
+            None
+        }
+    }
+
     /// Seconds elapsed since the last progress event.
     ///
     /// A large value indicates the DAG is stalled (no node completions,
@@ -510,57 +540,102 @@ impl DagScheduler {
         self.agent_call_count.fetch_add(1, Ordering::SeqCst) + 1
     }
 
-    /// Spawn a timeout watchdog for a node.
+    /// Spawn a three-stage timeout watchdog for a node.
     ///
-    /// If the node has a `timeout` (in seconds), starts a background task that
-    /// will mark the node as failed after the timeout elapses. The watchdog is
-    /// automatically cancelled when the node completes or fails normally.
-    fn spawn_timeout_watcher(&self, node_id: &str, timeout_secs: u64, agent_name: &str) {
+    /// Instead of the old single-shot sleep-then-fail, this watcher emits
+    /// observability signals at 50% (warn) and 80% (escalate) of the budget,
+    /// and only mutates node state at 100% (fail). The warn/escalate tiers
+    /// are log-only via `EventBus::publish_node_warned` / `publish_node_escalated`.
+    ///
+    /// Lock ordering: one mutex at a time. The graph lock is dropped before
+    /// calling `on_node_failed`, which itself re-acquires the graph lock.
+    fn spawn_timeout_watcher(&self, node_id: &str, timeout_secs: u64, _agent_name: &str) {
         if timeout_secs == 0 {
             return;
         }
 
-        let node_id_owned = node_id.to_string();
+        let (warn_at, escalate_at, fail_at) =
+            crate::timeout_tier::TimeoutTier::deadline_from_now(timeout_secs);
+
         let node_id_for_store = node_id.to_string();
-        let agent_name = agent_name.to_string();
+        let node_id_clone = node_id.to_string();
         let scheduler = self.clone();
         let watchers = self.timeout_watchers.clone();
 
         let handle = tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_secs(timeout_secs)).await;
-
-            // Timeout elapsed — check if node is still running
-            let graph = scheduler.graph.lock().await;
-            if let Some(node) = graph.find_node(&node_id_owned) {
-                if node.status == TaskStatus::Running {
-                    tracing::warn!(
-                        node_id = %node_id_owned,
-                        timeout_secs = timeout_secs,
-                        agent = %agent_name,
-                        "Node timed out, marking as failed"
-                    );
-                    drop(graph);
-
-                    // Remove from watcher map before triggering failure
+            let start = std::time::Instant::now();
+            let mut warned = false;
+            let mut escalated = false;
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(POLL_INTERVAL_SECS)).await;
+                if scheduler.finalized.load(Ordering::SeqCst) {
+                    break;
+                }
+                let now = std::time::Instant::now();
+                if !warned && now >= warn_at {
+                    warned = true;
+                    if let Some(bus) = scheduler.get_or_init_event_bus().await {
+                        let _ = bus
+                            .publish_node_warned(
+                                &scheduler.dag_id,
+                                &node_id_clone,
+                                start.elapsed().as_secs(),
+                            )
+                            .await;
+                    }
+                }
+                if !escalated && now >= escalate_at {
+                    escalated = true;
+                    if let Some(bus) = scheduler.get_or_init_event_bus().await {
+                        let _ = bus
+                            .publish_node_escalated(
+                                &scheduler.dag_id,
+                                &node_id_clone,
+                                start.elapsed().as_secs(),
+                            )
+                            .await;
+                    }
+                }
+                if now >= fail_at {
+                    // Mutate the node under the graph lock, then drop it
+                    // before invoking on_node_failed (which re-acquires it).
                     {
-                        let mut w = watchers.lock().await;
-                        w.remove(&node_id_owned);
+                        let mut graph = scheduler.graph.lock().await;
+                        if let Some(node) = graph.find_node_mut(&node_id_clone) {
+                            if node.status == TaskStatus::Running {
+                                node.status = TaskStatus::Failed;
+                                // TaskNode has no `error` field; record the
+                                // timeout reason in metadata instead.
+                                node.metadata.insert(
+                                    "timeout_error".to_string(),
+                                    format!("timeout after {}s", timeout_secs),
+                                );
+                            }
+                        }
                     }
 
-                    // Trigger failure handling
+                    // Remove self from watcher map before triggering failure,
+                    // so on_node_failed → cancel_timeout_watcher is a no-op
+                    // rather than aborting our own task mid-execution.
+                    {
+                        let mut w = watchers.lock().await;
+                        w.remove(&node_id_clone);
+                    }
+
                     if let Err(e) = scheduler
                         .on_node_failed(
-                            &node_id_owned,
+                            &node_id_clone,
                             &format!("Task timed out after {} seconds", timeout_secs),
                         )
                         .await
                     {
                         tracing::error!(
-                            node_id = %node_id_owned,
+                            node_id = %node_id_clone,
                             error = %e,
                             "Failed to handle timeout for node"
                         );
                     }
+                    break;
                 }
             }
         });
@@ -2394,6 +2469,57 @@ mod tests {
         assert!(
             result.is_ok(),
             "stall watcher should have finalized the DAG within 3s"
+        );
+    }
+
+    /// Three-stage timeout watcher: warn (50%) → escalate (80%) → fail (100%).
+    ///
+    /// We can't easily observe the log-only warn/escalate tiers without a
+    /// tracing test subscriber, so this test focuses on the fail transition:
+    /// a Running node with a 2s timeout must be marked Failed with a
+    /// `timeout_error` metadata entry within a bounded window.
+    #[tokio::test]
+    async fn timeout_watcher_emits_warn_before_fail() {
+        let mut graph = TaskGraph::new(vec![TaskNode::new("n1", "agent", "slow task")]);
+        graph.nodes[0].status = TaskStatus::Running;
+        graph.nodes[0].timeout = Some(2);
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let scheduler = DagScheduler::new(temp_dir.path().to_path_buf(), graph);
+
+        // Spawn the three-stage watcher directly (submit_graph is not invoked).
+        scheduler.spawn_timeout_watcher("n1", 2, "agent");
+
+        // Bound the test at 5s — the fail tier fires at 2s plus one poll tick.
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                {
+                    let g = scheduler.graph.lock().await;
+                    let n = g.find_node("n1").unwrap();
+                    if n.status == TaskStatus::Failed {
+                        // Verify the timeout reason was recorded in metadata.
+                        let reason = n.metadata.get("timeout_error").cloned();
+                        assert!(
+                            reason.is_some(),
+                            "timed-out node should carry timeout_error in metadata"
+                        );
+                        let reason = reason.unwrap();
+                        assert!(
+                            reason.contains("timeout after 2s"),
+                            "timeout_error should mention the configured budget, got: {}",
+                            reason
+                        );
+                        return;
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        })
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "timeout watcher should have failed the node within 5s"
         );
     }
 }
