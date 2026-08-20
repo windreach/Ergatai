@@ -785,11 +785,8 @@ tasks:
 "#;
 
         let graph = parse_dag_yaml(yaml, None).unwrap();
-        let by_name: std::collections::HashMap<&str, &TaskNode> = graph
-            .nodes
-            .iter()
-            .map(|n| (n.task.as_str(), n))
-            .collect();
+        let by_name: std::collections::HashMap<&str, &TaskNode> =
+            graph.nodes.iter().map(|n| (n.task.as_str(), n)).collect();
         assert_eq!(by_name["task_low"].complexity, TaskComplexity::Low);
         assert_eq!(by_name["task_medium"].complexity, TaskComplexity::Medium);
         assert_eq!(by_name["task_high"].complexity, TaskComplexity::High);

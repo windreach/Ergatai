@@ -206,8 +206,8 @@ DAG 调度器新增多层防御机制，防止资源失控和 agent 僵死：
 | `stall_timeout_secs` | `Option<u64>` | 节点无进度超时（触发 stall watcher） |
 | `node_timeout_secs` | `Option<u64>` | 节点硬性超时（三阶段：warn → escalate → fail） |
 
-- **预算检查**：`DagScheduler::check_budget()` 在节点提交、完成、失败时调用，超限则标记 DAG 失败。
-- **僵死检测**：`spawn_stall_watcher()` 每 5 秒检查 `last_progress_age_secs()`，超过 `stall_timeout_secs` 则标记节点失败。
+- **预算检查**：`DagScheduler::check_budget()` 在 `generate_and_submit()` 中调用（节点提交时直接调用；完成/失败路径通过重试提交间接调用），超限则标记 DAG 失败。
+- **僵死检测**：`spawn_stall_watcher()` 每 1 秒（`POLL_INTERVAL_SECS`）检查 `last_progress_age_secs()`，超过 `stall_timeout_secs` 则标记节点失败。
 - **三阶段超时**：`spawn_timeout_watcher()` 在 50%/80%/100% 时分别触发 `publish_node_warned`、`publish_node_escalated`、标记失败。超时错误记录到 `node.metadata["timeout_error"]`。
 
 ### 中间件控制

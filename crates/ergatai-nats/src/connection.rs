@@ -145,12 +145,15 @@ impl NatsConnection {
     /// stream backlog exceeds the configured threshold.
     pub async fn agent_messages_pending_count(&self) -> ErgataiResult<u64> {
         let stream_name = crate::agent_message_stream::AGENT_MESSAGES_STREAM;
-        let mut stream = self.jetstream.get_stream(stream_name).await.map_err(|e| {
-            ErgataiError::NatsError(format!("stream lookup failed: {e}"))
-        })?;
-        let info = stream.info().await.map_err(|e| {
-            ErgataiError::NatsError(format!("stream info failed: {e}"))
-        })?;
+        let mut stream = self
+            .jetstream
+            .get_stream(stream_name)
+            .await
+            .map_err(|e| ErgataiError::NatsError(format!("stream lookup failed: {e}")))?;
+        let info = stream
+            .info()
+            .await
+            .map_err(|e| ErgataiError::NatsError(format!("stream info failed: {e}")))?;
         Ok(info.state.messages)
     }
 
