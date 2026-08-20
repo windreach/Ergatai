@@ -727,4 +727,34 @@ tasks:
         // 验证依赖关系
         assert_eq!(graph.nodes[4].depends_on.len(), 2);
     }
+
+    #[test]
+    fn yaml_roundtrip_preserves_budget_and_stall_fields() {
+        let yaml = r#"
+dag_id: test-dag
+description: test
+max_agent_calls: 50
+stall_timeout_secs: 300
+tasks:
+  - name: a
+    agent: alice
+"#;
+        let graph = parse_dag_yaml(yaml, None).expect("parse");
+        assert_eq!(graph.max_agent_calls, Some(50));
+        assert_eq!(graph.stall_timeout_secs, Some(300));
+    }
+
+    #[test]
+    fn yaml_roundtrip_defaults_budget_fields_to_none() {
+        let yaml = r#"
+dag_id: test-dag
+description: test
+tasks:
+  - name: a
+    agent: alice
+"#;
+        let graph = parse_dag_yaml(yaml, None).expect("parse");
+        assert_eq!(graph.max_agent_calls, None);
+        assert_eq!(graph.stall_timeout_secs, None);
+    }
 }
