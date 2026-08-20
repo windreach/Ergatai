@@ -54,6 +54,10 @@ struct YamlDag {
     /// DAG 全局停滞超时秒数（可选）- 无进展超过此时长则 DAG 被最终化
     #[serde(skip_serializing_if = "Option::is_none")]
     stall_timeout_secs: Option<u64>,
+    /// DAG 默认单节点超时秒数（可选）- 节点未指定 timeout 时使用此默认值
+    /// 调度器会根据节点 complexity 在此基础上乘以系数: low × 0.5, medium × 1.0, high × 2.0
+    #[serde(skip_serializing_if = "Option::is_none")]
+    node_timeout_secs: Option<u64>,
     /// DAG 全局优先级（可选）- 应用于所有节点，除非节点自己指定优先级
     priority: Option<String>,
     /// 参数定义列表（可选）- 用于模板参数化
@@ -286,6 +290,7 @@ pub fn parse_dag_yaml(
     graph.timeout = yaml_dag.timeout;
     graph.max_agent_calls = yaml_dag.max_agent_calls;
     graph.stall_timeout_secs = yaml_dag.stall_timeout_secs;
+    graph.node_timeout_secs = yaml_dag.node_timeout_secs;
     graph.priority = dag_priority;
     graph.parameters = resolved_params;
     graph.communication = yaml_dag.communication;

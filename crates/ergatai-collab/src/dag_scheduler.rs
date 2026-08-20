@@ -14,13 +14,29 @@ use ergatai_error::{ErgataiError, ErgataiResult};
 use tokio::sync::Mutex;
 
 use super::task_scheduler::{global_scheduler, TaskScheduler};
-use ergatai_dag::{TaskGraph, TaskNode, TaskStatus};
+use ergatai_dag::{TaskComplexity, TaskGraph, TaskNode, TaskStatus};
 
 use crate::collaboration::{CollaborationSession, CommunicationCheck, MeshPolicy};
 
 /// How often the stall watcher polls `last_progress_age_secs()`.
 /// Kept small so unit tests can exercise the full stall path in under a second.
 const POLL_INTERVAL_SECS: u64 = 1;
+
+/// Scale a base timeout by task complexity.
+///
+/// - Low    → base × 0.5 (short tasks need less budget)
+/// - Medium → base × 1.0 (unchanged)
+/// - High   → base × 2.0 (complex tasks get more headroom)
+///
+/// A zero base always yields zero (no watchdog to spawn).
+pub fn adjust_timeout_by_complexity(base_timeout_secs: u64, complexity: TaskComplexity) -> u64 {
+    let multiplier: f64 = match complexity {
+        TaskComplexity::Low => 0.5,
+        TaskComplexity::Medium => 1.0,
+        TaskComplexity::High => 2.0,
+    };
+    (base_timeout_secs as f64 * multiplier) as u64
+}
 
 /// DAG Scheduler - manages DAG-based task orchestration
 #[derive(Clone)]
@@ -366,10 +382,13 @@ impl DagScheduler {
         let graph = self.graph.lock().await;
 
         // Build estimated durations map
-        // Try to use node timeout as estimate, otherwise default to 10 seconds
+        // Try to use node timeout (complexity-adjusted) as estimate,
+        // then DAG default, then fall back to 10 seconds
+        let dag_default = graph.node_timeout_secs;
         let mut estimated_durations = std::collections::HashMap::new();
         for node in &graph.nodes {
-            let duration = node.timeout.unwrap_or(10);
+            let base = node.timeout.or(dag_default).unwrap_or(10);
+            let duration = adjust_timeout_by_complexity(base, node.complexity);
             estimated_durations.insert(node.id.clone(), duration);
         }
 
@@ -406,6 +425,26 @@ impl DagScheduler {
             "agent call dispatched"
         );
 
+        // Resolve effective base timeout: per-node override or DAG default.
+        let base_timeout: Option<u64> = {
+            let graph = self.graph.lock().await;
+            node.timeout.or(graph.node_timeout_secs)
+        };
+        // Scale base timeout by task complexity (Low × 0.5, Medium × 1.0, High × 2.0).
+        let adjusted_timeout: Option<u64> =
+            base_timeout.map(|t| adjust_timeout_by_complexity(t, node.complexity));
+
+        if base_timeout.is_some() {
+            tracing::info!(
+                node_id = %node.id,
+                complexity = ?node.complexity,
+                complexity_score = node.complexity.as_score(),
+                base_timeout_secs = base_timeout,
+                adjusted_timeout_secs = adjusted_timeout,
+                "submitting node with complexity-adjusted timeout"
+            );
+        }
+
         // Generate plan file (still needed — agents read it as a document)
         let plan_file = self.generate_node_plan(node).await?;
         let task_id = node.id.clone();
@@ -423,7 +462,7 @@ impl DagScheduler {
                     plan_file: plan_file.to_string_lossy().to_string(),
                     target_agent: node.agent.clone(),
                     priority,
-                    timeout_secs: node.timeout,
+                    timeout_secs: adjusted_timeout,
                     dag_id: Some(dag_id),
                 };
 
@@ -431,7 +470,7 @@ impl DagScheduler {
                 tracing::info!(task_id = task_id, "Submitted node via NATS event");
 
                 // Start timeout watchdog if timeout is configured
-                if let Some(timeout_secs) = node.timeout {
+                if let Some(timeout_secs) = adjusted_timeout {
                     self.spawn_timeout_watcher(&task_id, timeout_secs, &node.agent);
                 }
 
@@ -446,7 +485,7 @@ impl DagScheduler {
             .await?;
 
         // Start timeout watchdog if timeout is configured
-        if let Some(timeout_secs) = node.timeout {
+        if let Some(timeout_secs) = adjusted_timeout {
             self.spawn_timeout_watcher(&tid, timeout_secs, &node.agent);
         }
 
@@ -2521,5 +2560,123 @@ mod tests {
             result.is_ok(),
             "timeout watcher should have failed the node within 5s"
         );
+    }
+
+    /// Complexity-based timeout scaling:
+    ///   Low    → base × 0.5
+    ///   Medium → base × 1.0
+    ///   High   → base × 2.0
+    #[test]
+    fn test_complexity_timeout_adjustment() {
+        assert_eq!(
+            adjust_timeout_by_complexity(100, TaskComplexity::Low),
+            50,
+            "Low complexity should halve the base timeout"
+        );
+        assert_eq!(
+            adjust_timeout_by_complexity(100, TaskComplexity::Medium),
+            100,
+            "Medium complexity should leave the base timeout unchanged"
+        );
+        assert_eq!(
+            adjust_timeout_by_complexity(100, TaskComplexity::High),
+            200,
+            "High complexity should double the base timeout"
+        );
+
+        // Odd base values: f64 → u64 truncation (e.g. 3 * 0.5 = 1.5 → 1)
+        assert_eq!(adjust_timeout_by_complexity(3, TaskComplexity::Low), 1);
+
+        // Zero base always yields zero regardless of complexity.
+        assert_eq!(adjust_timeout_by_complexity(0, TaskComplexity::High), 0);
+        assert_eq!(adjust_timeout_by_complexity(0, TaskComplexity::Low), 0);
+
+        // Default complexity is Medium.
+        assert_eq!(adjust_timeout_by_complexity(60, TaskComplexity::default()), 60);
+    }
+
+    /// End-to-end: a YAML DAG with `node_timeout_secs` + per-task complexity
+    /// produces a graph whose scheduler will apply the right adjusted timeouts.
+    /// We verify via the public `adjust_timeout_by_complexity` helper that the
+    /// scheduler would compute the expected per-node budget.
+    #[test]
+    fn test_scheduler_uses_complexity_for_timeout() {
+        let yaml = r#"
+name: test_dag
+node_timeout_secs: 60
+tasks:
+  - name: low_task
+    description: "Simple task"
+    agent: agent-a
+    complexity: low
+  - name: high_task
+    description: "Complex task"
+    agent: agent-b
+    complexity: high
+    depends_on: [low_task]
+"#;
+
+        let graph = ergatai_dag::parse_dag_yaml(yaml, None).unwrap();
+
+        // DAG-level default propagated.
+        assert_eq!(graph.node_timeout_secs, Some(60));
+
+        // Build the same adjusted-timeout map the scheduler would use.
+        let dag_default = graph.node_timeout_secs;
+        let mut adjusted: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+        for node in &graph.nodes {
+            let base = node.timeout.or(dag_default).unwrap_or(10);
+            adjusted.insert(
+                node.id.clone(),
+                adjust_timeout_by_complexity(base, node.complexity),
+            );
+        }
+
+        // low_task: 60 × 0.5 = 30
+        let low_id = graph.nodes.iter().find(|n| n.agent == "agent-a").unwrap().id.clone();
+        assert_eq!(adjusted[&low_id], 30, "low_task budget should be 30s");
+
+        // high_task: 60 × 2.0 = 120
+        let high_id = graph.nodes.iter().find(|n| n.agent == "agent-b").unwrap().id.clone();
+        assert_eq!(adjusted[&high_id], 120, "high_task budget should be 120s");
+    }
+
+    /// Per-node `timeout` overrides DAG-level `node_timeout_secs`, and
+    /// complexity adjustment is still applied on top.
+    #[test]
+    fn test_per_node_timeout_overrides_dag_default_with_complexity() {
+        let yaml = r#"
+name: override_dag
+node_timeout_secs: 100
+tasks:
+  - name: explicit_low
+    agent: a
+    description: "x"
+    timeout: 40
+    complexity: low
+  - name: inherited_high
+    agent: b
+    description: "y"
+    complexity: high
+"#;
+        let graph = ergatai_dag::parse_dag_yaml(yaml, None).unwrap();
+        let dag_default = graph.node_timeout_secs;
+
+        let mut adjusted = std::collections::HashMap::new();
+        for node in &graph.nodes {
+            let base = node.timeout.or(dag_default).unwrap_or(10);
+            adjusted.insert(
+                node.id.clone(),
+                adjust_timeout_by_complexity(base, node.complexity),
+            );
+        }
+
+        let low_id = graph.nodes.iter().find(|n| n.agent == "a").unwrap().id.clone();
+        // 40 × 0.5 = 20 (per-node timeout used, not DAG default)
+        assert_eq!(adjusted[&low_id], 20);
+
+        let high_id = graph.nodes.iter().find(|n| n.agent == "b").unwrap().id.clone();
+        // 100 × 2.0 = 200 (DAG default used since no per-node timeout)
+        assert_eq!(adjusted[&high_id], 200);
     }
 }

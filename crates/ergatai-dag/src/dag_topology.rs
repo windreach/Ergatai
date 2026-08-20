@@ -177,6 +177,12 @@ pub struct TaskGraph {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stall_timeout_secs: Option<u64>,
 
+    /// Optional: default per-node timeout in seconds.
+    /// Used as the base timeout for nodes that do not specify their own `timeout`.
+    /// The scheduler further adjusts this base by `TaskComplexity` (Low × 0.5, Medium × 1.0, High × 2.0).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_timeout_secs: Option<u64>,
+
     /// Optional: DAG-level priority (high / medium / low) - applies to all nodes unless overridden
     #[serde(skip_serializing_if = "Option::is_none")]
     pub priority: Option<String>,
@@ -204,6 +210,7 @@ impl TaskGraph {
             timeout: None,
             max_agent_calls: None,
             stall_timeout_secs: None,
+            node_timeout_secs: None,
             priority: None,
             parameters: HashMap::new(),
             communication: None,
