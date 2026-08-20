@@ -6,6 +6,7 @@
 pub mod batch_aggregator;
 pub mod conversation;
 pub mod message_delivery;
+pub mod rate_limiter;
 pub mod server;
 
 // Re-export AgentRegistry for backward compatibility

@@ -28,6 +28,7 @@ use ergatai_runtime::get_agent_runtime;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::conversation::{ConversationManager, TokenOwner};
+use super::rate_limiter::get_rate_limiter;
 
 /// Shared registry of MCP peer handles for pushing notifications to agents.
 /// Key: agent_id (e.g., "opencode@abcd1234")
@@ -412,6 +413,13 @@ impl ErgataiMcpServer {
             target_agent_id, message, message_type
         );
 
+        // Rate-limit check: 60 messages per target agent per minute.
+        let rl = get_rate_limiter();
+        if let Err(e) = rl.check(target_agent_id).await {
+            tracing::warn!(%e, "send_message rate-limited");
+            return Err(ErrorData::invalid_params(e.to_string(), None));
+        }
+
         // Find the matching agent - support both exact ID and name prefix
         // Check both MCP registry and AgentRuntime
         let agents = self.registry.list_agents().await;
@@ -629,6 +637,9 @@ impl ErgataiMcpServer {
 
             match bus.publish_agent_message_reliable(&payload).await {
                 Ok(ack) => {
+                    // Record the successful send against the rate limiter.
+                    rl.record(target_agent_id).await;
+
                     let response_json = serde_json::json!({
                         "status": "queued",
                         "target_agent": resolved_agent_id,
