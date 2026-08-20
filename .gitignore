@@ -48,3 +48,7 @@ crates/ergatai-binary/resources/
 
 # Claude Code local state
 .claude/
+
+# Build output
+build.log
+build_output.txt
