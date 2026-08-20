@@ -2,6 +2,7 @@
 // File-based collaboration system for multi-agent coordination
 
 pub mod agent_launcher;
+pub mod collaboration; // Collaboration session & mesh policy (DAG ↔ messaging glue)
 pub mod dag_scheduler; // DAG-based scheduler
 pub mod message_router;
 pub mod plan_watcher;
@@ -10,6 +11,7 @@ pub mod task_scheduler; // Agent-to-agent message routing via NATS
 pub mod tmux; // Tmux-based agent management
 
 pub use agent_launcher::{AgentLauncher, AgentSessionStatus, RunningAgent};
+pub use collaboration::{CollaborationSession, CommunicationCheck, MeshPolicy};
 pub use dag_scheduler::{
     clear_dag_scheduler, clear_dag_scheduler_by_id, get_dag_scheduler, get_dag_scheduler_by_id,
     list_dag_schedulers, set_dag_scheduler, DagScheduler,

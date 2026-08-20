@@ -55,6 +55,8 @@ struct YamlDag {
     parameters: Vec<YamlParameter>,
     /// 任务列表
     tasks: Vec<YamlTask>,
+    /// 通信模式（可选）- DAG 内 agent 之间如何交流：open / adjacent / star:{hub_agent}
+    communication: Option<String>,
 }
 
 /// YAML 参数定义
@@ -275,6 +277,7 @@ pub fn parse_dag_yaml(
     graph.timeout = yaml_dag.timeout;
     graph.priority = dag_priority;
     graph.parameters = resolved_params;
+    graph.communication = yaml_dag.communication;
     graph.validate()?;
 
     Ok(graph)

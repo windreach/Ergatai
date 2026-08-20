@@ -56,6 +56,47 @@ tasks:
 | `retry` | | Max retry count on failure |
 | `scope` | | File access scope (glob pattern, e.g., `src/auth/**`) |
 
+### DAG-Level Fields (optional, placed alongside `tasks:`)
+
+| Field | Description |
+|-------|-------------|
+| `name` | Human-readable DAG name |
+| `description` | Goal of the orchestration |
+| `timeout` | DAG-level timeout (entire DAG must finish within this many seconds) |
+| `priority` | DAG-level default priority (applied to nodes that don't set their own) |
+| `communication` | **Agent communication policy** (see below). Defaults to `open`. |
+
+#### Communication policies
+
+The `communication` field declares how agents participating in this DAG may
+talk to each other while their nodes are executing. Two layers coexist:
+the **topology** (DAG) governs task ordering; the **communication policy**
+governs who can @mention whom at runtime.
+
+| Value | Meaning |
+|-------|---------|
+| `open` (default) | Any participant may @mention any other participant. |
+| `adjacent` | Only agents whose nodes share a direct `depends_on` edge may communicate. |
+| `star:{hub_agent}` | All communication must pass through the designated hub agent. |
+
+Example:
+
+```yaml
+name: 多 agent 协作实现新功能
+description: PM 协调，dev/test 并行执行
+communication: star:pm
+tasks:
+  - name: 需求分析
+    agent: pm
+    task: 分析需求并拆分子任务
+  - name: 实现 A
+    agent: dev-a
+    depends_on: [需求分析]
+  - name: 实现 B
+    agent: dev-b
+    depends_on: [需求分析]
+```
+
 ### Minimal Node
 
 Only `name` is required:

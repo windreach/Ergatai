@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use ergatai_dag::context::DagContext;
 use ergatai_error::{ErgataiError, ErgataiResult};
@@ -14,6 +15,8 @@ use tokio::sync::Mutex;
 
 use super::task_scheduler::{global_scheduler, TaskScheduler};
 use ergatai_dag::{TaskGraph, TaskNode, TaskStatus};
+
+use crate::collaboration::{CollaborationSession, CommunicationCheck, MeshPolicy};
 
 /// DAG Scheduler - manages DAG-based task orchestration
 #[derive(Clone)]
@@ -44,6 +47,15 @@ pub struct DagScheduler {
 
     /// DAG-level timeout watchdog handle
     dag_timeout_watcher: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+
+    /// Collaboration session bound to this DAG (participants + mesh policy).
+    collaboration: Arc<Mutex<CollaborationSession>>,
+
+    /// Guard against duplicate `finalize_if_terminal` runs when concurrent
+    /// node completions race past the `is_complete()` check. The first caller
+    /// to `swap(true)` proceeds with the NATS publish + registry cleanup;
+    /// subsequent callers return early.
+    finalized: Arc<AtomicBool>,
 }
 
 impl DagScheduler {
@@ -88,6 +100,25 @@ impl DagScheduler {
                 .map(|timeout| std::time::Instant::now() + std::time::Duration::from_secs(timeout))
         };
 
+        // Build the collaboration session from the graph before moving it into the Arc.
+        let policy = graph
+            .communication
+            .as_deref()
+            .map(|s| match MeshPolicy::parse(s) {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(
+                        communication = %s,
+                        error = %e,
+                        dag_id = %dag_id,
+                        "Invalid communication policy; falling back to Open"
+                    );
+                    MeshPolicy::Open
+                }
+            })
+            .unwrap_or_default();
+        let collaboration = CollaborationSession::from_graph(&dag_id, &graph, policy);
+
         Self {
             graph: Arc::new(Mutex::new(graph)),
             context: Arc::new(Mutex::new(context)),
@@ -98,12 +129,62 @@ impl DagScheduler {
             timeout_watchers: Arc::new(Mutex::new(HashMap::new())),
             deadline,
             dag_timeout_watcher: Arc::new(Mutex::new(None)),
+            collaboration: Arc::new(Mutex::new(collaboration)),
+            finalized: Arc::new(AtomicBool::new(false)),
         }
     }
 
     /// Get a clone of the execution context
     pub fn context(&self) -> Arc<Mutex<DagContext>> {
         self.context.clone()
+    }
+
+    /// Get a snapshot of the collaboration session bound to this DAG.
+    pub async fn collaboration(&self) -> CollaborationSession {
+        self.collaboration.lock().await.clone()
+    }
+
+    /// Check whether a message from `from_agent` to `to_agent` is permitted
+    /// under this DAG's `MeshPolicy`.
+    ///
+    /// # Semantics
+    ///
+    /// - If **both** agents are participants in this DAG's collaboration
+    ///   session, the configured `MeshPolicy` is applied. Returns
+    ///   `CommunicationCheck::Denied(reason)` when the policy rejects the pair.
+    /// - If **either** agent is not a participant (e.g., an agent outside this
+    ///   DAG, or a DAG-external pane), the check is skipped and `Allowed` is
+    ///   returned — this preserves backward compatibility and avoids breaking
+    ///   cross-DAG or out-of-band conversations.
+    pub async fn check_communication(
+        &self,
+        from_agent: &str,
+        to_agent: &str,
+    ) -> CommunicationCheck {
+        // Clone what we need under a single lock, then release it.
+        // No need to acquire the graph lock — adjacency is precomputed.
+        let (allowed, dag_id, policy_desc) = {
+            let session = self.collaboration.lock().await;
+            // Only enforce the policy when both endpoints are participants.
+            if !session.participants.contains(from_agent)
+                || !session.participants.contains(to_agent)
+            {
+                return CommunicationCheck::NotApplicable;
+            }
+            (
+                session.allows(from_agent, to_agent),
+                session.dag_id.clone(),
+                format!("{:?}", session.policy),
+            )
+        };
+        if allowed {
+            CommunicationCheck::Allowed
+        } else {
+            CommunicationCheck::Denied(format!(
+                "MeshPolicy {} of DAG {} denies message {} → {}",
+                policy_desc, dag_id, from_agent, to_agent
+            ))
+        }
     }
 
     /// Set a global variable in the context
@@ -752,43 +833,7 @@ impl DagScheduler {
         self.save_graph_unlocked().await?;
 
         // Check if all done
-        let is_done = {
-            let graph = self.graph.lock().await;
-            graph.is_complete()
-        };
-        if is_done {
-            tracing::info!("All nodes completed! DAG execution complete.");
-
-            // Publish DAG completion event via NATS
-            if ergatai_nats::is_nats_initialized().await {
-                if let Some(conn) = ergatai_nats::get_nats_connection().await {
-                    let bus = ergatai_nats::EventBus::new(conn);
-                    let graph = self.graph.lock().await;
-                    let total = graph.nodes.len() as u32;
-                    let (completed, failed) =
-                        graph
-                            .nodes
-                            .iter()
-                            .fold((0u32, 0u32), |(c, f), n| match n.status {
-                                TaskStatus::Completed => (c + 1, f),
-                                TaskStatus::Failed => (c, f + 1),
-                                _ => (c, f),
-                            });
-                    drop(graph);
-
-                    let payload = ergatai_nats::DagCompletePayload {
-                        dag_id: self.dag_id().to_string(),
-                        total_nodes: total,
-                        completed_nodes: completed,
-                        failed_nodes: failed,
-                        duration_secs: self.elapsed_secs(),
-                    };
-                    if let Err(e) = bus.publish_dag_complete(&payload).await {
-                        tracing::error!(error = %e, "Failed to publish DAG complete event");
-                    }
-                }
-            }
-        }
+        self.finalize_if_terminal().await;
 
         Ok(newly_submitted)
     }
@@ -926,9 +971,82 @@ impl DagScheduler {
             self.skip_downstream(node_id).await?;
 
             self.save_graph_unlocked().await?;
+
+            // If cascading failures left the DAG fully terminal, finalize.
+            self.finalize_if_terminal().await;
         }
 
         Ok(())
+    }
+
+    /// If the DAG has reached a terminal state (all nodes are either
+    /// `Completed`, `Failed`, or `Skipped`), publish a `DagCompletePayload`
+    /// event via NATS and remove this scheduler from the global registry so
+    /// the `CollaborationSession` (MeshPolicy ACL) stops applying to
+    /// `send_message` calls. Agents then regain unrestricted communication.
+    ///
+    /// Idempotent: an internal `AtomicBool` gate ensures only the first
+    /// concurrent caller proceeds — subsequent callers return early even if
+    /// they also observe `is_complete() == true`.
+    async fn finalize_if_terminal(&self) {
+        // Atomic CAS: only one concurrent caller proceeds past this point.
+        if self.finalized.swap(true, Ordering::SeqCst) {
+            return;
+        }
+
+        let is_done = {
+            let graph = self.graph.lock().await;
+            graph.is_complete()
+        };
+        if !is_done {
+            // DAG not actually terminal — release the gate so a later caller
+            // can finalize when it truly completes.
+            self.finalized.store(false, Ordering::SeqCst);
+            return;
+        }
+
+        tracing::info!(
+            dag_id = %self.dag_id,
+            "DAG reached terminal state — finalizing"
+        );
+
+        // Publish DAG completion event via NATS (best-effort).
+        if ergatai_nats::is_nats_initialized().await {
+            if let Some(conn) = ergatai_nats::get_nats_connection().await {
+                let bus = ergatai_nats::EventBus::new(conn);
+                let graph = self.graph.lock().await;
+                let total = graph.nodes.len() as u32;
+                let (completed, failed) = graph
+                    .nodes
+                    .iter()
+                    .fold((0u32, 0u32), |(c, f), n| match n.status {
+                        TaskStatus::Completed => (c + 1, f),
+                        TaskStatus::Failed => (c, f + 1),
+                        _ => (c, f),
+                    });
+                drop(graph);
+
+                let payload = ergatai_nats::DagCompletePayload {
+                    dag_id: self.dag_id().to_string(),
+                    total_nodes: total,
+                    completed_nodes: completed,
+                    failed_nodes: failed,
+                    duration_secs: self.elapsed_secs(),
+                };
+                if let Err(e) = bus.publish_dag_complete(&payload).await {
+                    tracing::error!(error = %e, "Failed to publish DAG complete event");
+                }
+            }
+        }
+
+        // DAG execution finished: remove the scheduler from the global registry
+        // so the collaboration session (MeshPolicy ACL) stops applying to
+        // send_message calls. Agents regain unrestricted communication.
+        clear_dag_scheduler_by_id(Some(&self.dag_id));
+        tracing::info!(
+            dag_id = %self.dag_id,
+            "DAG terminal — collaboration session cleared from registry"
+        );
     }
 
     /// Skip all nodes that (transitively) depend on the failed node.

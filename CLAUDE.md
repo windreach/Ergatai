@@ -156,6 +156,41 @@ RUST_LOG=debug cargo run -p ergatai-api -- --port 3000
 | `RmuxBackend` | `backends/rmux.rs` | rmux daemon 交互 (发现 + 注入) |
 | `NatsConnection` | `nats/connection.rs` | NATS 连接 + JetStream 上下文 |
 | `ErgataiMcpServer` | `mcp/server.rs` | MCP 服务器实现 (工具注册 + 协议处理) |
+| `CollaborationSession` | `collab/collaboration.rs` | 一次 DAG 编排对应的协作会话 (participants + policy) |
+| `MeshPolicy` | `collab/collaboration.rs` | DAG 内 agent 之间的通信策略枚举 |
+
+---
+
+## 协作范式
+
+DAG 编排 + 通信两层抽象。`CollaborationSession`（`ergatai-collab/src/collaboration.rs`）
+绑定 `dag_id` + `participants` + `MeshPolicy`，定义一次编排中 agent 之间的通信规则：
+
+| MeshPolicy | 含义 |
+|---|---|
+| `Open`（默认） | 任意参与者可互相 @mention |
+| `Adjacent` | 仅 DAG 中有依赖边的 agent 对可通信 |
+| `Star { hub }` | 所有通信经过指定 hub agent |
+| `Restricted { pairs }` | 显式允许的 pair 列表 |
+
+YAML 顶层 `communication` 字段声明模式（`open` / `adjacent` / `star:{hub_agent}`）。
+`DagScheduler::with_context()` 在构造时从 `TaskGraph.communication` 解析出 policy，
+并构造一个 `CollaborationSession` 存在调度器里。
+
+当前 MVP 仅记录 session 元数据，不强制 ACL；后续可在 `send_message` 中调用
+`CollaborationSession::allows(from, to, &graph)` 做强制校验。
+
+**ACL 强制校验已启用**：`send_message` handler 在投递前会扫描所有 active
+`DagScheduler`，对每个 scheduler 调用 `check_communication(from, to)`。
+当发送方和接收方都是某 session 的 participant 时，按 `MeshPolicy` 校验；
+任一方不是 participant 则放行（向后兼容）。`CommunicationCheck` 三值枚举：
+`NotApplicable` / `Allowed` / `Denied(reason)`。
+
+**自动清理**：DAG 完成（`on_node_completed` 检测到 `is_complete`）或彻底失败
+（`on_node_failed` 级联到全部 terminal）时，`DagScheduler` 会从全局 registry
+移除，`CollaborationSession` 随之失效，agent 间通信恢复无约束。
+
+新增 MCP tool: `get_collaboration_status { dag_id? }` 查询当前 session。
 
 ---
 

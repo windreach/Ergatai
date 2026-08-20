@@ -162,8 +162,12 @@ pub enum ConversationState {
 pub enum TerminationReason {
     /// Completed normally (TERMINATE keyword or max turns/auto-replies reached).
     Completed,
-    /// Failed due to error or timeout.
+    /// Failed due to error.
+    Failed,
+    /// Timed out (max execution time exceeded).
     TimedOut,
+    /// Manually canceled.
+    Canceled,
 }
 
 impl Conversation {
@@ -585,7 +589,17 @@ mod tests {
         assert!(conv.is_terminal());
 
         conv.state = ConversationState::Terminated {
+            reason: TerminationReason::Failed,
+        };
+        assert!(conv.is_terminal());
+
+        conv.state = ConversationState::Terminated {
             reason: TerminationReason::TimedOut,
+        };
+        assert!(conv.is_terminal());
+
+        conv.state = ConversationState::Terminated {
+            reason: TerminationReason::Canceled,
         };
         assert!(conv.is_terminal());
     }

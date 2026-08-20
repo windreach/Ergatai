@@ -138,6 +138,12 @@ pub struct TaskGraph {
     /// Optional: DAG parameters for template substitution
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub parameters: HashMap<String, serde_json::Value>,
+
+    /// Optional: communication mode between agents in this DAG.
+    /// Accepted values: "open" (default), "adjacent", "star:{hub_agent}".
+    /// Controls which participants may @mention each other while the DAG runs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub communication: Option<String>,
 }
 
 impl TaskGraph {
@@ -152,6 +158,7 @@ impl TaskGraph {
             timeout: None,
             priority: None,
             parameters: HashMap::new(),
+            communication: None,
         }
     }
 

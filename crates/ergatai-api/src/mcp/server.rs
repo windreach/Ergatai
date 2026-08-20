@@ -189,6 +189,12 @@ struct CheckDagStatusParams {
     dag_id: String,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GetCollaborationStatusParams {
+    /// Optional DAG ID. If omitted, returns the most recently submitted session.
+    dag_id: Option<String>,
+}
+
 // ── File Access Control parameter types ──
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -471,6 +477,55 @@ impl ErgataiMcpServer {
             ))]));
         }
 
+        // ── Collaboration session ACL (MeshPolicy enforcement) ──
+        // Try plausible identifier pairs for sender/receiver against every active
+        // DAG session. A session only "speaks up" when both endpoints are its
+        // participants (Denied or Allowed); otherwise it returns NotApplicable
+        // and we keep scanning. First Denied wins; if no scheduler denies, the
+        // message is allowed.
+        {
+            let sender_ids = [
+                from_agent.as_str(),
+                from_runtime_id.as_deref().unwrap_or(""),
+            ];
+            let receiver_ids = [target_agent_id.as_str(), resolved_agent_id.as_str()];
+
+            'scheduler_loop: for scheduler in ergatai_core::cross_agent::list_dag_schedulers() {
+                for &s in &sender_ids {
+                    if s.is_empty() {
+                        continue;
+                    }
+                    for &r in &receiver_ids {
+                        if r.is_empty() {
+                            continue;
+                        }
+                        match scheduler.check_communication(s, r).await {
+                            ergatai_core::cross_agent::CommunicationCheck::Denied(reason) => {
+                                warn!(
+                                    from = %s,
+                                    to = %r,
+                                    reason = %reason,
+                                    "MeshPolicy denied message"
+                                );
+                                return Ok(CallToolResult::error(vec![ContentBlock::text(
+                                    format!("Message blocked by collaboration policy: {}", reason),
+                                )]));
+                            }
+                            ergatai_core::cross_agent::CommunicationCheck::Allowed => {
+                                // This session covered both endpoints and permits
+                                // the pair — skip to next scheduler.
+                                continue 'scheduler_loop;
+                            }
+                            ergatai_core::cross_agent::CommunicationCheck::NotApplicable => {
+                                // This session doesn't cover both endpoints; keep
+                                // scanning other (sender, receiver) pairs.
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // ── Check if this is a reply BEFORE check_and_record modifies token state ──
         // is_reply_message checks token_owner: if sender holds token, it means recipient sent last.
         // Must be called BEFORE check_and_record which transfers the token.
@@ -728,6 +783,46 @@ impl ErgataiMcpServer {
                     serde_json::to_string_pretty(&result).unwrap_or_default(),
                 )]))
             }
+        }
+    }
+
+    /// Get the current collaboration session (participants + communication policy)
+    #[tool(
+        description = "Get the current collaboration session status: participant agents, communication policy (open/adjacent/star), and DAG binding. Optional dag_id selects a specific session; otherwise returns the most recent."
+    )]
+    async fn get_collaboration_status(
+        &self,
+        params: Parameters<GetCollaborationStatusParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        // When dag_id is specified, look up that specific scheduler.
+        // When dag_id is None, fall back to the most recent scheduler.
+        let scheduler = if params.0.dag_id.is_some() {
+            ergatai_core::cross_agent::get_dag_scheduler_by_id(params.0.dag_id.as_deref())
+        } else {
+            ergatai_core::cross_agent::get_dag_scheduler()
+        };
+
+        match (scheduler, params.0.dag_id) {
+            (Some(s), _) => {
+                let session = s.collaboration().await;
+                Ok(CallToolResult::success(vec![ContentBlock::text(
+                    serde_json::to_string_pretty(&session).unwrap_or_default(),
+                )]))
+            }
+            (None, Some(dag_id)) => Ok(CallToolResult::success(vec![ContentBlock::text(
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "status": "not_found",
+                    "message": format!("No collaboration session found for dag_id: {}", dag_id),
+                }))
+                .unwrap_or_default(),
+            )])),
+            (None, None) => Ok(CallToolResult::success(vec![ContentBlock::text(
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "status": "no_active_session",
+                    "message": "No collaboration session is active. Submit a DAG orchestration first.",
+                }))
+                .unwrap_or_default(),
+            )])),
         }
     }
 
