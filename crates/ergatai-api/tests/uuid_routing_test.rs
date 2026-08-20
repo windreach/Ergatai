@@ -6,7 +6,7 @@
 #[cfg(test)]
 mod uuid_routing_tests {
     use ergatai_runtime::backends::local_pty::LocalPtyBackend;
-    use ergatai_runtime::types::{AgentHandle, AgentInfo, AgentState, WorkspaceHandle};
+    use ergatai_runtime::types::{AgentHandle, AgentInfo, WorkspaceHandle};
     use ergatai_runtime::AgentRuntime;
     use std::collections::HashMap;
     use std::sync::Arc;

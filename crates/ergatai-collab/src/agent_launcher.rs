@@ -28,7 +28,7 @@ use super::task_coordinator::{AgentAssignment, TaskCoordinator, TaskPlan};
 
 /// Agent session status
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum AgentStatus {
+pub enum AgentSessionStatus {
     Starting,
     Running,
     Completed,
@@ -43,7 +43,7 @@ pub struct RunningAgent {
     pub worktree_path: PathBuf,
     pub plan_file: PathBuf,
     pub result_file: PathBuf,
-    pub status: AgentStatus,
+    pub status: AgentSessionStatus,
     /// New unified lifecycle state
     pub lifecycle: Option<ergatai_runtime::AgentLifecycleState>,
     /// Tmux pane ID where the agent is running (e.g. "ergatai-opencode:0.0")
@@ -245,7 +245,7 @@ impl AgentLauncher {
             worktree_path: work_dir.clone(),
             plan_file: plan.plan_file.clone(),
             result_file: result_file.clone(),
-            status: AgentStatus::Starting,
+            status: AgentSessionStatus::Starting,
             lifecycle: None,
             pane_id: None,
             token_id: Some(file_token.id.to_string()),
@@ -507,7 +507,7 @@ Write your results in markdown:
         {
             let mut agents = self.running_agents.lock().await;
             if let Some(agent) = agents.get_mut(agent_id) {
-                agent.status = AgentStatus::Running;
+                agent.status = AgentSessionStatus::Running;
             }
         }
 
@@ -596,10 +596,10 @@ Write your results in markdown:
                 };
 
                 let (status, error_msg) = if result_file_exists {
-                    (AgentStatus::Completed, None)
+                    (AgentSessionStatus::Completed, None)
                 } else {
                     (
-                        AgentStatus::Failed,
+                        AgentSessionStatus::Failed,
                         Some(format!(
                             "Agent exited without producing result file: {}",
                             result_file_path
@@ -704,7 +704,7 @@ Write your results in markdown:
                 continue;
             }
             any = true;
-            if a.status != AgentStatus::Completed && a.status != AgentStatus::Failed {
+            if a.status != AgentSessionStatus::Completed && a.status != AgentSessionStatus::Failed {
                 return false;
             }
         }
@@ -778,7 +778,7 @@ Write your results in markdown:
             let stale: Vec<_> = agents
                 .iter()
                 .filter(|(_, a)| {
-                    a.status == AgentStatus::Completed || a.status == AgentStatus::Failed
+                    a.status == AgentSessionStatus::Completed || a.status == AgentSessionStatus::Failed
                 })
                 .map(|(id, a)| (id.clone(), a.task_id.clone(), a.token_id.clone()))
                 .collect();
@@ -1223,7 +1223,7 @@ mod tests {
                     worktree_path: PathBuf::from("/tmp/work"),
                     plan_file: PathBuf::from("/tmp/plan.md"),
                     result_file: PathBuf::from("/tmp/result.md"),
-                    status: AgentStatus::Running,
+                    status: AgentSessionStatus::Running,
                     lifecycle: None,
                     pane_id: None,
                     token_id: None,
@@ -1236,7 +1236,7 @@ mod tests {
         let s = status.unwrap();
         assert_eq!(s.task_id, "task-x");
         assert_eq!(s.agent_name, "agent-y");
-        assert_eq!(s.status, AgentStatus::Running);
+        assert_eq!(s.status, AgentSessionStatus::Running);
 
         // Clean up the global registry
         launcher.running_agents.lock().await.remove(&agent_id);
@@ -1256,7 +1256,7 @@ mod tests {
                     worktree_path: PathBuf::from("/tmp"),
                     plan_file: PathBuf::from("/tmp/p.md"),
                     result_file: PathBuf::from("/tmp/r.md"),
-                    status: AgentStatus::Completed,
+                    status: AgentSessionStatus::Completed,
                     lifecycle: None,
                     pane_id: None,
                     token_id: None,
@@ -1282,7 +1282,7 @@ mod tests {
                     worktree_path: PathBuf::from("/tmp"),
                     plan_file: PathBuf::from("/tmp/p.md"),
                     result_file: PathBuf::from("/tmp/r.md"),
-                    status: AgentStatus::Running,
+                    status: AgentSessionStatus::Running,
                     lifecycle: None,
                     pane_id: None,
                     token_id: None,
@@ -1308,7 +1308,7 @@ mod tests {
                     worktree_path: PathBuf::from("/tmp"),
                     plan_file: PathBuf::from("/tmp/p.md"),
                     result_file: PathBuf::from("/tmp/r.md"),
-                    status: AgentStatus::Failed,
+                    status: AgentSessionStatus::Failed,
                     lifecycle: None,
                     pane_id: None,
                     token_id: None,
@@ -1322,8 +1322,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_agent_status_enum_values() {
-        assert_ne!(AgentStatus::Starting, AgentStatus::Running);
-        assert_ne!(AgentStatus::Completed, AgentStatus::Failed);
+        assert_ne!(AgentSessionStatus::Starting, AgentSessionStatus::Running);
+        assert_ne!(AgentSessionStatus::Completed, AgentSessionStatus::Failed);
     }
 
     #[test]

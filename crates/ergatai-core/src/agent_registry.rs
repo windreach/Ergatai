@@ -39,7 +39,7 @@ struct AgentRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentInfo {
     pub agent_id: String,
-    pub status: AgentStatus,
+    pub status: AgentConnectionStatus,
     /// New unified lifecycle state (from ergatai-runtime)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lifecycle: Option<ergatai_runtime::AgentLifecycleState>,
@@ -52,7 +52,7 @@ pub struct AgentInfo {
 /// Agent status
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
-pub enum AgentStatus {
+pub enum AgentConnectionStatus {
     Active,
     Idle,
     Disconnected,
@@ -81,7 +81,7 @@ impl AgentRegistry {
         let now = Utc::now().to_rfc3339();
         let info = AgentInfo {
             agent_id: agent_id.clone(),
-            status: AgentStatus::Active,
+            status: AgentConnectionStatus::Active,
             lifecycle: None,
             capabilities,
             connected_at: now.clone(),
@@ -103,12 +103,12 @@ impl AgentRegistry {
         let mut agents = self.agents.write().await;
         if let Some(record) = agents.get_mut(agent_id) {
             record.info.last_heartbeat = Utc::now().to_rfc3339();
-            record.info.status = AgentStatus::Active;
+            record.info.status = AgentConnectionStatus::Active;
         }
     }
 
     /// Update agent status
-    pub async fn update_status(&self, agent_id: &str, status: AgentStatus) {
+    pub async fn update_status(&self, agent_id: &str, status: AgentConnectionStatus) {
         let mut agents = self.agents.write().await;
         if let Some(record) = agents.get_mut(agent_id) {
             record.info.status = status;
@@ -138,7 +138,7 @@ impl AgentRegistry {
         let agents = self.agents.read().await;
         agents
             .values()
-            .filter(|r| r.info.status == AgentStatus::Active)
+            .filter(|r| r.info.status == AgentConnectionStatus::Active)
             .count()
     }
 
@@ -208,7 +208,7 @@ mod tests {
         assert!(agent.is_some());
         let info = agent.unwrap();
         assert_eq!(info.agent_id, "agent-1");
-        assert_eq!(info.status, AgentStatus::Active);
+        assert_eq!(info.status, AgentConnectionStatus::Active);
         assert_eq!(info.capabilities, Some(vec!["tool_a".to_string()]));
     }
 
@@ -356,16 +356,16 @@ mod tests {
             .register_agent("agent-hb2".to_string(), "conn".to_string(), None)
             .await
             .unwrap();
-        registry.update_status("agent-hb2", AgentStatus::Idle).await;
+        registry.update_status("agent-hb2", AgentConnectionStatus::Idle).await;
         assert_eq!(
             registry.get_agent("agent-hb2").await.unwrap().status,
-            AgentStatus::Idle
+            AgentConnectionStatus::Idle
         );
 
         registry.update_heartbeat("agent-hb2").await;
         assert_eq!(
             registry.get_agent("agent-hb2").await.unwrap().status,
-            AgentStatus::Active
+            AgentConnectionStatus::Active
         );
     }
 
@@ -385,11 +385,11 @@ mod tests {
             .register_agent("agent-s".to_string(), "conn".to_string(), None)
             .await
             .unwrap();
-        registry.update_status("agent-s", AgentStatus::Idle).await;
+        registry.update_status("agent-s", AgentConnectionStatus::Idle).await;
 
         assert_eq!(
             registry.get_agent("agent-s").await.unwrap().status,
-            AgentStatus::Idle
+            AgentConnectionStatus::Idle
         );
     }
 
@@ -401,19 +401,19 @@ mod tests {
             .await
             .unwrap();
         registry
-            .update_status("agent-d", AgentStatus::Disconnected)
+            .update_status("agent-d", AgentConnectionStatus::Disconnected)
             .await;
 
         assert_eq!(
             registry.get_agent("agent-d").await.unwrap().status,
-            AgentStatus::Disconnected
+            AgentConnectionStatus::Disconnected
         );
     }
 
     #[tokio::test]
     async fn test_update_status_missing_agent_no_panic() {
         let registry = AgentRegistry::new();
-        registry.update_status("ghost", AgentStatus::Idle).await;
+        registry.update_status("ghost", AgentConnectionStatus::Idle).await;
         // No agent added, no panic
         assert!(registry.get_agent("ghost").await.is_none());
     }
@@ -436,9 +436,9 @@ mod tests {
             .await
             .unwrap();
 
-        registry.update_status("a-idle", AgentStatus::Idle).await;
+        registry.update_status("a-idle", AgentConnectionStatus::Idle).await;
         registry
-            .update_status("a-disc", AgentStatus::Disconnected)
+            .update_status("a-disc", AgentConnectionStatus::Disconnected)
             .await;
 
         assert_eq!(registry.active_count().await, 1);
@@ -463,7 +463,7 @@ mod tests {
             .register_agent("a1".to_string(), "c1".to_string(), None)
             .await
             .unwrap();
-        registry.update_status("a1", AgentStatus::Idle).await;
+        registry.update_status("a1", AgentConnectionStatus::Idle).await;
         assert_eq!(registry.active_count().await, 0);
     }
 
@@ -584,40 +584,40 @@ mod tests {
         assert!(registry.list_agents().await.is_empty());
     }
 
-    // ── AgentInfo / AgentStatus serialization ──
+    // ── AgentInfo / AgentConnectionStatus serialization ──
 
     #[test]
     fn test_agent_status_serialize_lowercase() {
-        let json = serde_json::to_string(&AgentStatus::Active).unwrap();
+        let json = serde_json::to_string(&AgentConnectionStatus::Active).unwrap();
         assert_eq!(json, "\"active\"");
-        let json = serde_json::to_string(&AgentStatus::Idle).unwrap();
+        let json = serde_json::to_string(&AgentConnectionStatus::Idle).unwrap();
         assert_eq!(json, "\"idle\"");
-        let json = serde_json::to_string(&AgentStatus::Disconnected).unwrap();
+        let json = serde_json::to_string(&AgentConnectionStatus::Disconnected).unwrap();
         assert_eq!(json, "\"disconnected\"");
     }
 
     #[test]
     fn test_agent_status_deserialize_lowercase() {
-        let status: AgentStatus = serde_json::from_str("\"active\"").unwrap();
-        assert_eq!(status, AgentStatus::Active);
-        let status: AgentStatus = serde_json::from_str("\"idle\"").unwrap();
-        assert_eq!(status, AgentStatus::Idle);
-        let status: AgentStatus = serde_json::from_str("\"disconnected\"").unwrap();
-        assert_eq!(status, AgentStatus::Disconnected);
+        let status: AgentConnectionStatus = serde_json::from_str("\"active\"").unwrap();
+        assert_eq!(status, AgentConnectionStatus::Active);
+        let status: AgentConnectionStatus = serde_json::from_str("\"idle\"").unwrap();
+        assert_eq!(status, AgentConnectionStatus::Idle);
+        let status: AgentConnectionStatus = serde_json::from_str("\"disconnected\"").unwrap();
+        assert_eq!(status, AgentConnectionStatus::Disconnected);
     }
 
     #[test]
     fn test_agent_status_equality() {
-        assert_eq!(AgentStatus::Active, AgentStatus::Active);
-        assert_ne!(AgentStatus::Active, AgentStatus::Idle);
-        assert_ne!(AgentStatus::Idle, AgentStatus::Disconnected);
+        assert_eq!(AgentConnectionStatus::Active, AgentConnectionStatus::Active);
+        assert_ne!(AgentConnectionStatus::Active, AgentConnectionStatus::Idle);
+        assert_ne!(AgentConnectionStatus::Idle, AgentConnectionStatus::Disconnected);
     }
 
     #[test]
     fn test_agent_info_serialize() {
         let info = AgentInfo {
             agent_id: "test-agent".to_string(),
-            status: AgentStatus::Active,
+            status: AgentConnectionStatus::Active,
             lifecycle: None,
             capabilities: Some(vec!["tool1".to_string(), "tool2".to_string()]),
             connected_at: "2024-01-01T00:00:00+00:00".to_string(),
@@ -634,7 +634,7 @@ mod tests {
     fn test_agent_info_serialize_skips_none_capabilities() {
         let info = AgentInfo {
             agent_id: "a".to_string(),
-            status: AgentStatus::Idle,
+            status: AgentConnectionStatus::Idle,
             lifecycle: None,
             capabilities: None,
             connected_at: "2024-01-01T00:00:00+00:00".to_string(),
@@ -649,7 +649,7 @@ mod tests {
     fn test_agent_info_roundtrip() {
         let info = AgentInfo {
             agent_id: "roundtrip".to_string(),
-            status: AgentStatus::Disconnected,
+            status: AgentConnectionStatus::Disconnected,
             lifecycle: None,
             capabilities: Some(vec!["x".to_string()]),
             connected_at: "2024-06-01T12:00:00+00:00".to_string(),

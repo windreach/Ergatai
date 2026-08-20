@@ -280,21 +280,15 @@ impl FileToken {
 pub enum TokenStatus {
     /// Token is active and valid.
     Active,
-    /// Token is being upgraded (READ → WRITE).
-    Upgrading,
     /// Token has expired.
     Expired,
-    /// Token has been revoked.
-    Revoked,
 }
 
 impl std::fmt::Display for TokenStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             TokenStatus::Active => write!(f, "ACTIVE"),
-            TokenStatus::Upgrading => write!(f, "UPGRADING"),
             TokenStatus::Expired => write!(f, "EXPIRED"),
-            TokenStatus::Revoked => write!(f, "REVOKED"),
         }
     }
 }
@@ -434,9 +428,7 @@ mod tests {
     #[test]
     fn test_token_status_display_all_variants() {
         assert_eq!(TokenStatus::Active.to_string(), "ACTIVE");
-        assert_eq!(TokenStatus::Upgrading.to_string(), "UPGRADING");
         assert_eq!(TokenStatus::Expired.to_string(), "EXPIRED");
-        assert_eq!(TokenStatus::Revoked.to_string(), "REVOKED");
     }
 
     #[test]
@@ -516,32 +508,6 @@ mod tests {
             30,
         );
         std::thread::sleep(std::time::Duration::from_millis(2));
-        assert!(!token.is_valid());
-    }
-
-    #[test]
-    fn test_system_token_invalid_when_revoked() {
-        let mut token = SystemToken::new(
-            "agent".to_string(),
-            "session".to_string(),
-            "/project".to_string(),
-            3600,
-            30,
-        );
-        token.status = TokenStatus::Revoked;
-        assert!(!token.is_valid());
-    }
-
-    #[test]
-    fn test_system_token_invalid_when_upgrading() {
-        let mut token = SystemToken::new(
-            "agent".to_string(),
-            "session".to_string(),
-            "/project".to_string(),
-            3600,
-            30,
-        );
-        token.status = TokenStatus::Upgrading;
         assert!(!token.is_valid());
     }
 
@@ -763,9 +729,7 @@ mod tests {
     fn test_token_status_serde_roundtrip() {
         let statuses = vec![
             TokenStatus::Active,
-            TokenStatus::Upgrading,
             TokenStatus::Expired,
-            TokenStatus::Revoked,
         ];
         for status in statuses {
             let json = serde_json::to_string(&status).unwrap();

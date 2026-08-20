@@ -6,23 +6,16 @@
 //!
 //! # States
 //!
-//! The agent lifecycle consists of 15 states covering all phases of agent execution:
+//! The agent lifecycle consists of 8 states covering all phases of agent execution:
 //!
 //! - **Created**: Agent created but not yet initialized
 //! - **Initializing**: Loading context, configuration, and dependencies
-//! - **WaitingForResources**: Waiting for locks, concurrency slots, or dependencies
 //! - **Idle**: Ready to accept work but has no assigned task
 //! - **Starting**: Agent process starting (workspace created, process spawning)
 //! - **Running**: Agent running and ready to accept tasks
 //! - **Processing**: Processing a specific message or task
 //! - **Stopping**: Agent stopping gracefully (shutdown in progress)
-//! - **Terminated**: Agent terminated successfully
-//! - **Failed**: Agent failed with error
-//! - **TimedOut**: Agent timed out (heartbeat missed or max runtime exceeded)
-//! - **Signaled**: Agent killed by signal
-//! - **Paused**: Agent paused (suspended execution)
-//! - **Reconnecting**: Agent reconnecting after disconnect
-//! - **Maintenance**: Agent in maintenance mode (manual intervention required)
+//! - **Terminated**: Agent terminated (outcome describes why: exited, error, timeout, or signal)
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -42,21 +35,6 @@ pub enum ProcessingPhase {
     Reviewing,
     /// Custom phase (user-defined)
     Custom(String),
-}
-
-/// Resource type being waited for
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ResourceType {
-    /// Waiting for file lock
-    FileLock,
-    /// Waiting for concurrency slot
-    ConcurrencySlot,
-    /// Waiting for dependency task completion
-    DependencyTask,
-    /// Waiting for token (file access token)
-    Token,
-    /// Waiting for network resource
-    NetworkResource,
 }
 
 /// Reason for stopping
@@ -87,6 +65,39 @@ pub enum TimeoutType {
     TaskTimeout,
 }
 
+/// Exit outcome — describes why an agent terminated.
+///
+/// Consolidates four previously-separate terminal states (Terminated, Failed,
+/// TimedOut, Signaled) into a single enum carried by the unified `Terminated`
+/// state variant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExitOutcome {
+    /// Agent exited normally with an exit code.
+    Exited {
+        /// Exit code (0 = success)
+        exit_code: Option<i32>,
+    },
+    /// Agent failed with an error.
+    Error {
+        /// Error message
+        error: String,
+        /// Whether the failure is retryable
+        retryable: bool,
+    },
+    /// Agent timed out (heartbeat missed or max runtime exceeded).
+    TimedOut {
+        /// Type of timeout
+        timeout_type: TimeoutType,
+        /// Last heartbeat before timeout
+        last_heartbeat: DateTime<Utc>,
+    },
+    /// Agent killed by signal (SIGTERM, SIGKILL, etc.).
+    Signaled {
+        /// Signal number (e.g., 9 = SIGKILL, 15 = SIGTERM)
+        signal: i32,
+    },
+}
+
 /// Agent lifecycle state machine.
 ///
 /// This enum defines all possible states an agent can be in during its lifecycle.
@@ -108,18 +119,6 @@ pub enum AgentLifecycleState {
         started_at: DateTime<Utc>,
         /// Source of context (e.g., file path, URL)
         context_source: Option<String>,
-    },
-
-    /// Waiting for resources (locks, concurrency slots, dependencies)
-    ///
-    /// Agent is blocked waiting for a resource to become available.
-    WaitingForResources {
-        /// Type of resource being waited for
-        resource_type: ResourceType,
-        /// When the wait started
-        waiting_since: DateTime<Utc>,
-        /// Human-readable reason for the wait
-        reason: String,
     },
 
     /// Ready to accept work but idle
@@ -182,93 +181,23 @@ pub enum AgentLifecycleState {
         timeout_secs: Option<u64>,
     },
 
-    /// Agent terminated successfully
+    /// Agent terminated (terminal state).
     ///
-    /// Agent has exited normally (terminal state).
+    /// The agent has exited. The `outcome` field describes why.
     Terminated {
-        /// Exit code (0 = success)
-        exit_code: Option<i32>,
+        /// Why the agent terminated
+        outcome: ExitOutcome,
         /// When the agent terminated
         terminated_at: DateTime<Utc>,
         /// Total runtime duration (seconds)
         duration_secs: u64,
-    },
-
-    /// Agent failed with error
-    ///
-    /// Agent encountered an error and terminated abnormally (terminal state).
-    Failed {
-        /// Error message
-        error: String,
-        /// Whether the failure is retryable
-        retryable: bool,
-        /// When the failure occurred
-        failed_at: DateTime<Utc>,
-    },
-
-    /// Agent timed out (heartbeat missed or max runtime exceeded)
-    ///
-    /// Agent stopped responding or exceeded its maximum runtime (terminal state).
-    TimedOut {
-        /// Type of timeout
-        timeout_type: TimeoutType,
-        /// When the timeout was detected
-        detected_at: DateTime<Utc>,
-        /// Last heartbeat before timeout
-        last_heartbeat: DateTime<Utc>,
-    },
-
-    /// Agent killed by signal
-    ///
-    /// Agent was terminated by a signal (SIGTERM, SIGKILL, etc.) (terminal state).
-    Signaled {
-        /// Signal number (e.g., 9 = SIGKILL, 15 = SIGTERM)
-        signal: i32,
-        /// When the signal was received
-        signaled_at: DateTime<Utc>,
-    },
-
-    /// Agent paused (suspended execution)
-    ///
-    /// Agent execution has been temporarily suspended.
-    Paused {
-        /// When the agent was paused
-        paused_at: DateTime<Utc>,
-        /// Reason for pausing
-        reason: Option<String>,
-    },
-
-    /// Agent reconnecting after disconnect
-    ///
-    /// Agent lost connection and is attempting to reconnect.
-    Reconnecting {
-        /// Reconnection attempt number
-        attempt: u32,
-        /// When reconnection started
-        reconnecting_since: DateTime<Utc>,
-    },
-
-    /// Agent in maintenance mode (manual intervention required)
-    ///
-    /// Agent requires manual intervention or is undergoing maintenance.
-    Maintenance {
-        /// When maintenance mode was entered
-        entered_at: DateTime<Utc>,
-        /// Reason for maintenance
-        reason: String,
     },
 }
 
 impl AgentLifecycleState {
     /// Check if the agent is in a terminal state
     pub fn is_terminal(&self) -> bool {
-        matches!(
-            self,
-            AgentLifecycleState::Terminated { .. }
-                | AgentLifecycleState::Failed { .. }
-                | AgentLifecycleState::TimedOut { .. }
-                | AgentLifecycleState::Signaled { .. }
-        )
+        matches!(self, AgentLifecycleState::Terminated { .. })
     }
 
     /// Check if the agent is alive (not in a terminal state)
@@ -286,11 +215,6 @@ impl AgentLifecycleState {
         matches!(self, AgentLifecycleState::Processing { .. })
     }
 
-    /// Check if the agent is waiting for resources
-    pub fn is_waiting(&self) -> bool {
-        matches!(self, AgentLifecycleState::WaitingForResources { .. })
-    }
-
     /// Get the task ID if the agent is processing a task
     pub fn task_id(&self) -> Option<&str> {
         match self {
@@ -305,34 +229,7 @@ impl AgentLifecycleState {
         match self {
             AgentLifecycleState::Running { last_heartbeat, .. } => Some(*last_heartbeat),
             AgentLifecycleState::Processing { .. } => None, // Could be extended to track heartbeat
-            AgentLifecycleState::TimedOut { last_heartbeat, .. } => Some(*last_heartbeat),
             _ => None,
-        }
-    }
-
-    /// Convert to the legacy `AgentState` enum for backward compatibility.
-    ///
-    /// This is a lossy mapping from the 15-state lifecycle to the 5-state legacy enum.
-    /// Used only to keep the deprecated `state` field in sync with `lifecycle`.
-    #[allow(deprecated)]
-    pub fn to_legacy_state(&self) -> crate::types::AgentState {
-        use crate::types::AgentState;
-        match self {
-            AgentLifecycleState::Created => AgentState::Starting,
-            AgentLifecycleState::Initializing { .. } => AgentState::Starting,
-            AgentLifecycleState::WaitingForResources { .. } => AgentState::Starting,
-            AgentLifecycleState::Idle { .. } => AgentState::Running,
-            AgentLifecycleState::Starting { .. } => AgentState::Starting,
-            AgentLifecycleState::Running { .. } => AgentState::Running,
-            AgentLifecycleState::Processing { .. } => AgentState::Running,
-            AgentLifecycleState::Stopping { .. } => AgentState::Stopping,
-            AgentLifecycleState::Terminated { .. } => AgentState::Stopped,
-            AgentLifecycleState::Failed { error, .. } => AgentState::Failed(error.clone()),
-            AgentLifecycleState::TimedOut { .. } => AgentState::Stopped,
-            AgentLifecycleState::Signaled { .. } => AgentState::Stopped,
-            AgentLifecycleState::Paused { .. } => AgentState::Stopped,
-            AgentLifecycleState::Reconnecting { .. } => AgentState::Starting,
-            AgentLifecycleState::Maintenance { .. } => AgentState::Running,
         }
     }
 
@@ -341,19 +238,12 @@ impl AgentLifecycleState {
         match self {
             AgentLifecycleState::Created => "created",
             AgentLifecycleState::Initializing { .. } => "initializing",
-            AgentLifecycleState::WaitingForResources { .. } => "waiting_for_resources",
             AgentLifecycleState::Idle { .. } => "idle",
             AgentLifecycleState::Starting { .. } => "starting",
             AgentLifecycleState::Running { .. } => "running",
             AgentLifecycleState::Processing { .. } => "processing",
             AgentLifecycleState::Stopping { .. } => "stopping",
             AgentLifecycleState::Terminated { .. } => "terminated",
-            AgentLifecycleState::Failed { .. } => "failed",
-            AgentLifecycleState::TimedOut { .. } => "timed_out",
-            AgentLifecycleState::Signaled { .. } => "signaled",
-            AgentLifecycleState::Paused { .. } => "paused",
-            AgentLifecycleState::Reconnecting { .. } => "reconnecting",
-            AgentLifecycleState::Maintenance { .. } => "maintenance",
         }
     }
 }
@@ -387,16 +277,19 @@ mod tests {
     #[test]
     fn test_is_terminal() {
         assert!(AgentLifecycleState::Terminated {
-            exit_code: Some(0),
+            outcome: ExitOutcome::Exited { exit_code: Some(0) },
             terminated_at: Utc::now(),
             duration_secs: 100
         }
         .is_terminal());
 
-        assert!(AgentLifecycleState::Failed {
-            error: "test".to_string(),
-            retryable: false,
-            failed_at: Utc::now()
+        assert!(AgentLifecycleState::Terminated {
+            outcome: ExitOutcome::Error {
+                error: "test".to_string(),
+                retryable: false,
+            },
+            terminated_at: Utc::now(),
+            duration_secs: 0
         }
         .is_terminal());
 
@@ -418,7 +311,7 @@ mod tests {
         .is_alive());
 
         assert!(!AgentLifecycleState::Terminated {
-            exit_code: Some(0),
+            outcome: ExitOutcome::Exited { exit_code: Some(0) },
             terminated_at: Utc::now(),
             duration_secs: 100
         }
@@ -494,23 +387,6 @@ mod tests {
             let json = serde_json::to_string(&phase).unwrap();
             let decoded: ProcessingPhase = serde_json::from_str(&json).unwrap();
             assert_eq!(phase, decoded);
-        }
-    }
-
-    #[test]
-    fn test_resource_types() {
-        let types = vec![
-            ResourceType::FileLock,
-            ResourceType::ConcurrencySlot,
-            ResourceType::DependencyTask,
-            ResourceType::Token,
-            ResourceType::NetworkResource,
-        ];
-
-        for resource_type in types {
-            let json = serde_json::to_string(&resource_type).unwrap();
-            let decoded: ResourceType = serde_json::from_str(&json).unwrap();
-            assert_eq!(resource_type, decoded);
         }
     }
 

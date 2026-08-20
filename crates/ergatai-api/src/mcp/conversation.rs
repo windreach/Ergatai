@@ -150,14 +150,20 @@ pub enum ConversationState {
     /// Conversation is active and accepting messages
     Active,
 
-    /// Conversation completed normally (TERMINATE keyword or max turns reached)
+    /// Conversation terminated (reason describes why).
+    Terminated {
+        /// Why the conversation was terminated
+        reason: TerminationReason,
+    },
+}
+
+/// Why a conversation was terminated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TerminationReason {
+    /// Completed normally (TERMINATE keyword or max turns/auto-replies reached).
     Completed,
-
-    /// Conversation failed (error or timeout)
-    Failed,
-
-    /// Conversation was manually canceled
-    Canceled,
+    /// Failed due to error or timeout.
+    TimedOut,
 }
 
 impl Conversation {
@@ -187,10 +193,7 @@ impl Conversation {
 
     /// Check if the conversation is in a terminal state.
     pub fn is_terminal(&self) -> bool {
-        matches!(
-            self.state,
-            ConversationState::Completed | ConversationState::Failed | ConversationState::Canceled
-        )
+        matches!(self.state, ConversationState::Terminated { .. })
     }
 
     /// Get the other participant given one participant.
@@ -267,7 +270,9 @@ impl ConversationManager {
                 max_secs = self.config.max_execution_time_secs,
                 "Conversation timeout"
             );
-            conv.state = ConversationState::Failed;
+            conv.state = ConversationState::Terminated {
+                reason: TerminationReason::TimedOut,
+            };
             return Err(ErgataiError::internal(format!(
                 "Conversation {} exceeded max execution time ({}s). Start a new conversation.",
                 conv.id, self.config.max_execution_time_secs
@@ -290,7 +295,9 @@ impl ConversationManager {
                 max = self.config.max_consecutive_auto_reply,
                 "Max consecutive auto-replies reached"
             );
-            conv.state = ConversationState::Completed;
+            conv.state = ConversationState::Terminated {
+                reason: TerminationReason::Completed,
+            };
             return Err(ErgataiError::internal(format!(
                 "Agent {} exceeded max consecutive auto-replies ({}). Conversation {} terminated.",
                 from, self.config.max_consecutive_auto_reply, conv.id
@@ -448,7 +455,7 @@ impl ConversationManager {
     pub async fn terminate_conversation(
         &self,
         conv_id: &str,
-        state: ConversationState,
+        reason: TerminationReason,
     ) -> ErgataiResult<()> {
         let mut conversations = self.conversations.write().await;
 
@@ -459,8 +466,8 @@ impl ConversationManager {
                     conv_id
                 )));
             }
-            conv.state = state;
-            info!(conv_id = %conv_id, state = ?state, "Conversation terminated");
+            conv.state = ConversationState::Terminated { reason };
+            info!(conv_id = %conv_id, reason = ?reason, "Conversation terminated");
             Ok(())
         } else {
             Err(ErgataiError::internal(format!(
@@ -572,13 +579,14 @@ mod tests {
         let mut conv = Conversation::new("a", "b");
         assert!(!conv.is_terminal());
 
-        conv.state = ConversationState::Completed;
+        conv.state = ConversationState::Terminated {
+            reason: TerminationReason::Completed,
+        };
         assert!(conv.is_terminal());
 
-        conv.state = ConversationState::Failed;
-        assert!(conv.is_terminal());
-
-        conv.state = ConversationState::Canceled;
+        conv.state = ConversationState::Terminated {
+            reason: TerminationReason::TimedOut,
+        };
         assert!(conv.is_terminal());
     }
 
@@ -837,7 +845,7 @@ mod tests {
 
         // Terminate one
         manager
-            .terminate_conversation("conv-agent_a-agent_b", ConversationState::Completed)
+            .terminate_conversation("conv-agent_a-agent_b", TerminationReason::Completed)
             .await
             .unwrap();
 

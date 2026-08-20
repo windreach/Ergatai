@@ -329,7 +329,7 @@ mod tests {
         // Terminated state
         record.transition_to(
             AgentLifecycleState::Terminated {
-                exit_code: Some(0),
+                outcome: crate::agent_lifecycle::ExitOutcome::Exited { exit_code: Some(0) },
                 terminated_at: Utc::now(),
                 duration_secs: 100,
             },

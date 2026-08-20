@@ -51,7 +51,7 @@ pub mod runtime;
 
 // Re-export primary API
 pub use agent_lifecycle::{
-    AgentLifecycleState, ProcessingPhase, ResourceType, StopReason, TimeoutType,
+    AgentLifecycleState, ExitOutcome, ProcessingPhase, StopReason, TimeoutType,
 };
 pub use agent_record::{
     AgentHandle as RecordAgentHandle, AgentRecord, StateTransition,
@@ -64,6 +64,6 @@ pub use backends::rmux::{ManagedPaneInfo, RmuxBackend, RmuxDaemonInfo};
 pub use rmux_sdk::RmuxEndpoint;
 pub use runtime::{get_agent_runtime, init_agent_runtime, AgentRuntime};
 pub use types::{
-    AgentHandle, AgentInfo, AgentState, BackendCapabilities, ResourceLimits, WaitResult,
+    AgentHandle, AgentInfo, BackendCapabilities, ResourceLimits, WaitResult,
     WorkspaceHandle, WorkspaceSpec,
 };

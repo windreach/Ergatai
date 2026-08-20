@@ -518,9 +518,7 @@ impl FileLockManager {
                     .with_timezone(&Utc),
                 status: match row.get::<_, String>(8)?.as_str() {
                     "ACTIVE" => TokenStatus::Active,
-                    "UPGRADING" => TokenStatus::Upgrading,
                     "EXPIRED" => TokenStatus::Expired,
-                    "REVOKED" => TokenStatus::Revoked,
                     _ => TokenStatus::Expired,
                 },
             })
@@ -1623,9 +1621,7 @@ impl FileLockManager {
                         .with_timezone(&Utc),
                     status: match row.get::<_, String>(8)?.as_str() {
                         "ACTIVE" => TokenStatus::Active,
-                        "UPGRADING" => TokenStatus::Upgrading,
                         "EXPIRED" => TokenStatus::Expired,
-                        "REVOKED" => TokenStatus::Revoked,
                         _ => TokenStatus::Expired,
                     },
                 })
@@ -1690,9 +1686,7 @@ impl FileLockManager {
                         .with_timezone(&Utc),
                     status: match row.get::<_, String>(8)?.as_str() {
                         "ACTIVE" => TokenStatus::Active,
-                        "UPGRADING" => TokenStatus::Upgrading,
                         "EXPIRED" => TokenStatus::Expired,
-                        "REVOKED" => TokenStatus::Revoked,
                         _ => TokenStatus::Expired,
                     },
                 })
@@ -1763,9 +1757,7 @@ impl FileLockManager {
                         .with_timezone(&Utc),
                     status: match row.get::<_, String>(13)?.as_str() {
                         "ACTIVE" => TokenStatus::Active,
-                        "UPGRADING" => TokenStatus::Upgrading,
                         "EXPIRED" => TokenStatus::Expired,
-                        "REVOKED" => TokenStatus::Revoked,
                         _ => TokenStatus::Expired,
                     },
                 })
@@ -3119,12 +3111,8 @@ fn parse_file_mode(s: &str) -> FileMode {
 fn parse_token_status(s: &str) -> TokenStatus {
     if s.eq_ignore_ascii_case("ACTIVE") {
         TokenStatus::Active
-    } else if s.eq_ignore_ascii_case("UPGRADING") {
-        TokenStatus::Upgrading
     } else if s.eq_ignore_ascii_case("EXPIRED") {
         TokenStatus::Expired
-    } else if s.eq_ignore_ascii_case("REVOKED") {
-        TokenStatus::Revoked
     } else {
         tracing::warn!(
             status = s,
@@ -3190,9 +3178,7 @@ fn parse_file_lock_row(row: &rusqlite::Row) -> rusqlite::Result<FileLock> {
             .with_timezone(&Utc),
         status: match row.get::<_, String>(13)?.as_str() {
             "ACTIVE" => TokenStatus::Active,
-            "UPGRADING" => TokenStatus::Upgrading,
             "EXPIRED" => TokenStatus::Expired,
-            "REVOKED" => TokenStatus::Revoked,
             _ => TokenStatus::Expired,
         },
     })

@@ -17,7 +17,7 @@ use tracing::{debug, error, info, warn};
 use ergatai_error::{ErgataiError, ErgataiResult};
 
 use crate::backend::AgentRuntimeBackend;
-use crate::types::{AgentHandle, AgentInfo, AgentState, WaitResult, WorkspaceSpec};
+use crate::types::{AgentHandle, AgentInfo, WaitResult, WorkspaceSpec};
 
 // ── Global singleton ──
 
@@ -147,8 +147,6 @@ impl AgentRuntime {
             display_name: None,
             workspace_id: spec.id,
             handle: handle.clone(),
-            #[allow(deprecated)]
-            state: AgentState::Running,
             lifecycle: crate::agent_lifecycle::AgentLifecycleState::Running {
                 task_id: None,
                 started_at: now,
@@ -304,8 +302,6 @@ impl AgentRuntime {
             display_name: None,
             workspace_id: handle.workspace.id.clone(),
             handle,
-            #[allow(deprecated)]
-            state: AgentState::Running,
             lifecycle: crate::agent_lifecycle::AgentLifecycleState::Running {
                 task_id: None,
                 started_at: now,
@@ -353,8 +349,6 @@ impl AgentRuntime {
                     display_name: None,
                     workspace_id: handle.workspace.id.clone(),
                     handle,
-                    #[allow(deprecated)]
-                    state: AgentState::Running,
                     lifecycle: crate::agent_lifecycle::AgentLifecycleState::Running {
                         task_id: None,
                         started_at: now,
@@ -705,7 +699,6 @@ impl AgentRuntime {
     /// Update agent lifecycle state (preferred).
     ///
     /// Transitions the agent's `lifecycle` field to the new state.
-    /// Also updates the deprecated `state` field for backward compatibility.
     pub async fn set_agent_lifecycle(
         &self,
         agent_id: &str,
@@ -716,25 +709,6 @@ impl AgentRuntime {
             .get_mut(agent_id)
             .ok_or_else(|| ErgataiError::internal(format!("Agent {} not found", agent_id)))?;
         info.lifecycle = new_state;
-        // Keep deprecated state field in sync
-        #[allow(deprecated)]
-        {
-            info.state = info.lifecycle.to_legacy_state();
-        }
-        Ok(())
-    }
-
-    /// Update agent state.
-    #[deprecated(note = "Use `set_agent_lifecycle` instead. This method will be removed.")]
-    pub async fn set_agent_state(&self, agent_id: &str, state: AgentState) -> ErgataiResult<()> {
-        let mut registry = self.registry.write().await;
-        let info = registry
-            .get_mut(agent_id)
-            .ok_or_else(|| ErgataiError::internal(format!("Agent {} not found", agent_id)))?;
-        #[allow(deprecated)]
-        {
-            info.state = state;
-        }
         Ok(())
     }
 
@@ -812,7 +786,7 @@ impl AgentRuntime {
                             "Agent exited successfully"
                         );
                         AgentLifecycleState::Terminated {
-                            exit_code: Some(0),
+                            outcome: crate::agent_lifecycle::ExitOutcome::Exited { exit_code: Some(0) },
                             terminated_at: now,
                             duration_secs: 0, // placeholder, recomputed below
                         }
@@ -822,10 +796,13 @@ impl AgentRuntime {
                             code = code,
                             "Agent exited with error code"
                         );
-                        AgentLifecycleState::Failed {
-                            error: format!("Agent exited with code {}", code),
-                            retryable: false,
-                            failed_at: now,
+                        AgentLifecycleState::Terminated {
+                            outcome: crate::agent_lifecycle::ExitOutcome::Error {
+                                error: format!("Agent exited with code {}", code),
+                                retryable: false,
+                            },
+                            terminated_at: now,
+                            duration_secs: 0,
                         }
                     }
                 }
@@ -835,33 +812,43 @@ impl AgentRuntime {
                         signal = signal,
                         "Agent killed by signal"
                     );
-                    AgentLifecycleState::Signaled {
-                        signal,
-                        signaled_at: now,
+                    AgentLifecycleState::Terminated {
+                        outcome: crate::agent_lifecycle::ExitOutcome::Signaled { signal },
+                        terminated_at: now,
+                        duration_secs: 0,
                     }
                 }
                 Ok(Ok(crate::types::WaitResult::Timeout)) => {
                     warn!(agent_id = agent_id, "Agent monitor timed out (unexpected)");
-                    AgentLifecycleState::TimedOut {
-                        timeout_type: crate::agent_lifecycle::TimeoutType::MaxRuntime,
-                        detected_at: now,
-                        last_heartbeat: now,
+                    AgentLifecycleState::Terminated {
+                        outcome: crate::agent_lifecycle::ExitOutcome::TimedOut {
+                            timeout_type: crate::agent_lifecycle::TimeoutType::MaxRuntime,
+                            last_heartbeat: now,
+                        },
+                        terminated_at: now,
+                        duration_secs: 0,
                     }
                 }
                 Ok(Ok(crate::types::WaitResult::Error(e))) => {
                     error!(agent_id = agent_id, error = %e, "Agent monitor error");
-                    AgentLifecycleState::Failed {
-                        error: e,
-                        retryable: true,
-                        failed_at: now,
+                    AgentLifecycleState::Terminated {
+                        outcome: crate::agent_lifecycle::ExitOutcome::Error {
+                            error: e,
+                            retryable: true,
+                        },
+                        terminated_at: now,
+                        duration_secs: 0,
                     }
                 }
                 Ok(Err(e)) => {
                     error!(agent_id = agent_id, error = %e, "Agent wait failed");
-                    AgentLifecycleState::Failed {
-                        error: format!("Backend wait failed: {}", e),
-                        retryable: true,
-                        failed_at: now,
+                    AgentLifecycleState::Terminated {
+                        outcome: crate::agent_lifecycle::ExitOutcome::Error {
+                            error: format!("Backend wait failed: {}", e),
+                            retryable: true,
+                        },
+                        terminated_at: now,
+                        duration_secs: 0,
                     }
                 }
                 Err(_) => {
@@ -870,33 +857,32 @@ impl AgentRuntime {
                         agent_id = agent_id,
                         "Agent monitor timed out after 24h, forcing TimedOut state"
                     );
-                    AgentLifecycleState::TimedOut {
-                        timeout_type: crate::agent_lifecycle::TimeoutType::MaxRuntime,
-                        detected_at: now,
-                        last_heartbeat: now,
+                    AgentLifecycleState::Terminated {
+                        outcome: crate::agent_lifecycle::ExitOutcome::TimedOut {
+                            timeout_type: crate::agent_lifecycle::TimeoutType::MaxRuntime,
+                            last_heartbeat: now,
+                        },
+                        terminated_at: now,
+                        duration_secs: 0,
                     }
                 }
             };
 
             let mut reg = registry.write().await;
             if let Some(info) = reg.get_mut(&agent_id) {
-                #[allow(deprecated)]
-                {
-                    info.state = terminal_state.to_legacy_state();
-                }
                 // Fill in the real duration for Terminated states
                 let final_state = match terminal_state {
                     AgentLifecycleState::Terminated {
-                        exit_code,
+                        outcome,
                         terminated_at,
-                        ..
+                        duration_secs: _,
                     } => {
                         let duration_secs = now
                             .signed_duration_since(info.created_at)
                             .num_seconds()
                             .max(0) as u64;
                         AgentLifecycleState::Terminated {
-                            exit_code,
+                            outcome,
                             terminated_at,
                             duration_secs,
                         }
@@ -1081,11 +1067,6 @@ mod tests {
             info.lifecycle,
             crate::agent_lifecycle::AgentLifecycleState::Running { .. }
         ));
-        // Legacy state field should also be in sync
-        #[allow(deprecated)]
-        {
-            assert_eq!(info.state, AgentState::Running);
-        }
     }
 
     #[tokio::test]
@@ -1216,11 +1197,6 @@ mod tests {
             info.lifecycle,
             crate::agent_lifecycle::AgentLifecycleState::Stopping { .. }
         ));
-        // Legacy state field should be kept in sync
-        #[allow(deprecated)]
-        {
-            assert_eq!(info.state, AgentState::Stopping);
-        }
     }
 
     #[tokio::test]
@@ -1230,29 +1206,13 @@ mod tests {
             .set_agent_lifecycle(
                 "nonexistent",
                 crate::agent_lifecycle::AgentLifecycleState::Terminated {
-                    exit_code: Some(0),
+                    outcome: crate::agent_lifecycle::ExitOutcome::Exited { exit_code: Some(0) },
                     terminated_at: chrono::Utc::now(),
                     duration_secs: 0,
                 },
             )
             .await;
         assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    #[allow(deprecated)]
-    async fn test_set_agent_state_deprecated() {
-        let runtime = make_runtime();
-        let agent_id = runtime
-            .launch_agent(make_spec("ws-1"), "cmd", None)
-            .await
-            .unwrap();
-        runtime
-            .set_agent_state(&agent_id, AgentState::Stopping)
-            .await
-            .unwrap();
-        let info = runtime.get_agent(&agent_id).await.unwrap();
-        assert_eq!(info.state, AgentState::Stopping);
     }
 
     #[tokio::test]

@@ -443,7 +443,7 @@ pub struct AgentStateCounts {
 mod tests {
     use super::*;
     use ergatai_runtime::{
-        RecordAgentHandle as AgentHandle, RecordWorkspaceHandle as WorkspaceHandle,
+        ExitOutcome, RecordAgentHandle as AgentHandle, RecordWorkspaceHandle as WorkspaceHandle,
     };
 
     fn create_test_record(agent_uuid: &str, agent_id: &str) -> AgentRecord {
@@ -538,7 +538,7 @@ mod tests {
             .transition_state(
                 "uuid-5",
                 AgentLifecycleState::Terminated {
-                    exit_code: Some(0),
+                    outcome: ExitOutcome::Exited { exit_code: Some(0) },
                     terminated_at: Utc::now(),
                     duration_secs: 100,
                 },

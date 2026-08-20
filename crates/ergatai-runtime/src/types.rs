@@ -79,25 +79,6 @@ pub struct AgentHandle {
     pub metadata: HashMap<String, String>,
 }
 
-/// Agent lifecycle state.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum AgentState {
-    /// Agent is being set up (workspace created, process starting)
-    Starting,
-
-    /// Agent is running and accepting work
-    Running,
-
-    /// Agent is being stopped (graceful shutdown in progress)
-    Stopping,
-
-    /// Agent has exited (cleanly or otherwise)
-    Stopped,
-
-    /// Agent failed to start or crashed with an error message
-    Failed(String),
-}
-
 /// Result of waiting for an agent to exit.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WaitResult {
@@ -163,10 +144,6 @@ pub struct AgentInfo {
 
     /// Backend handle for this agent
     pub handle: AgentHandle,
-
-    /// Current lifecycle state (deprecated - use lifecycle instead)
-    #[deprecated(note = "Use lifecycle field instead")]
-    pub state: AgentState,
 
     /// New unified lifecycle state machine
     pub lifecycle: crate::agent_lifecycle::AgentLifecycleState,
@@ -363,30 +340,6 @@ mod tests {
     }
 
     #[test]
-    fn test_agent_state_variants() {
-        let states = [
-            AgentState::Starting,
-            AgentState::Running,
-            AgentState::Stopping,
-            AgentState::Stopped,
-            AgentState::Failed("oops".to_string()),
-        ];
-        assert_eq!(states.len(), 5);
-        assert_eq!(states[0], AgentState::Starting);
-        assert_eq!(states[4], AgentState::Failed("oops".to_string()));
-    }
-
-    #[test]
-    fn test_agent_state_failed_message() {
-        let state = AgentState::Failed("segfault".to_string());
-        if let AgentState::Failed(msg) = state {
-            assert_eq!(msg, "segfault");
-        } else {
-            panic!("Expected Failed variant");
-        }
-    }
-
-    #[test]
     fn test_wait_result_variants() {
         let exited = WaitResult::Exited { code: 0 };
         let signaled = WaitResult::Signaled { signal: 9 };
@@ -478,8 +431,6 @@ mod tests {
                 process_id: None,
                 metadata: HashMap::new(),
             },
-            #[allow(deprecated)]
-            state: AgentState::Running,
             lifecycle: crate::agent_lifecycle::AgentLifecycleState::Running {
                 task_id: None,
                 started_at: now,
@@ -494,10 +445,6 @@ mod tests {
         assert_eq!(info.agent_id, "agent-1");
         assert_eq!(info.agent_uuid, "550e8400-e29b-41d4-a716-446655440000");
         assert_eq!(info.workspace_id, "ws-1");
-        #[allow(deprecated)]
-        {
-            assert_eq!(info.state, AgentState::Running);
-        }
         assert!(info.task_id.is_none());
     }
 
@@ -519,8 +466,6 @@ mod tests {
                 process_id: None,
                 metadata: HashMap::new(),
             },
-            #[allow(deprecated)]
-            state: AgentState::Starting,
             lifecycle: crate::agent_lifecycle::AgentLifecycleState::Starting {
                 workspace_id: "ws-1".to_string(),
                 command: "test".to_string(),
