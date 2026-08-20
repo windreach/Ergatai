@@ -131,6 +131,16 @@ pub struct TaskGraph {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout: Option<u64>,
 
+    /// Cap on total agent invocations (including retries) for this DAG.
+    /// When the counter exceeds this, the DAG is finalized as failed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_agent_calls: Option<u64>,
+
+    /// Seconds of no progress (no node completed/failed) before the DAG
+    /// is declared stalled and finalized.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stall_timeout_secs: Option<u64>,
+
     /// Optional: DAG-level priority (high / medium / low) - applies to all nodes unless overridden
     #[serde(skip_serializing_if = "Option::is_none")]
     pub priority: Option<String>,
@@ -156,6 +166,8 @@ impl TaskGraph {
             dag_id: None,
             description: None,
             timeout: None,
+            max_agent_calls: None,
+            stall_timeout_secs: None,
             priority: None,
             parameters: HashMap::new(),
             communication: None,
