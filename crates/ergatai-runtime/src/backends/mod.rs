@@ -7,4 +7,5 @@
 
 pub mod direct_process;
 pub mod local_pty;
+pub mod proc_linux;
 pub mod rmux;

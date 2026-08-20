@@ -600,6 +600,51 @@ impl RmuxBackend {
         }
     }
 
+    /// Returns a snapshot of each registered agent's process state.
+    /// Used by stall/health monitoring. Non-Linux platforms see `Unknown`.
+    ///
+    /// For each agent in `self.panes`, queries the daemon for current process
+    /// state via `pane.info()`, extracts the PID if running, then reads
+    /// `/proc/{pid}/stat` to determine the Linux process state (Running,
+    /// Sleeping, Zombie, etc.).
+    pub async fn health_check_agents(&self) -> Vec<(String, super::proc_linux::ProcessState)> {
+        let panes = self.panes.read().await;
+        let mut results = Vec::with_capacity(panes.len());
+
+        for (agent_id, pane) in panes.iter() {
+            let pid = Self::extract_pane_pid(pane).await;
+            let state = if let Some(pid) = pid {
+                super::proc_linux::read_proc_state(pid)
+                    .unwrap_or(super::proc_linux::ProcessState::Unknown)
+            } else {
+                super::proc_linux::ProcessState::Unknown
+            };
+            results.push((agent_id.clone(), state));
+        }
+
+        results
+    }
+
+    /// Extract the PID from a Pane handle by querying the daemon.
+    /// Returns `None` if the pane is not running or the pid is unknown.
+    async fn extract_pane_pid(pane: &Pane) -> Option<u32> {
+        let our_pane_index = pane.target().pane_index;
+        match pane.info().await {
+            Ok(snapshot) => {
+                for pane_info in &snapshot.panes {
+                    if pane_info.index == our_pane_index {
+                        return match &pane_info.process {
+                            PaneProcessState::Running { pid: Some(pid) } => Some(*pid),
+                            _ => None,
+                        };
+                    }
+                }
+                None
+            }
+            Err(_) => None,
+        }
+    }
+
     // ── Daemon lifecycle ──
 
     /// Start the rmux daemon.
