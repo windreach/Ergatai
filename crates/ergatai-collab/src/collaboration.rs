@@ -171,26 +171,10 @@ impl CollaborationSession {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ergatai_dag::{TaskNode, TaskStatus};
+    use ergatai_dag::TaskNode;
 
     fn make_node(id: &str, agent: &str) -> TaskNode {
-        TaskNode {
-            id: id.to_string(),
-            agent: agent.to_string(),
-            task: "t".to_string(),
-            status: TaskStatus::Pending,
-            depends_on: Vec::new(),
-            input: None,
-            output: None,
-            result_path: None,
-            max_retries: 0,
-            retry_count: 0,
-            priority: None,
-            timeout: None,
-            scope: None,
-            metadata: Default::default(),
-            condition: None,
-        }
+        TaskNode::new(id, agent, "t")
     }
 
     fn sample_graph() -> TaskGraph {

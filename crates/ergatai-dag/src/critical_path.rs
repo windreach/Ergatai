@@ -243,7 +243,7 @@ pub fn adjust_priority_with_critical_path(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dag_topology::{TaskGraph, TaskNode, TaskStatus};
+    use crate::dag_topology::{TaskComplexity, TaskGraph, TaskNode, TaskStatus};
 
     fn create_test_graph() -> TaskGraph {
         // 创建测试图：
@@ -271,6 +271,7 @@ mod tests {
                 scope: None,
                 metadata: std::collections::HashMap::new(),
                 condition: None,
+                complexity: TaskComplexity::Medium,
             },
             TaskNode {
                 id: "B".to_string(),
@@ -288,6 +289,7 @@ mod tests {
                 scope: None,
                 metadata: std::collections::HashMap::new(),
                 condition: None,
+                complexity: TaskComplexity::Medium,
             },
             TaskNode {
                 id: "C".to_string(),
@@ -305,6 +307,7 @@ mod tests {
                 scope: None,
                 metadata: std::collections::HashMap::new(),
                 condition: None,
+                complexity: TaskComplexity::Medium,
             },
             TaskNode {
                 id: "D".to_string(),
@@ -322,6 +325,7 @@ mod tests {
                 scope: None,
                 metadata: std::collections::HashMap::new(),
                 condition: None,
+                complexity: TaskComplexity::Medium,
             },
         ];
 

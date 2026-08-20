@@ -34,7 +34,7 @@ use ergatai_error::{ErgataiError, ErgataiResult};
 use serde::Deserialize;
 use uuid::Uuid;
 
-use crate::dag_topology::{TaskGraph, TaskNode, TaskStatus};
+use crate::dag_topology::{TaskComplexity, TaskGraph, TaskNode, TaskStatus};
 
 // ── YAML Schema (serde 反序列化目标) ──
 
@@ -113,6 +113,8 @@ struct YamlTask {
     /// 条件表达式（可选）- 只有条件为真时才执行此节点
     /// 示例: "{{test.exit_code}} == 0"
     condition: Option<String>,
+    /// 任务复杂度（可选）- 人工标注：low / medium / high（默认 medium）
+    complexity: Option<TaskComplexity>,
     /// 额外自定义字段（通过 flatten 收集）
     #[serde(flatten)]
     metadata: HashMap<String, serde_yaml::Value>,
@@ -275,6 +277,7 @@ pub fn parse_dag_yaml(
                 scope,
                 metadata,
                 condition: task.condition,
+                complexity: task.complexity.unwrap_or_default(),
             }
         })
         .collect();
@@ -756,5 +759,84 @@ tasks:
         let graph = parse_dag_yaml(yaml, None).expect("parse");
         assert_eq!(graph.max_agent_calls, None);
         assert_eq!(graph.stall_timeout_secs, None);
+    }
+
+    #[test]
+    fn test_complexity_parsing() {
+        let yaml = r#"
+name: test_dag
+tasks:
+  - name: task_low
+    description: "Fix typo"
+    complexity: low
+  - name: task_medium
+    description: "Add feature"
+    complexity: medium
+  - name: task_high
+    description: "Refactor architecture"
+    complexity: high
+  - name: task_default
+    description: "No complexity specified"
+"#;
+
+        let graph = parse_dag_yaml(yaml, None).unwrap();
+        let by_name: std::collections::HashMap<&str, &TaskNode> = graph
+            .nodes
+            .iter()
+            .map(|n| (n.task.as_str(), n))
+            .collect();
+        assert_eq!(by_name["task_low"].complexity, TaskComplexity::Low);
+        assert_eq!(by_name["task_medium"].complexity, TaskComplexity::Medium);
+        assert_eq!(by_name["task_high"].complexity, TaskComplexity::High);
+        // 未指定时默认为 Medium
+        assert_eq!(by_name["task_default"].complexity, TaskComplexity::Medium);
+    }
+
+    #[test]
+    fn test_complexity_scores() {
+        assert_eq!(TaskComplexity::Low.as_score(), 2.0);
+        assert_eq!(TaskComplexity::Medium.as_score(), 5.0);
+        assert_eq!(TaskComplexity::High.as_score(), 8.0);
+    }
+
+    #[test]
+    fn test_complexity_case_insensitive_via_serde() {
+        // 仅小写 variant 应被接受；大写应被 serde 拒绝（rename_all = "lowercase"）
+        let yaml_lower = r#"
+tasks:
+  - name: t
+    complexity: low
+"#;
+        assert!(parse_dag_yaml(yaml_lower, None).is_ok());
+
+        let yaml_upper = r#"
+tasks:
+  - name: t
+    complexity: Low
+"#;
+        assert!(parse_dag_yaml(yaml_upper, None).is_err());
+    }
+
+    #[test]
+    fn test_complexity_invalid_value_rejected() {
+        let yaml = r#"
+tasks:
+  - name: t
+    complexity: critical
+"#;
+        let result = parse_dag_yaml(yaml, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_complexity_backward_compat_no_field() {
+        // 现有 YAML 没有 complexity 字段时仍可正常解析，且默认为 Medium
+        let yaml = r#"
+tasks:
+  - name: legacy_task
+    agent: worker
+"#;
+        let graph = parse_dag_yaml(yaml, None).unwrap();
+        assert_eq!(graph.nodes[0].complexity, TaskComplexity::Medium);
     }
 }

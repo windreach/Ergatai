@@ -26,6 +26,35 @@ use ergatai_error::{ErgataiError, ErgataiResult};
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 
+/// 任务复杂度等级（人工标注）
+///
+/// 用于在 YAML DAG 定义中显式标注任务的预期工作量，
+/// 供调度器做优先级/资源规划。默认值为 `Medium`。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TaskComplexity {
+    /// 低复杂度：格式修复、文档更新、简单配置改动、技术债清理（< 30 分钟）
+    Low,
+
+    /// 中复杂度：正常功能开发、bug 修复、小型重构（30 分钟 - 2 小时）
+    #[default]
+    Medium,
+
+    /// 高复杂度：架构性改动、跨模块重构、大规模迁移（> 2 小时）
+    High,
+}
+
+impl TaskComplexity {
+    /// 映射到数值分数（用于调度和优先级计算）
+    pub fn as_score(&self) -> f64 {
+        match self {
+            TaskComplexity::Low => 2.0,
+            TaskComplexity::Medium => 5.0,
+            TaskComplexity::High => 8.0,
+        }
+    }
+}
+
 /// A task in the DAG
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskNode {
@@ -87,6 +116,13 @@ pub struct TaskNode {
     /// If condition is false, node is marked as Skipped
     #[serde(skip_serializing_if = "Option::is_none")]
     pub condition: Option<String>,
+
+    /// 任务复杂度（人工标注，默认 Medium）
+    ///
+    /// 通过 YAML 中的 `complexity: low|medium|high` 显式标注。
+    /// 调度器可用 `as_score()` 将其转换为数值做优先级计算。
+    #[serde(default)]
+    pub complexity: TaskComplexity,
 }
 
 /// Task execution status
@@ -434,6 +470,7 @@ impl TaskNode {
             scope: None, // Phase 3: File access scope (default: None)
             metadata: HashMap::new(),
             condition: None,
+            complexity: TaskComplexity::default(),
         }
     }
 
@@ -452,6 +489,12 @@ impl TaskNode {
     /// Set max retries
     pub fn with_max_retries(mut self, max: u32) -> Self {
         self.max_retries = max;
+        self
+    }
+
+    /// Set task complexity (human-annotated)
+    pub fn with_complexity(mut self, complexity: TaskComplexity) -> Self {
+        self.complexity = complexity;
         self
     }
 }
@@ -744,5 +787,31 @@ mod tests {
         assert!(graph.validate().is_ok());
         assert_eq!(graph.nodes.len(), 7);
         assert_eq!(graph.ready_tasks().len(), 2);
+    }
+
+    #[test]
+    fn test_task_complexity_default() {
+        assert_eq!(TaskComplexity::default(), TaskComplexity::Medium);
+    }
+
+    #[test]
+    fn test_task_node_new_has_default_complexity() {
+        let node = TaskNode::new("n1", "agent", "Task");
+        assert_eq!(node.complexity, TaskComplexity::Medium);
+    }
+
+    #[test]
+    fn test_task_node_with_complexity_builder() {
+        let node = TaskNode::new("n1", "agent", "Task").with_complexity(TaskComplexity::High);
+        assert_eq!(node.complexity, TaskComplexity::High);
+    }
+
+    #[test]
+    fn test_task_complexity_serde_roundtrip() {
+        // lowercase 序列化/反序列化
+        let json = serde_json::to_string(&TaskComplexity::Low).unwrap();
+        assert_eq!(json, "\"low\"");
+        let back: TaskComplexity = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, TaskComplexity::Low);
     }
 }

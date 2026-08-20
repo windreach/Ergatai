@@ -18,7 +18,7 @@ pub mod tree_topology;
 pub use condition::Condition;
 pub use context::DagContext;
 pub use dag_parser::parse_dag_markdown;
-pub use dag_topology::{TaskGraph, TaskNode, TaskStatus};
+pub use dag_topology::{TaskComplexity, TaskGraph, TaskNode, TaskStatus};
 pub use template::{extract_references, render_template};
 pub use yaml_parser::{is_yaml_format, parse_dag_auto, parse_dag_yaml};
 

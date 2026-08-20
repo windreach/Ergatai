@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use ergatai_error::{ErgataiError, ErgataiResult};
 use uuid::Uuid;
 
-use crate::dag_topology::{TaskGraph, TaskNode, TaskStatus};
+use crate::dag_topology::{TaskComplexity, TaskGraph, TaskNode, TaskStatus};
 
 /// Parse a Markdown DAG specification into a TaskGraph
 pub fn parse_dag_markdown(content: &str) -> ErgataiResult<TaskGraph> {
@@ -192,6 +192,7 @@ impl TaskNodeBuilder {
             scope: self.scope, // Phase 3: File access scope
             metadata,
             condition: None, // Markdown parser doesn't support conditions yet
+            complexity: TaskComplexity::default(), // Markdown parser doesn't expose complexity
         })
     }
 }
