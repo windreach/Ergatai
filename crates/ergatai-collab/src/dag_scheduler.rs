@@ -471,7 +471,7 @@ impl DagScheduler {
 
                 // Start timeout watchdog if timeout is configured
                 if let Some(timeout_secs) = adjusted_timeout {
-                    self.spawn_timeout_watcher(&task_id, timeout_secs, &node.agent);
+                    self.spawn_timeout_watcher(&task_id, timeout_secs, &node.agent).await;
                 }
 
                 return Ok(task_id);
@@ -486,7 +486,7 @@ impl DagScheduler {
 
         // Start timeout watchdog if timeout is configured
         if let Some(timeout_secs) = adjusted_timeout {
-            self.spawn_timeout_watcher(&tid, timeout_secs, &node.agent);
+            self.spawn_timeout_watcher(&tid, timeout_secs, &node.agent).await;
         }
 
         Ok(tid)
@@ -588,7 +588,7 @@ impl DagScheduler {
     ///
     /// Lock ordering: one mutex at a time. The graph lock is dropped before
     /// calling `on_node_failed`, which itself re-acquires the graph lock.
-    fn spawn_timeout_watcher(&self, node_id: &str, timeout_secs: u64, _agent_name: &str) {
+    async fn spawn_timeout_watcher(&self, node_id: &str, timeout_secs: u64, _agent_name: &str) {
         if timeout_secs == 0 {
             return;
         }
@@ -679,12 +679,11 @@ impl DagScheduler {
             }
         });
 
-        // Store the handle in the watchers map (via detached spawn to avoid blocking)
-        let watchers_store = self.timeout_watchers.clone();
-        tokio::spawn(async move {
-            let mut w = watchers_store.lock().await;
-            w.insert(node_id_for_store, handle);
-        });
+        // Store the handle synchronously to prevent race: if we used a detached
+        // spawn, the watcher could fire before the handle is stored, making
+        // cancel_timeout_watcher() a no-op.
+        let mut watchers = self.timeout_watchers.lock().await;
+        watchers.insert(node_id_for_store, handle);
     }
 
     /// Cancel the timeout watchdog for a node (called on normal completion/failure)
@@ -700,8 +699,12 @@ impl DagScheduler {
     ///
     /// If the DAG has a `timeout` field, starts a background task that will
     /// fail all remaining Pending/Running nodes when the deadline is reached.
+    ///
+    /// Uses double-checked locking to prevent TOCTOU race: two concurrent
+    /// callers could both pass the `is_some()` check and spawn duplicate
+    /// watchers. The second check after re-acquiring the lock catches this.
     async fn spawn_dag_timeout_watcher(&self) {
-        // Check if already spawned
+        // First check (fast path)
         {
             let watcher = self.dag_timeout_watcher.lock().await;
             if watcher.is_some() {
@@ -709,7 +712,7 @@ impl DagScheduler {
             }
         }
 
-        // Get timeout from graph
+        // Get timeout from graph (no dag_timeout_watcher lock held — avoid nested locks)
         let timeout_secs = {
             let graph = self.graph.lock().await;
             graph.timeout
@@ -740,7 +743,13 @@ impl DagScheduler {
             }
         });
 
+        // Second check (double-checked locking): if another caller stored a
+        // handle while we were spawning, abort our duplicate and return.
         let mut watcher = self.dag_timeout_watcher.lock().await;
+        if watcher.is_some() {
+            handle.abort();
+            return;
+        }
         *watcher = Some(handle);
     }
 
@@ -753,8 +762,9 @@ impl DagScheduler {
     ///
     /// No-ops if `stall_timeout_secs` is `None` on the graph.
     /// Idempotent — only spawns once (like `spawn_dag_timeout_watcher`).
+    /// Uses double-checked locking to prevent TOCTOU race.
     async fn spawn_stall_watcher(&self) {
-        // Check if already spawned
+        // First check (fast path)
         {
             let watcher = self.stall_watcher.lock().await;
             if watcher.is_some() {
@@ -816,7 +826,13 @@ impl DagScheduler {
             }
         });
 
+        // Second check (double-checked locking): abort duplicate if another
+        // caller stored a handle while we were spawning.
         let mut slot = self.stall_watcher.lock().await;
+        if slot.is_some() {
+            handle.abort();
+            return;
+        }
         *slot = Some(handle);
     }
 

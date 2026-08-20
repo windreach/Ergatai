@@ -1,8 +1,9 @@
 # Task Complexity Integration Report
 
 **Date**: 2026-08-20
-**Status**: [pending test results]
+**Status**: DONE
 **Component**: `ergatai-collab::dag_scheduler` + `ergatai-dag::dag_topology` + `ergatai-dag::yaml_parser`
+**Commit**: `9bddf6b`
 
 ## Summary
 
@@ -62,11 +63,25 @@ Default complexity is `Medium` (preserves existing behavior when the field is ab
 
 ## Execution results
 
-Tests run:
 ```
-ERGATAI_SKIP_RMUX_DOWNLOAD=1 cargo test -p ergatai-collab complexity
-ERGATAI_SKIP_RMUX_DOWNLOAD=1 cargo test -p ergatai-collab timeout
-ERGATAI_SKIP_RMUX_DOWNLOAD=1 cargo clippy -p ergatai-collab -- -D warnings
-```
+$ ERGATAI_SKIP_RMUX_DOWNLOAD=1 cargo test -p ergatai-collab complexity
+running 3 tests
+test dag_scheduler::tests::test_complexity_timeout_adjustment ... ok
+test dag_scheduler::tests::test_per_node_timeout_overrides_dag_default_with_complexity ... ok
+test dag_scheduler::tests::test_scheduler_uses_complexity_for_timeout ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 169 filtered out
 
-[Results pending]
+$ ERGATAI_SKIP_RMUX_DOWNLOAD=1 cargo test -p ergatai-collab timeout
+running 6 tests
+test dag_scheduler::tests::test_complexity_timeout_adjustment ... ok
+test timeout_tier::tests::deadline_from_now_orders_warn_before_escalate_before_fail ... ok
+test timeout_tier::tests::fractions_are_ordered ... ok
+test dag_scheduler::tests::test_per_node_timeout_overrides_dag_default_with_complexity ... ok
+test dag_scheduler::tests::test_scheduler_uses_complexity_for_timeout ... ok
+test dag_scheduler::tests::timeout_watcher_emits_warn_before_fail ... ok
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 166 filtered out
+
+$ ERGATAI_SKIP_RMUX_DOWNLOAD=1 cargo clippy -p ergatai-collab -p ergatai-dag -- -D warnings
+Finished `dev` profile [unoptimized + debuginfo] target(s) in 49.89s
+(no warnings, no errors)
+```

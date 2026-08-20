@@ -395,7 +395,10 @@ impl AgentRuntime {
     /// Backends that don't support health checks (non-Rmux backends) are no-ops.
     /// This method uses `as_any()` downcast to call RmuxBackend's health check;
     /// if the downcast fails, the method returns silently.
-    pub async fn prune_unhealthy_agents(&self) {
+    ///
+    /// Returns the list of agent IDs that were pruned in this pass, so callers
+    /// can perform follow-up cleanup (e.g. dropping rate-limiter windows).
+    pub async fn prune_unhealthy_agents(&self) -> Vec<String> {
         use crate::backends::proc_linux::ProcessState;
         use crate::backends::rmux::RmuxBackend;
 
@@ -404,12 +407,13 @@ impl AgentRuntime {
             Some(b) => b,
             None => {
                 debug!("health check not supported by backend, skipping prune");
-                return;
+                return Vec::new();
             }
         };
 
         let health = rmux_backend.health_check_agents().await;
 
+        let mut pruned = Vec::new();
         let mut streaks = self.unhealthy_streaks.lock().await;
         for (agent_id, state) in health {
             let is_bad = matches!(state, ProcessState::Zombie | ProcessState::Dead);
@@ -424,11 +428,13 @@ impl AgentRuntime {
                     );
                     self.registry.write().await.remove(&agent_id);
                     streaks.remove(&agent_id);
+                    pruned.push(agent_id);
                 }
             } else {
                 *entry = 0;
             }
         }
+        pruned
     }
 
     // ── MCP-to-Runtime agent ID binding ──

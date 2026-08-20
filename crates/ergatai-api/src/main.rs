@@ -39,6 +39,7 @@ use tower_governor::{governor::GovernorConfigBuilder, key_extractor::KeyExtracto
 mod api;
 mod mcp;
 use mcp::conversation::{ConversationConfig, ConversationManager};
+use mcp::rate_limiter::get_rate_limiter;
 use mcp::{
     create_mcp_service, start_conversation_reaper, start_message_delivery_consumer,
     start_peer_reaper,
@@ -367,8 +368,19 @@ async fn async_main(args: Args) -> Result<()> {
                                     );
                                 }
                             }
-                            // Prune agents that have been unhealthy for 2 consecutive checks
-                            periodic_runtime.prune_unhealthy_agents().await;
+                            // Prune agents that have been unhealthy for 2 consecutive checks,
+                            // and drop their rate-limiter windows so offline agents don't leak.
+                            let pruned = periodic_runtime.prune_unhealthy_agents().await;
+                            if !pruned.is_empty() {
+                                let rl = get_rate_limiter();
+                                for agent_id in &pruned {
+                                    rl.remove_agent(agent_id);
+                                }
+                                tracing::info!(
+                                    count = pruned.len(),
+                                    "cleaned up rate-limiter windows for pruned agents"
+                                );
+                            }
                         }
                     }
                 }

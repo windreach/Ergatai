@@ -673,8 +673,12 @@ impl ErgataiMcpServer {
         );
 
         // Rate-limit check: 60 messages per target agent per minute.
+        // `try_acquire` is atomic (check + reserve under one lock) and sync —
+        // the critical section is short and contains no `.await`. Recording
+        // happens here, not after publish, so a failed publish still counts
+        // against the limit (stricter: prevents abuse via rapid failing sends).
         let rl = get_rate_limiter();
-        if let Err(e) = rl.check(target_agent_id).await {
+        if let Err(e) = rl.try_acquire(target_agent_id) {
             tracing::warn!(%e, "send_message rate-limited");
             return Err(ErrorData::invalid_params(e.to_string(), None));
         }
@@ -901,8 +905,9 @@ impl ErgataiMcpServer {
 
             match bus.publish_agent_message_reliable(&payload).await {
                 Ok(ack) => {
-                    // Record the successful send against the rate limiter.
-                    rl.record(target_agent_id).await;
+                    // NOTE: rate-limit slot was already reserved by
+                    // `try_acquire()` before the payload was built, so
+                    // nothing to record here.
 
                     let response_json = serde_json::json!({
                         "status": "queued",

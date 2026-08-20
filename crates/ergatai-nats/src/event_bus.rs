@@ -168,21 +168,48 @@ impl EventBus {
     /// Check whether the AGENT_MESSAGES stream is under the backpressure threshold.
     /// Returns Ok(()) if under threshold, or Err if the stream is overloaded.
     /// Caches the last check result for 5s to avoid per-message NATS round-trips.
+    ///
+    /// # Concurrency
+    ///
+    /// Drops the cache lock before the NATS round-trip (`get_stream` + `info`),
+    /// so concurrent callers are not serialized behind the await. A second
+    /// check after re-acquiring the lock prevents overwriting a fresher result
+    /// written by another caller that raced us.
     pub async fn check_backpressure(&self) -> ErgataiResult<()> {
         let threshold = std::env::var("ERGATAI_BACKPRESSURE_THRESHOLD")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(crate::agent_message_stream::BACKPRESSURE_THRESHOLD);
 
-        let mut cache = self.backpressure_cache.lock().await;
-        let now = Instant::now();
-        let depth = if should_requery(&cache, now) {
-            let d = self.connection.agent_messages_pending_count().await?;
-            cache.last_check = now;
-            cache.last_depth = d;
+        // Fast path: cache is fresh — return cached depth without any I/O.
+        let cached_depth = {
+            let cache = self.backpressure_cache.lock().await;
+            let now = Instant::now();
+            if !should_requery(&cache, now) {
+                Some(cache.last_depth)
+            } else {
+                None
+            }
+        }; // lock released before await
+
+        let depth = if let Some(d) = cached_depth {
             d
         } else {
-            cache.last_depth
+            // Cache is stale — query NATS without holding the lock.
+            let fresh_depth = self.connection.agent_messages_pending_count().await?;
+
+            // Re-acquire lock and check if another caller already refreshed
+            // while we were waiting. If they did, use their value (which is
+            // fresher or at least equally fresh). If not, store ours.
+            let mut cache = self.backpressure_cache.lock().await;
+            let now = Instant::now();
+            if should_requery(&cache, now) {
+                cache.last_check = now;
+                cache.last_depth = fresh_depth;
+                fresh_depth
+            } else {
+                cache.last_depth
+            }
         };
 
         if depth >= threshold {
