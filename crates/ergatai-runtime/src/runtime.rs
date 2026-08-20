@@ -786,7 +786,9 @@ impl AgentRuntime {
                             "Agent exited successfully"
                         );
                         AgentLifecycleState::Terminated {
-                            outcome: crate::agent_lifecycle::ExitOutcome::Exited { exit_code: Some(0) },
+                            outcome: crate::agent_lifecycle::ExitOutcome::Exited {
+                                exit_code: Some(0),
+                            },
                             terminated_at: now,
                             duration_secs: 0, // placeholder, recomputed below
                         }

@@ -18,6 +18,10 @@ use ergatai_dag::{TaskGraph, TaskNode, TaskStatus};
 
 use crate::collaboration::{CollaborationSession, CommunicationCheck, MeshPolicy};
 
+/// How often the stall watcher polls `last_progress_age_secs()`.
+/// Kept small so unit tests can exercise the full stall path in under a second.
+const POLL_INTERVAL_SECS: u64 = 1;
+
 /// DAG Scheduler - manages DAG-based task orchestration
 #[derive(Clone)]
 pub struct DagScheduler {
@@ -47,6 +51,9 @@ pub struct DagScheduler {
 
     /// DAG-level timeout watchdog handle
     dag_timeout_watcher: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+
+    /// Handle for the stall watchdog task (if spawned).
+    stall_watcher: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
 
     /// Collaboration session bound to this DAG (participants + mesh policy).
     collaboration: Arc<Mutex<CollaborationSession>>,
@@ -139,6 +146,7 @@ impl DagScheduler {
             timeout_watchers: Arc::new(Mutex::new(HashMap::new())),
             deadline,
             dag_timeout_watcher: Arc::new(Mutex::new(None)),
+            stall_watcher: Arc::new(Mutex::new(None)),
             collaboration: Arc::new(Mutex::new(collaboration)),
             finalized: Arc::new(AtomicBool::new(false)),
             last_progress: Arc::new(Mutex::new(std::time::Instant::now())),
@@ -236,6 +244,9 @@ impl DagScheduler {
 
         // Spawn DAG-level timeout watcher (idempotent — only spawns once)
         self.spawn_dag_timeout_watcher().await;
+
+        // Spawn stall watchdog (idempotent — only spawns once, no-ops without stall_timeout_secs)
+        self.spawn_stall_watcher().await;
 
         // Clear completed/failed agents from previous DAG runs (M14 fix)
         let launcher = super::agent_launcher::AgentLauncher::new(self.project_root.clone());
@@ -617,6 +628,82 @@ impl DagScheduler {
 
         let mut watcher = self.dag_timeout_watcher.lock().await;
         *watcher = Some(handle);
+    }
+
+    /// Spawn a background watchdog that detects stalled DAGs.
+    ///
+    /// Polls `last_progress_age_secs()` every `POLL_INTERVAL_SECS` seconds.
+    /// If the DAG has at least one `Running` node but hasn't made progress for
+    /// `stall_timeout_secs`, marks all Running nodes as Failed with a stall
+    /// reason and funnels through `finalize_if_terminal()`.
+    ///
+    /// No-ops if `stall_timeout_secs` is `None` on the graph.
+    /// Idempotent — only spawns once (like `spawn_dag_timeout_watcher`).
+    async fn spawn_stall_watcher(&self) {
+        // Check if already spawned
+        {
+            let watcher = self.stall_watcher.lock().await;
+            if watcher.is_some() {
+                return;
+            }
+        }
+
+        let stall_timeout = {
+            let graph = self.graph.lock().await;
+            graph.stall_timeout_secs
+        };
+        let Some(timeout_secs) = stall_timeout else { return; };
+
+        let scheduler = self.clone();
+        let handle = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(POLL_INTERVAL_SECS)).await;
+                if scheduler.finalized.load(Ordering::SeqCst) {
+                    break;
+                }
+                // Only fire if something is actually running
+                let running_count = {
+                    let graph = scheduler.graph.lock().await;
+                    graph
+                        .nodes
+                        .iter()
+                        .filter(|n| n.status == TaskStatus::Running)
+                        .count()
+                };
+                if running_count == 0 {
+                    continue;
+                }
+                let age = scheduler.last_progress_age_secs().await;
+                if age >= timeout_secs {
+                    tracing::warn!(
+                        dag_id = %scheduler.dag_id,
+                        stall_secs = age,
+                        timeout_secs = timeout_secs,
+                        "DAG stalled — no progress, finalizing"
+                    );
+                    let mut graph = scheduler.graph.lock().await;
+                    for node in graph.nodes.iter_mut() {
+                        if node.status == TaskStatus::Running {
+                            node.status = TaskStatus::Failed;
+                            // Record stall reason in metadata (TaskNode has no error field).
+                            node.metadata.insert(
+                                "stall_error".to_string(),
+                                format!(
+                                    "stalled: no progress for {}s (limit {}s)",
+                                    age, timeout_secs
+                                ),
+                            );
+                        }
+                    }
+                    drop(graph);
+                    scheduler.finalize_if_terminal().await;
+                    break;
+                }
+            }
+        });
+
+        let mut slot = self.stall_watcher.lock().await;
+        *slot = Some(handle);
     }
 
     /// Fail all Pending and Running nodes in the DAG (called on DAG timeout or cancellation).
@@ -2260,6 +2347,53 @@ mod tests {
             refreshed < 2,
             "last_progress age should be < 2s after touch_progress, got {}s",
             refreshed
+        );
+    }
+
+    #[tokio::test]
+    async fn stall_watcher_finalizes_dag_when_no_progress() {
+        // Setup: build a graph with stall_timeout_secs = 1 and one Running node.
+        let mut graph = TaskGraph::new(vec![TaskNode::new("n1", "a", "A")]);
+        graph.stall_timeout_secs = Some(1);
+        let mut node = graph.nodes[0].clone();
+        node.status = TaskStatus::Running;
+        graph.nodes[0] = node;
+
+        let scheduler = DagScheduler::new(PathBuf::from("/tmp/stall-test"), graph);
+
+        // Force last_progress into the past so the watcher's next check sees age >= 1s.
+        {
+            let mut lp = scheduler.last_progress.lock().await;
+            *lp = std::time::Instant::now() - std::time::Duration::from_secs(5);
+        }
+
+        // Spawn the stall watcher (submit_graph would normally do this).
+        scheduler.spawn_stall_watcher().await;
+
+        // The watcher polls every POLL_INTERVAL_SECS=1s. It should detect the stall
+        // and mark n1 as Failed within ~2s. Bound the test at 3s.
+        let result = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                {
+                    let g = scheduler.graph.lock().await;
+                    let n = g.find_node("n1").unwrap();
+                    if n.status == TaskStatus::Failed {
+                        // Verify the stall reason was recorded in metadata.
+                        assert!(
+                            n.metadata.get("stall_error").is_some(),
+                            "stalled node should have stall_error in metadata"
+                        );
+                        return;
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        })
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "stall watcher should have finalized the DAG within 3s"
         );
     }
 }

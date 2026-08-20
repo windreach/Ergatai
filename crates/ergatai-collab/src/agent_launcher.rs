@@ -778,7 +778,8 @@ Write your results in markdown:
             let stale: Vec<_> = agents
                 .iter()
                 .filter(|(_, a)| {
-                    a.status == AgentSessionStatus::Completed || a.status == AgentSessionStatus::Failed
+                    a.status == AgentSessionStatus::Completed
+                        || a.status == AgentSessionStatus::Failed
                 })
                 .map(|(id, a)| (id.clone(), a.task_id.clone(), a.token_id.clone()))
                 .collect();

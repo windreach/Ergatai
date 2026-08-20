@@ -64,6 +64,6 @@ pub use backends::rmux::{ManagedPaneInfo, RmuxBackend, RmuxDaemonInfo};
 pub use rmux_sdk::RmuxEndpoint;
 pub use runtime::{get_agent_runtime, init_agent_runtime, AgentRuntime};
 pub use types::{
-    AgentHandle, AgentInfo, BackendCapabilities, ResourceLimits, WaitResult,
-    WorkspaceHandle, WorkspaceSpec,
+    AgentHandle, AgentInfo, BackendCapabilities, ResourceLimits, WaitResult, WorkspaceHandle,
+    WorkspaceSpec,
 };

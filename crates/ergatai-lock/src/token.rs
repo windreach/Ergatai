@@ -727,10 +727,7 @@ mod tests {
 
     #[test]
     fn test_token_status_serde_roundtrip() {
-        let statuses = vec![
-            TokenStatus::Active,
-            TokenStatus::Expired,
-        ];
+        let statuses = vec![TokenStatus::Active, TokenStatus::Expired];
         for status in statuses {
             let json = serde_json::to_string(&status).unwrap();
             let deserialized: TokenStatus = serde_json::from_str(&json).unwrap();

@@ -82,7 +82,10 @@ pub enum CommunicationCheck {
 
 impl CommunicationCheck {
     pub fn is_allowed(&self) -> bool {
-        matches!(self, CommunicationCheck::Allowed | CommunicationCheck::NotApplicable)
+        matches!(
+            self,
+            CommunicationCheck::Allowed | CommunicationCheck::NotApplicable
+        )
     }
 
     pub fn is_denied(&self) -> bool {
@@ -216,7 +219,12 @@ mod tests {
     #[test]
     fn test_parse_star() {
         let p = MeshPolicy::parse("star:hub-agent").unwrap();
-        assert_eq!(p, MeshPolicy::Star { hub: "hub-agent".to_string() });
+        assert_eq!(
+            p,
+            MeshPolicy::Star {
+                hub: "hub-agent".to_string()
+            }
+        );
     }
 
     #[test]
@@ -243,7 +251,9 @@ mod tests {
         let s = CollaborationSession::from_graph(
             "dag-1",
             &g,
-            MeshPolicy::Star { hub: "a1".to_string() },
+            MeshPolicy::Star {
+                hub: "a1".to_string(),
+            },
         );
         assert!(s.allows("a1", "a2")); // hub → other
         assert!(s.allows("a4", "a1")); // other → hub
@@ -313,7 +323,9 @@ mod tests {
         let s = CollaborationSession::from_graph(
             "dag-1",
             &g,
-            MeshPolicy::Star { hub: "a1".to_string() },
+            MeshPolicy::Star {
+                hub: "a1".to_string(),
+            },
         );
         // outsider → participant rejected at session level
         assert!(!s.allows("outsider", "a2"));
@@ -329,7 +341,9 @@ mod tests {
         let s = CollaborationSession::from_graph(
             "dag-1",
             &g,
-            MeshPolicy::Star { hub: "a1".to_string() },
+            MeshPolicy::Star {
+                hub: "a1".to_string(),
+            },
         );
         // Both participants, policy denies → session.allows() false
         assert!(!s.allows("a2", "a3"));

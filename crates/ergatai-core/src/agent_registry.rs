@@ -356,7 +356,9 @@ mod tests {
             .register_agent("agent-hb2".to_string(), "conn".to_string(), None)
             .await
             .unwrap();
-        registry.update_status("agent-hb2", AgentConnectionStatus::Idle).await;
+        registry
+            .update_status("agent-hb2", AgentConnectionStatus::Idle)
+            .await;
         assert_eq!(
             registry.get_agent("agent-hb2").await.unwrap().status,
             AgentConnectionStatus::Idle
@@ -385,7 +387,9 @@ mod tests {
             .register_agent("agent-s".to_string(), "conn".to_string(), None)
             .await
             .unwrap();
-        registry.update_status("agent-s", AgentConnectionStatus::Idle).await;
+        registry
+            .update_status("agent-s", AgentConnectionStatus::Idle)
+            .await;
 
         assert_eq!(
             registry.get_agent("agent-s").await.unwrap().status,
@@ -413,7 +417,9 @@ mod tests {
     #[tokio::test]
     async fn test_update_status_missing_agent_no_panic() {
         let registry = AgentRegistry::new();
-        registry.update_status("ghost", AgentConnectionStatus::Idle).await;
+        registry
+            .update_status("ghost", AgentConnectionStatus::Idle)
+            .await;
         // No agent added, no panic
         assert!(registry.get_agent("ghost").await.is_none());
     }
@@ -436,7 +442,9 @@ mod tests {
             .await
             .unwrap();
 
-        registry.update_status("a-idle", AgentConnectionStatus::Idle).await;
+        registry
+            .update_status("a-idle", AgentConnectionStatus::Idle)
+            .await;
         registry
             .update_status("a-disc", AgentConnectionStatus::Disconnected)
             .await;
@@ -463,7 +471,9 @@ mod tests {
             .register_agent("a1".to_string(), "c1".to_string(), None)
             .await
             .unwrap();
-        registry.update_status("a1", AgentConnectionStatus::Idle).await;
+        registry
+            .update_status("a1", AgentConnectionStatus::Idle)
+            .await;
         assert_eq!(registry.active_count().await, 0);
     }
 
@@ -610,7 +620,10 @@ mod tests {
     fn test_agent_status_equality() {
         assert_eq!(AgentConnectionStatus::Active, AgentConnectionStatus::Active);
         assert_ne!(AgentConnectionStatus::Active, AgentConnectionStatus::Idle);
-        assert_ne!(AgentConnectionStatus::Idle, AgentConnectionStatus::Disconnected);
+        assert_ne!(
+            AgentConnectionStatus::Idle,
+            AgentConnectionStatus::Disconnected
+        );
     }
 
     #[test]
