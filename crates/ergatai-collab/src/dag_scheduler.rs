@@ -358,6 +358,13 @@ impl DagScheduler {
     /// Prefers NATS event publishing when available (decoupled, event-driven).
     /// Falls back to direct `task_scheduler.submit_task()` call otherwise.
     async fn generate_and_submit(&self, node: &TaskNode, priority: u32) -> ErgataiResult<String> {
+        // Deadline check: refuse dispatch when the DAG-level timeout has elapsed.
+        // Mirrors the budget-check pattern — finalize defensively so the DAG can
+        // settle, then propagate the error to the caller.
+        if let Some(reason) = self.check_deadline() {
+            self.finalize_if_terminal().await;
+            return Err(ErgataiError::internal(reason));
+        }
         // Budget check: refuse dispatch when DAG-level agent call cap is exhausted.
         // On exhaustion, defensively nudge terminal finalization so the DAG can
         // settle (callers already handle the propagated Err by reverting the
@@ -443,6 +450,21 @@ impl DagScheduler {
             )))
         } else {
             Ok(())
+        }
+    }
+
+    /// Returns Some(reason) if the DAG deadline has passed, None otherwise.
+    fn check_deadline(&self) -> Option<String> {
+        let deadline = self.deadline?;
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            Some(format!(
+                "DAG {} exceeded deadline by {}s",
+                self.dag_id,
+                now.duration_since(deadline).as_secs()
+            ))
+        } else {
+            None
         }
     }
 
@@ -787,6 +809,11 @@ impl DagScheduler {
         node_id: &str,
         result_path: Option<String>,
     ) -> ErgataiResult<Vec<String>> {
+        // Deadline check: short-circuit if the DAG has exceeded its timeout.
+        if let Some(reason) = self.check_deadline() {
+            self.finalize_if_terminal().await;
+            return Err(ErgataiError::internal(reason));
+        }
         // Cancel timeout watchdog (node completed normally)
         self.cancel_timeout_watcher(node_id).await;
 
@@ -891,6 +918,11 @@ impl DagScheduler {
     /// status and return early without consuming retry budget or
     /// double-submitting the task.
     pub async fn on_node_failed(&self, node_id: &str, error: &str) -> ErgataiResult<()> {
+        // Deadline check: short-circuit if the DAG has exceeded its timeout.
+        if let Some(reason) = self.check_deadline() {
+            self.finalize_if_terminal().await;
+            return Err(ErgataiError::internal(reason));
+        }
         // Cancel timeout watchdog (node already failed)
         self.cancel_timeout_watcher(node_id).await;
 
@@ -2141,6 +2173,30 @@ mod tests {
             msg.contains("budget exhausted"),
             "expected 'budget exhausted' in error message, got: {}",
             msg
+        );
+    }
+
+    #[tokio::test]
+    async fn dag_deadline_check_returns_reason_when_expired() {
+        let graph = sample_graph();
+        let mut scheduler = DagScheduler::new(PathBuf::from("/tmp/deadline"), graph);
+        // No deadline set → should return None
+        assert!(scheduler.check_deadline().is_none());
+        // Set deadline to past
+        scheduler.deadline =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(10));
+        // Should return Some(reason) with "exceeded deadline" in message
+        let reason = scheduler.check_deadline().unwrap();
+        assert!(
+            reason.contains("exceeded deadline"),
+            "expected 'exceeded deadline' in reason, got: {}",
+            reason
+        );
+        // Reason should also include the dag_id for observability
+        assert!(
+            reason.contains(scheduler.dag_id()),
+            "expected dag_id in reason, got: {}",
+            reason
         );
     }
 }
