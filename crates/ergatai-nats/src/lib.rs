@@ -27,6 +27,7 @@ pub use dag_event_stream::{
 };
 pub use event_bus::EventBus;
 pub use events::{
+    AgentLifecycleEventPayload,
     AgentMessagePayload,
     DagCompletePayload,
     DagEvent,

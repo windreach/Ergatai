@@ -40,6 +40,9 @@ struct AgentRecord {
 pub struct AgentInfo {
     pub agent_id: String,
     pub status: AgentStatus,
+    /// New unified lifecycle state (from ergatai-runtime)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<ergatai_runtime::AgentLifecycleState>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<Vec<String>>,
     pub connected_at: String,
@@ -79,6 +82,7 @@ impl AgentRegistry {
         let info = AgentInfo {
             agent_id: agent_id.clone(),
             status: AgentStatus::Active,
+            lifecycle: None,
             capabilities,
             connected_at: now.clone(),
             last_heartbeat: now,
@@ -614,6 +618,7 @@ mod tests {
         let info = AgentInfo {
             agent_id: "test-agent".to_string(),
             status: AgentStatus::Active,
+            lifecycle: None,
             capabilities: Some(vec!["tool1".to_string(), "tool2".to_string()]),
             connected_at: "2024-01-01T00:00:00+00:00".to_string(),
             last_heartbeat: "2024-01-01T00:00:00+00:00".to_string(),
@@ -630,6 +635,7 @@ mod tests {
         let info = AgentInfo {
             agent_id: "a".to_string(),
             status: AgentStatus::Idle,
+            lifecycle: None,
             capabilities: None,
             connected_at: "2024-01-01T00:00:00+00:00".to_string(),
             last_heartbeat: "2024-01-01T00:00:00+00:00".to_string(),
@@ -644,6 +650,7 @@ mod tests {
         let info = AgentInfo {
             agent_id: "roundtrip".to_string(),
             status: AgentStatus::Disconnected,
+            lifecycle: None,
             capabilities: Some(vec!["x".to_string()]),
             connected_at: "2024-06-01T12:00:00+00:00".to_string(),
             last_heartbeat: "2024-06-01T12:00:00+00:00".to_string(),

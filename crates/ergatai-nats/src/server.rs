@@ -369,9 +369,7 @@ fn cleanup_stale_test_servers() {
         let cmdline_path = format!("/proc/{}/cmdline", pid);
         if let Ok(cmdline) = std::fs::read_to_string(&cmdline_path) {
             if cmdline.contains("ergatai-test-nats") {
-                let _ = Command::new("kill")
-                    .args(["-9", &pid.to_string()])
-                    .output();
+                let _ = Command::new("kill").args(["-9", &pid.to_string()]).output();
             }
         }
     }
@@ -383,8 +381,8 @@ fn cleanup_stale_test_servers() {
 /// exits normally. This prevents zombie processes from accumulating.
 #[cfg(unix)]
 mod atexit_cleanup {
-    use std::sync::Once;
     use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Once;
 
     static REGISTER_ATEXIT: Once = Once::new();
     static CHILD_PID: AtomicU32 = AtomicU32::new(0);
@@ -408,9 +406,7 @@ mod atexit_cleanup {
         // Atomic load is safe from any thread context, including atexit.
         let pid = CHILD_PID.load(Ordering::SeqCst);
         if pid > 0 {
-            let _ = Command::new("kill")
-                .args(["-9", &pid.to_string()])
-                .output();
+            let _ = Command::new("kill").args(["-9", &pid.to_string()]).output();
         }
     }
 }

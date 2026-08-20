@@ -66,8 +66,14 @@ pub async fn route_agent_message(
 
     // Look up agent UUIDs for stable routing
     let runtime = ergatai_runtime::get_agent_runtime();
-    let from_uuid = runtime.get_agent(from_agent).await.map(|info| info.agent_uuid);
-    let to_uuid = runtime.get_agent(to_agent).await.map(|info| info.agent_uuid);
+    let from_uuid = runtime
+        .get_agent(from_agent)
+        .await
+        .map(|info| info.agent_uuid);
+    let to_uuid = runtime
+        .get_agent(to_agent)
+        .await
+        .map(|info| info.agent_uuid);
 
     let payload = AgentMessagePayload {
         from_agent: from_agent.to_string(),

@@ -5,9 +5,9 @@
 
 #[cfg(test)]
 mod uuid_routing_tests {
-    use ergatai_runtime::AgentRuntime;
     use ergatai_runtime::backends::local_pty::LocalPtyBackend;
     use ergatai_runtime::types::{AgentHandle, AgentInfo, AgentState, WorkspaceHandle};
+    use ergatai_runtime::AgentRuntime;
     use std::collections::HashMap;
     use std::sync::Arc;
 
@@ -34,7 +34,10 @@ mod uuid_routing_tests {
         // Register an agent (UUID will be auto-generated)
         let agent_id = "%99";
         let handle = create_test_handle(agent_id);
-        runtime.register_discovered_agent(agent_id.to_string(), handle).await.unwrap();
+        runtime
+            .register_discovered_agent(agent_id.to_string(), handle)
+            .await
+            .unwrap();
 
         // Get the auto-generated UUID
         let agent_info = runtime.get_agent(agent_id).await.unwrap();
@@ -68,7 +71,10 @@ mod uuid_routing_tests {
 
         for id in &agent_ids {
             let handle = create_test_handle(id);
-            runtime.register_discovered_agent(id.to_string(), handle).await.unwrap();
+            runtime
+                .register_discovered_agent(id.to_string(), handle)
+                .await
+                .unwrap();
 
             // Get the auto-generated UUID
             let agent_info = runtime.get_agent(id).await.unwrap();
@@ -78,7 +84,13 @@ mod uuid_routing_tests {
         // Verify each UUID resolves to the correct agent_id
         for (uuid, expected_id) in &uuid_to_id {
             let resolved = runtime.resolve_agent_uuid(uuid).await;
-            assert_eq!(resolved, Some(expected_id.clone()), "UUID {} should resolve to {}", uuid, expected_id);
+            assert_eq!(
+                resolved,
+                Some(expected_id.clone()),
+                "UUID {} should resolve to {}",
+                uuid,
+                expected_id
+            );
         }
     }
 
@@ -90,7 +102,10 @@ mod uuid_routing_tests {
 
         let agent_id = "%1";
         let handle = create_test_handle(agent_id);
-        runtime.register_discovered_agent(agent_id.to_string(), handle).await.unwrap();
+        runtime
+            .register_discovered_agent(agent_id.to_string(), handle)
+            .await
+            .unwrap();
 
         let info = runtime.get_agent(agent_id).await.unwrap();
 
@@ -111,7 +126,10 @@ mod uuid_routing_tests {
 
         for id in &agent_ids {
             let handle = create_test_handle(id);
-            runtime.register_discovered_agent(id.to_string(), handle).await.unwrap();
+            runtime
+                .register_discovered_agent(id.to_string(), handle)
+                .await
+                .unwrap();
 
             let agent_info = runtime.get_agent(id).await.unwrap();
             uuids.push(agent_info.agent_uuid.clone());

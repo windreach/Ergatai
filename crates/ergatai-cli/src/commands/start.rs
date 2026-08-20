@@ -60,9 +60,7 @@ pub async fn handle(
             let canonical = std::fs::canonicalize(&abs_path).unwrap_or_else(|_| abs_path.clone());
             let parent = canonical.parent();
             match parent {
-                Some(p) if !p.as_os_str().is_empty() => {
-                    Some(p.to_string_lossy().to_string())
-                }
+                Some(p) if !p.as_os_str().is_empty() => Some(p.to_string_lossy().to_string()),
                 _ => {
                     // Fallback to current directory
                     let cwd = std::env::current_dir().context("Failed to get current directory")?;
@@ -101,9 +99,12 @@ pub async fn handle(
 
     // Step 2: Check if agent already running in this workspace
     let agents = client.list_agents().await?;
-    let existing_agent = agents
-        .iter()
-        .find(|a| a.workspace_id == workspace_id && a.state == "running");
+    let existing_agent = agents.iter().find(|a| {
+        a.workspace_id == workspace_id
+            // Prefer the is_alive boolean from the unified lifecycle state machine.
+            // Fall back to case-insensitive string comparison for backward compat.
+            && (a.is_alive || a.state.eq_ignore_ascii_case("running"))
+    });
 
     if let Some(agent) = existing_agent {
         println!("✓ Agent already running: {}", agent.agent_id);
@@ -111,7 +112,12 @@ pub async fn handle(
         // Step 3: Spawn agent (use absolute path as command, pass work_dir)
         println!("✓ Spawning agent: {}", agent_command);
         let response = client
-            .spawn_agent(&workspace_id, &agent_command, effective_work_dir.as_deref(), None)
+            .spawn_agent(
+                &workspace_id,
+                &agent_command,
+                effective_work_dir.as_deref(),
+                None,
+            )
             .await
             .context("Failed to spawn agent")?;
         println!("✓ Agent spawned: {}", response.agent_id);

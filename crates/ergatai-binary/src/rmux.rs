@@ -185,12 +185,16 @@ fn start_daemon_if_needed(rmux_path: &Path) -> ErgataiResult<()> {
                 match child.try_wait() {
                     Ok(Some(status)) if !status.success() => {
                         // Read stderr to get the error message
-                        let stderr = child.stderr.take().map(|mut s| {
-                            let mut buf = String::new();
-                            use std::io::Read;
-                            let _ = s.read_to_string(&mut buf);
-                            buf
-                        }).unwrap_or_default();
+                        let stderr = child
+                            .stderr
+                            .take()
+                            .map(|mut s| {
+                                let mut buf = String::new();
+                                use std::io::Read;
+                                let _ = s.read_to_string(&mut buf);
+                                buf
+                            })
+                            .unwrap_or_default();
                         tracing::warn!(
                             status = %status,
                             stderr = %stderr.trim(),
@@ -200,7 +204,9 @@ fn start_daemon_if_needed(rmux_path: &Path) -> ErgataiResult<()> {
                     }
                     Ok(Some(_status)) => {
                         // `rmux new-session -d` exits 0 after starting the server — this is expected.
-                        tracing::debug!("rmux daemon launcher exited (server started in background)");
+                        tracing::debug!(
+                            "rmux daemon launcher exited (server started in background)"
+                        );
                     }
                     Ok(None) => {
                         // Child is still running (daemon process), which is good.

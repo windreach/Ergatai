@@ -263,12 +263,21 @@ impl ErgataiMcpServer {
 
                 serde_json::json!({
                     "agent_id": info.agent_id,
+                    "agent_uuid": info.agent_uuid,
                     "display_name": info.display_name,
                     "mcp_agent_id": info.mcp_agent_id,
                     "workspace_id": info.workspace_id,
+                    // Lifecycle state (lowercase) from unified state machine
+                    "state": info.lifecycle.state_name(),
+                    "lifecycle_state": info.lifecycle.state_name(),
+                    "task_id": info.task_id,
+                    "is_alive": info.lifecycle.is_alive(),
+                    "is_idle": info.lifecycle.is_idle(),
+                    "is_processing": info.lifecycle.is_processing(),
                     "status": if info.mcp_agent_id.is_some() { "active" } else { "discovered" },
                     "is_self": is_self,
                     "ergatai_agent_id": info.handle.metadata.get("ergatai_agent_id"),
+                    "last_heartbeat": info.last_heartbeat.to_rfc3339(),
                 })
             })
             .collect();
@@ -465,8 +474,12 @@ impl ErgataiMcpServer {
         // ── Check if this is a reply BEFORE check_and_record modifies token state ──
         // is_reply_message checks token_owner: if sender holds token, it means recipient sent last.
         // Must be called BEFORE check_and_record which transfers the token.
-        let from_runtime_id_for_batch = from_runtime_id.clone().unwrap_or_else(|| from_agent.clone());
-        let is_reply = self.is_reply_message(&from_runtime_id_for_batch, &resolved_agent_id).await;
+        let from_runtime_id_for_batch = from_runtime_id
+            .clone()
+            .unwrap_or_else(|| from_agent.clone());
+        let is_reply = self
+            .is_reply_message(&from_runtime_id_for_batch, &resolved_agent_id)
+            .await;
 
         info!(
             from_agent = %from_agent,
@@ -539,8 +552,14 @@ impl ErgataiMcpServer {
             }
 
             // Get agent UUIDs for stable routing
-            let from_uuid = runtime.get_agent(&from_runtime_id_for_batch).await.map(|info| info.agent_uuid);
-            let to_uuid = runtime.get_agent(&resolved_agent_id).await.map(|info| info.agent_uuid);
+            let from_uuid = runtime
+                .get_agent(&from_runtime_id_for_batch)
+                .await
+                .map(|info| info.agent_uuid);
+            let to_uuid = runtime
+                .get_agent(&resolved_agent_id)
+                .await
+                .map(|info| info.agent_uuid);
 
             let payload = ergatai_nats::AgentMessagePayload {
                 from_agent: from_agent.clone(),
@@ -597,7 +616,9 @@ impl ErgataiMcpServer {
     }
 
     /// Submit a DAG workflow for multi-agent collaboration
-    #[tool(description = "Submit a DAG workflow for multi-agent collaboration. Accepts YAML format (recommended) or legacy Markdown format. The system auto-detects the format.")]
+    #[tool(
+        description = "Submit a DAG workflow for multi-agent collaboration. Accepts YAML format (recommended) or legacy Markdown format. The system auto-detects the format."
+    )]
     async fn submit_orchestration(
         &self,
         params: Parameters<SubmitOrchestrationParams>,
@@ -1129,7 +1150,10 @@ impl ErgataiMcpServer {
     ///
     /// Returns the display_name if set (e.g., "frontend-dev"),
     /// otherwise falls back to the runtime ID (e.g., "%72").
-    async fn get_agent_display_name(runtime: &ergatai_runtime::AgentRuntime, agent_id: &str) -> String {
+    async fn get_agent_display_name(
+        runtime: &ergatai_runtime::AgentRuntime,
+        agent_id: &str,
+    ) -> String {
         if let Some(info) = runtime.get_agent(agent_id).await {
             if let Some(ref display_name) = info.display_name {
                 return display_name.clone();

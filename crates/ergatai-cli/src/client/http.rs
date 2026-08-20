@@ -172,9 +172,31 @@ pub struct WorkspaceResponse {
 #[derive(Debug, Deserialize)]
 pub struct AgentInfoResponse {
     pub agent_id: String,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub agent_uuid: String,
     pub workspace_id: String,
     pub state: String,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub lifecycle_state: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub task_id: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub mcp_agent_id: Option<String>,
+    #[serde(default)]
+    pub is_alive: bool,
+    #[serde(default)]
+    pub is_idle: bool,
+    #[serde(default)]
+    pub is_processing: bool,
+    #[allow(dead_code)]
     pub created_at: String,
+    #[serde(default)]
+    pub last_heartbeat: String,
 }
 
 #[derive(Debug, Deserialize)]

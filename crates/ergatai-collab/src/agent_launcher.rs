@@ -44,6 +44,8 @@ pub struct RunningAgent {
     pub plan_file: PathBuf,
     pub result_file: PathBuf,
     pub status: AgentStatus,
+    /// New unified lifecycle state
+    pub lifecycle: Option<ergatai_runtime::AgentLifecycleState>,
     /// Tmux pane ID where the agent is running (e.g. "ergatai-opencode:0.0")
     pub pane_id: Option<String>,
     /// File access token ID (for file access control)
@@ -244,6 +246,7 @@ impl AgentLauncher {
             plan_file: plan.plan_file.clone(),
             result_file: result_file.clone(),
             status: AgentStatus::Starting,
+            lifecycle: None,
             pane_id: None,
             token_id: Some(file_token.id.to_string()),
         };
@@ -1221,6 +1224,7 @@ mod tests {
                     plan_file: PathBuf::from("/tmp/plan.md"),
                     result_file: PathBuf::from("/tmp/result.md"),
                     status: AgentStatus::Running,
+                    lifecycle: None,
                     pane_id: None,
                     token_id: None,
                 },
@@ -1253,6 +1257,7 @@ mod tests {
                     plan_file: PathBuf::from("/tmp/p.md"),
                     result_file: PathBuf::from("/tmp/r.md"),
                     status: AgentStatus::Completed,
+                    lifecycle: None,
                     pane_id: None,
                     token_id: None,
                 },
@@ -1278,6 +1283,7 @@ mod tests {
                     plan_file: PathBuf::from("/tmp/p.md"),
                     result_file: PathBuf::from("/tmp/r.md"),
                     status: AgentStatus::Running,
+                    lifecycle: None,
                     pane_id: None,
                     token_id: None,
                 },
@@ -1303,6 +1309,7 @@ mod tests {
                     plan_file: PathBuf::from("/tmp/p.md"),
                     result_file: PathBuf::from("/tmp/r.md"),
                     status: AgentStatus::Failed,
+                    lifecycle: None,
                     pane_id: None,
                     token_id: None,
                 },

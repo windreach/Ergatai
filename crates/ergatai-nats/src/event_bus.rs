@@ -335,6 +335,39 @@ impl EventBus {
         self.publish(&subject, payload).await
     }
 
+    /// Publish an agent lifecycle state change event.
+    ///
+    /// Subject: `ergatai.agent.lifecycle.{agent_uuid}`
+    /// Uses core NATS (not JetStream) for low-latency fan-out to subscribers.
+    /// TaskScheduler and other observers subscribe to react to agent state changes.
+    pub async fn publish_agent_lifecycle(
+        &self,
+        payload: &AgentLifecycleEventPayload,
+    ) -> ErgataiResult<()> {
+        let subject = format!(
+            "ergatai.agent.lifecycle.{}",
+            sanitize_agent_name(&payload.agent_uuid)
+        );
+        self.publish(&subject, payload).await
+    }
+
+    /// Subscribe to agent lifecycle events for a specific agent.
+    pub async fn subscribe_agent_lifecycle(
+        &self,
+        agent_uuid: &str,
+    ) -> ErgataiResult<async_nats::Subscriber> {
+        let subject = format!(
+            "ergatai.agent.lifecycle.{}",
+            sanitize_agent_name(agent_uuid)
+        );
+        self.connection.subscribe(&subject).await
+    }
+
+    /// Subscribe to ALL agent lifecycle events (wildcard).
+    pub async fn subscribe_all_agent_lifecycles(&self) -> ErgataiResult<async_nats::Subscriber> {
+        self.connection.subscribe("ergatai.agent.lifecycle.*").await
+    }
+
     // ── File Access Control subscribe helpers ──
 
     /// Subscribe to file access requests (FileLockManager)
@@ -622,7 +655,10 @@ mod tests {
         let mut sub = bus.subscribe_all_node_complete().await.unwrap();
 
         let mut outputs = serde_json::Map::new();
-        outputs.insert("result".to_string(), serde_json::Value::String("done".to_string()));
+        outputs.insert(
+            "result".to_string(),
+            serde_json::Value::String("done".to_string()),
+        );
 
         let payload = NodeCompletePayload {
             node_id: "n1".to_string(),
@@ -643,7 +679,10 @@ mod tests {
                 .expect("deser failed");
 
         assert_eq!(received.node_id, "n1");
-        assert_eq!(received.outputs.get("result"), Some(&serde_json::Value::String("done".to_string())));
+        assert_eq!(
+            received.outputs.get("result"),
+            Some(&serde_json::Value::String("done".to_string()))
+        );
     }
 
     /// Test NodeFailed publish + receive

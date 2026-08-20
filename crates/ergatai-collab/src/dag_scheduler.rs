@@ -57,10 +57,15 @@ impl DagScheduler {
     /// Create a new DAG scheduler with the given context
     pub fn with_context(project_root: PathBuf, graph: TaskGraph, context: DagContext) -> Self {
         // Use persisted dag_id if available (for recovery), otherwise generate new one
-        let dag_id = graph.dag_id.clone().unwrap_or_else(|| format!("dag-{}", uuid::Uuid::new_v4()));
+        let dag_id = graph
+            .dag_id
+            .clone()
+            .unwrap_or_else(|| format!("dag-{}", uuid::Uuid::new_v4()));
 
         // Restore deadline from persisted started_at + timeout
-        let deadline = if let (Some(ref started_at), Some(timeout)) = (&graph.started_at, graph.timeout) {
+        let deadline = if let (Some(ref started_at), Some(timeout)) =
+            (&graph.started_at, graph.timeout)
+        {
             // Parse RFC3339 timestamp and calculate remaining deadline
             if let Ok(start_time) = chrono::DateTime::parse_from_rfc3339(started_at) {
                 let start_utc = start_time.with_timezone(&chrono::Utc);
@@ -77,11 +82,10 @@ impl DagScheduler {
                 // Fallback: treat as fresh start
                 Some(std::time::Instant::now() + std::time::Duration::from_secs(timeout))
             }
-        } else if let Some(timeout) = graph.timeout {
-            // No started_at yet, fresh start
-            Some(std::time::Instant::now() + std::time::Duration::from_secs(timeout))
         } else {
-            None
+            graph
+                .timeout
+                .map(|timeout| std::time::Instant::now() + std::time::Duration::from_secs(timeout))
         };
 
         Self {
@@ -178,9 +182,10 @@ impl DagScheduler {
                 }
 
                 // Calculate adjusted priority using CPM
-                let base_priority = ergatai_lock::conflict_arbitration::priority_to_number(&node.priority)
-                    .map(|p| p as u32)
-                    .unwrap_or(2);
+                let base_priority =
+                    ergatai_lock::conflict_arbitration::priority_to_number(&node.priority)
+                        .map(|p| p as u32)
+                        .unwrap_or(2);
 
                 let adjusted_priority = if let Some(ref cpm_result) = critical_path_result {
                     ergatai_dag::critical_path::adjust_priority_with_critical_path(
@@ -206,7 +211,12 @@ impl DagScheduler {
         for (node, priority) in ready_nodes {
             match self.generate_and_submit(&node, priority).await {
                 Ok(task_id) => {
-                    tracing::info!("Submitted node {} as task {} (priority: {})", node.id, task_id, priority);
+                    tracing::info!(
+                        "Submitted node {} as task {} (priority: {})",
+                        node.id,
+                        task_id,
+                        priority
+                    );
                     submitted.push(task_id);
                 }
                 Err(e) => {
@@ -234,7 +244,9 @@ impl DagScheduler {
     ///
     /// Uses estimated durations from node metadata or defaults to 10 seconds per node.
     /// Returns None if the graph is empty or has no valid start nodes.
-    async fn calculate_critical_path(&self) -> Option<ergatai_dag::critical_path::CriticalPathResult> {
+    async fn calculate_critical_path(
+        &self,
+    ) -> Option<ergatai_dag::critical_path::CriticalPathResult> {
         let graph = self.graph.lock().await;
 
         // Build estimated durations map
@@ -290,7 +302,10 @@ impl DagScheduler {
         }
 
         // Fallback: direct task_scheduler call
-        let tid = self.scheduler.submit_task_with_priority(plan_file, priority).await?;
+        let tid = self
+            .scheduler
+            .submit_task_with_priority(plan_file, priority)
+            .await?;
 
         // Start timeout watchdog if timeout is configured
         if let Some(timeout_secs) = node.timeout {
@@ -418,7 +433,10 @@ impl DagScheduler {
                 "DAG-level timeout reached, failing all remaining nodes"
             );
 
-            if let Err(e) = scheduler.fail_all_remaining_nodes("DAG-level timeout reached").await {
+            if let Err(e) = scheduler
+                .fail_all_remaining_nodes("DAG-level timeout reached")
+                .await
+            {
                 tracing::error!(dag_id = %dag_id, error = %e, "Failed to handle DAG timeout");
             }
         });
@@ -613,7 +631,8 @@ impl DagScheduler {
 
             if let Some(outputs) = ctx.get_node_outputs(dep_id) {
                 // Check if the JSON value is a non-empty object
-                let is_non_empty_object = matches!(outputs, serde_json::Value::Object(obj) if !obj.is_empty());
+                let is_non_empty_object =
+                    matches!(outputs, serde_json::Value::Object(obj) if !obj.is_empty());
 
                 if is_non_empty_object {
                     lines.push(format!("\n**{}** ({}) outputs:", dep_name, dep_id));
@@ -672,9 +691,10 @@ impl DagScheduler {
             let mut ready_with_priority = Vec::new();
             for node in ready {
                 // Calculate adjusted priority using CPM
-                let base_priority = ergatai_lock::conflict_arbitration::priority_to_number(&node.priority)
-                    .map(|p| p as u32)
-                    .unwrap_or(2);
+                let base_priority =
+                    ergatai_lock::conflict_arbitration::priority_to_number(&node.priority)
+                        .map(|p| p as u32)
+                        .unwrap_or(2);
 
                 let adjusted_priority = if let Some(ref cpm_result) = critical_path_result {
                     ergatai_dag::critical_path::adjust_priority_with_critical_path(
@@ -705,7 +725,12 @@ impl DagScheduler {
         for (node, priority) in ready_nodes {
             match self.generate_and_submit(&node, priority).await {
                 Ok(task_id) => {
-                    tracing::info!("Submitted newly ready node {} as task {} (priority: {})", node.id, task_id, priority);
+                    tracing::info!(
+                        "Submitted newly ready node {} as task {} (priority: {})",
+                        node.id,
+                        task_id,
+                        priority
+                    );
                     newly_submitted.push(task_id);
                 }
                 Err(e) => {
@@ -841,9 +866,10 @@ impl DagScheduler {
             tokio::time::sleep(delay).await;
 
             // Calculate priority for retry
-            let base_priority = ergatai_lock::conflict_arbitration::priority_to_number(&node_clone.priority)
-                .map(|p| p as u32)
-                .unwrap_or(2);
+            let base_priority =
+                ergatai_lock::conflict_arbitration::priority_to_number(&node_clone.priority)
+                    .map(|p| p as u32)
+                    .unwrap_or(2);
 
             let priority = if let Some(ref cpm_result) = critical_path_result {
                 ergatai_dag::critical_path::adjust_priority_with_critical_path(
@@ -966,7 +992,11 @@ impl DagScheduler {
         for node_id in &seen {
             if let Some(node) = graph.find_node_mut(node_id) {
                 node.status = TaskStatus::Skipped;
-                tracing::info!("Skipped node {} (depends on skipped/failed {})", node_id, failed_id);
+                tracing::info!(
+                    "Skipped node {} (depends on skipped/failed {})",
+                    node_id,
+                    failed_id
+                );
             }
         }
 
@@ -995,7 +1025,9 @@ impl DagScheduler {
     async fn save_graph_unlocked(&self) -> ErgataiResult<()> {
         let ergatai_dir = self.project_root.join(".ergatai");
         // Use per-DAG filenames to support multiple concurrent DAGs
-        let dag_id_safe = self.dag_id.replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '_', "_");
+        let dag_id_safe = self
+            .dag_id
+            .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '_', "_");
 
         // Serialize graph
         let graph_json = {
@@ -1052,7 +1084,9 @@ impl DagScheduler {
         }
 
         if dag_files.is_empty() {
-            return Err(ErgataiError::NotFound("No DAG state files found".to_string()));
+            return Err(ErgataiError::NotFound(
+                "No DAG state files found".to_string(),
+            ));
         }
 
         // Sort by modification time (most recent first)
@@ -1251,7 +1285,8 @@ async fn handle_dag_event(js_msg: &async_nats::jetstream::Message, scheduler: &D
         tracing::info!(node_id = %payload.node_id, "Received JetStream node_complete event");
 
         // Check if outputs is a non-empty object
-        let has_outputs = matches!(&payload.outputs, serde_json::Value::Object(obj) if !obj.is_empty());
+        let has_outputs =
+            matches!(&payload.outputs, serde_json::Value::Object(obj) if !obj.is_empty());
         if has_outputs {
             scheduler
                 .record_outputs(&payload.node_id, payload.outputs)
@@ -1344,7 +1379,8 @@ async fn handle_dag_event(js_msg: &async_nats::jetstream::Message, scheduler: &D
 
 use std::sync::Mutex as StdMutex;
 
-static GLOBAL_DAGS: std::sync::OnceLock<StdMutex<HashMap<String, DagScheduler>>> = std::sync::OnceLock::new();
+static GLOBAL_DAGS: std::sync::OnceLock<StdMutex<HashMap<String, DagScheduler>>> =
+    std::sync::OnceLock::new();
 
 fn dag_registry() -> &'static StdMutex<HashMap<String, DagScheduler>> {
     GLOBAL_DAGS.get_or_init(|| StdMutex::new(HashMap::new()))
@@ -1354,7 +1390,9 @@ fn dag_registry() -> &'static StdMutex<HashMap<String, DagScheduler>> {
 pub fn set_dag_scheduler(scheduler: DagScheduler) {
     let dag_id = scheduler.dag_id().to_string();
     match dag_registry().lock() {
-        Ok(mut guard) => { guard.insert(dag_id, scheduler); }
+        Ok(mut guard) => {
+            guard.insert(dag_id, scheduler);
+        }
         Err(poisoned) => {
             tracing::error!("Global DAG registry lock poisoned, recovering");
             poisoned.into_inner().insert(dag_id, scheduler);
@@ -1564,7 +1602,9 @@ mod tests {
             "review_result".to_string(),
             serde_json::Value::String("3 issues found: unused imports".to_string()),
         );
-        scheduler.record_outputs("n1", serde_json::Value::Object(outputs)).await;
+        scheduler
+            .record_outputs("n1", serde_json::Value::Object(outputs))
+            .await;
 
         // Now generate plan for n2 and verify template was rendered
         let graph = scheduler.graph.lock().await;
@@ -1644,7 +1684,10 @@ mod tests {
 
         scheduler.set_global("greeting", "hello").await;
         let mut outputs = serde_json::Map::new();
-        outputs.insert("result".to_string(), serde_json::Value::String("done".to_string()));
+        outputs.insert(
+            "result".to_string(),
+            serde_json::Value::String("done".to_string()),
+        );
         scheduler
             .record_outputs("n1", serde_json::Value::Object(outputs))
             .await;
@@ -1655,10 +1698,7 @@ mod tests {
         let outputs = ctx.get_node_outputs("n1");
         assert!(outputs.is_some());
         if let Some(serde_json::Value::Object(obj)) = outputs {
-            assert_eq!(
-                obj.get("result").and_then(|v| v.as_str()),
-                Some("done")
-            );
+            assert_eq!(obj.get("result").and_then(|v| v.as_str()), Some("done"));
         } else {
             panic!("Expected Object");
         }
@@ -1863,7 +1903,10 @@ mod tests {
         ]);
         let scheduler = DagScheduler::new(PathBuf::from("/tmp/upstream"), graph);
         let mut outputs = serde_json::Map::new();
-        outputs.insert("key1".to_string(), serde_json::Value::String("value1".to_string()));
+        outputs.insert(
+            "key1".to_string(),
+            serde_json::Value::String("value1".to_string()),
+        );
         scheduler
             .record_outputs("n1", serde_json::Value::Object(outputs))
             .await;

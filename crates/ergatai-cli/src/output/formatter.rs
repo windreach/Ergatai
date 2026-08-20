@@ -26,17 +26,49 @@ pub fn format_agents_table(agents: &[AgentInfoResponse]) {
     }
 
     println!(
-        "{:<40} {:<30} {:<15} CREATED",
-        "AGENT ID", "WORKSPACE", "STATE"
+        "{:<30} {:<20} {:<15} {:<10} {:<10} LAST HEARTBEAT",
+        "AGENT ID", "WORKSPACE", "STATE", "ALIVE", "TASK"
     );
-    println!("{}", "-".repeat(100));
+    println!("{}", "-".repeat(110));
 
     for a in agents {
+        let task_display = a.task_id.as_deref().unwrap_or("-");
+        let heartbeat = if a.last_heartbeat.is_empty() {
+            "-".to_string()
+        } else if a.last_heartbeat.len() >= 19 && a.last_heartbeat.is_ascii() {
+            // Extract time portion from RFC3339-like timestamp (bytes 11..19 = "HH:MM:SS")
+            a.last_heartbeat[11..19].to_string()
+        } else {
+            a.last_heartbeat.clone()
+        };
+        let name_suffix = a
+            .display_name
+            .as_ref()
+            .map(|n| format!(" ({})", n))
+            .unwrap_or_default();
+
         println!(
-            "{:<40} {:<30} {:<15} {}",
-            a.agent_id, a.workspace_id, a.state, a.created_at
+            "{:<30} {:<20} {:<15} {:<10} {:<10} {}{}",
+            a.agent_id,
+            a.workspace_id,
+            a.state,
+            if a.is_alive { "yes" } else { "no" },
+            task_display,
+            heartbeat,
+            name_suffix,
         );
     }
+
+    // Summary
+    let total = agents.len();
+    let alive = agents.iter().filter(|a| a.is_alive).count();
+    let idle = agents.iter().filter(|a| a.is_idle).count();
+    let processing = agents.iter().filter(|a| a.is_processing).count();
+    println!();
+    println!(
+        "Total: {} | Alive: {} | Idle: {} | Processing: {}",
+        total, alive, idle, processing
+    );
 }
 
 pub fn format_status(status: &StatusResponse) {
@@ -94,9 +126,18 @@ mod tests {
     fn make_agent(agent_id: &str, workspace_id: &str, state: &str) -> AgentInfoResponse {
         AgentInfoResponse {
             agent_id: agent_id.to_string(),
+            agent_uuid: format!("uuid-{}", agent_id),
             workspace_id: workspace_id.to_string(),
             state: state.to_string(),
+            lifecycle_state: state.to_string(),
+            display_name: None,
+            task_id: None,
+            mcp_agent_id: None,
+            is_alive: state == "running" || state == "idle" || state == "processing",
+            is_idle: state == "idle",
+            is_processing: state == "processing",
             created_at: "2024-01-01T00:00:00Z".to_string(),
+            last_heartbeat: "2024-01-01T00:00:00Z".to_string(),
         }
     }
 
@@ -242,9 +283,18 @@ mod tests {
     fn test_agent_created_at_displayed() {
         let agent = AgentInfoResponse {
             agent_id: "test-agent".to_string(),
+            agent_uuid: "uuid-test".to_string(),
             workspace_id: "test-ws".to_string(),
             state: "running".to_string(),
+            lifecycle_state: "running".to_string(),
+            display_name: None,
+            task_id: None,
+            mcp_agent_id: None,
+            is_alive: true,
+            is_idle: false,
+            is_processing: false,
             created_at: "2024-06-15T12:30:00Z".to_string(),
+            last_heartbeat: "2024-06-15T12:30:00Z".to_string(),
         };
         format_agents_table(&[agent]);
     }

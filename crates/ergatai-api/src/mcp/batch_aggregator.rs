@@ -89,6 +89,7 @@ struct BatchSession {
     /// 已收集的回复: to_agent → content
     replies: HashMap<String, String>,
     /// session 创建时间
+    #[allow(dead_code)]
     created_at: Instant,
     /// 最大超时时间 (最后一个发送时刻 + REPLY_WINDOW)
     max_timeout: Instant,
@@ -122,7 +123,12 @@ impl BatchAggregator {
     /// 1. 短暂持有 `send_records` 锁：检查已有 batch、添加新记录、提取 targets
     /// 2. 不持有任何锁：执行 batch 检测与创建（可能耗时较长）
     /// 3. 短暂持有 `send_records` 锁：更新记录的 batch_id
-    pub async fn record_send(&self, from_agent: &str, to_agent: &str, is_reply: bool) -> Option<String> {
+    pub async fn record_send(
+        &self,
+        from_agent: &str,
+        to_agent: &str,
+        is_reply: bool,
+    ) -> Option<String> {
         // 回复消息不参与 batch 检测
         // 场景: A 发给 B/C (触发 batch)，B/C 回复后 A 再回复 B/C
         // 如果 A 的回复也被记录，会导致后续 batch 检测混乱
@@ -176,7 +182,11 @@ impl BatchAggregator {
         if let Some(ref bid) = batch_id {
             let mut records = self.send_records.lock().await;
             if let Some(agent_records) = records.get_mut(from_agent) {
-                if let Some(record) = agent_records.iter_mut().rev().find(|r| r.to_agent == to_agent) {
+                if let Some(record) = agent_records
+                    .iter_mut()
+                    .rev()
+                    .find(|r| r.to_agent == to_agent)
+                {
                     record.batch_id = Some(bid.clone());
                 }
             }
@@ -325,7 +335,9 @@ impl BatchAggregator {
                 }
 
                 // 收集回复
-                session.replies.insert(from_agent.to_string(), content.to_string());
+                session
+                    .replies
+                    .insert(from_agent.to_string(), content.to_string());
 
                 info!(
                     batch_id = %session.batch_id,
@@ -409,7 +421,11 @@ impl BatchAggregator {
     }
 
     /// 合并多条回复成一条消息（带去重）
-    fn merge_replies(&self, replies: &HashMap<String, String>, targets: &HashSet<String>) -> String {
+    fn merge_replies(
+        &self,
+        replies: &HashMap<String, String>,
+        targets: &HashSet<String>,
+    ) -> String {
         let mut result = String::from("## 📨 Batch Reply Summary\n\n");
 
         // 按 targets 顺序排列，确保一致性
@@ -417,8 +433,9 @@ impl BatchAggregator {
         sorted_targets.sort();
 
         // 用于去重：content -> list of agents who sent this content
-        let mut content_to_agents: std::collections::HashMap<&str, Vec<&str>> = std::collections::HashMap::new();
-        let mut seen_contents: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut content_to_agents: std::collections::HashMap<&str, Vec<&str>> =
+            std::collections::HashMap::new();
+        let _seen_contents: std::collections::HashSet<String> = std::collections::HashSet::new();
 
         // 第一遍：收集所有回复，找出重复的
         for target in sorted_targets.iter() {
@@ -427,13 +444,14 @@ impl BatchAggregator {
                 let cleaned_reply = Self::strip_hint(reply);
                 content_to_agents
                     .entry(cleaned_reply)
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(target.as_str());
             }
         }
 
         // 第二遍：输出去重后的结果
-        let mut output_order: Vec<(&str, &Vec<&str>)> = content_to_agents.iter().map(|(k, v)| (*k, v)).collect();
+        let mut output_order: Vec<(&str, &Vec<&str>)> =
+            content_to_agents.iter().map(|(k, v)| (*k, v)).collect();
         // 按第一个 agent 的名称排序，保持一致性
         output_order.sort_by_key(|(_, agents)| agents.first().copied().unwrap_or(""));
 
@@ -441,7 +459,10 @@ impl BatchAggregator {
             let from_list = agents.join(", ");
             if agents.len() > 1 {
                 // 多个 agent 回复相同内容
-                result.push_str(&format!("### From: {} (same reply)\n\n{}\n\n", from_list, content));
+                result.push_str(&format!(
+                    "### From: {} (same reply)\n\n{}\n\n",
+                    from_list, content
+                ));
             } else {
                 result.push_str(&format!("### From: {}\n\n{}\n\n", from_list, content));
             }
@@ -465,7 +486,9 @@ impl BatchAggregator {
         let content = content.trim();
         if let Some(idx) = content.rfind('[') {
             let potential_hint = &content[idx..];
-            if potential_hint.starts_with("[Reply via") || potential_hint.starts_with("[If no questions") {
+            if potential_hint.starts_with("[Reply via")
+                || potential_hint.starts_with("[If no questions")
+            {
                 return content[..idx].trim();
             }
         }
@@ -520,6 +543,7 @@ impl BatchAggregator {
     }
 
     /// 获取指定 agent 的活跃 batch 信息 (用于调试)
+    #[allow(dead_code)]
     pub async fn get_batch_info(&self, from_agent: &str) -> Vec<BatchInfo> {
         let sessions = self.sessions.lock().await;
         sessions
@@ -537,6 +561,7 @@ impl BatchAggregator {
 
 /// Batch 状态信息 (用于调试/API)
 #[derive(Debug, Clone, serde::Serialize)]
+#[allow(dead_code)]
 pub struct BatchInfo {
     pub batch_id: String,
     pub targets: Vec<String>,
@@ -573,7 +598,10 @@ mod tests {
 
         // 第二次发送给不同目标
         let result2 = aggregator.record_send("agent-a", "agent-c", false).await;
-        assert!(result2.is_some(), "Second send to different target should create batch");
+        assert!(
+            result2.is_some(),
+            "Second send to different target should create batch"
+        );
 
         // 验证 batch 信息
         let info = aggregator.get_batch_info("agent-a").await;
@@ -588,7 +616,10 @@ mod tests {
         // 多次发送给同一目标不应触发 batch
         aggregator.record_send("agent-a", "agent-b", false).await;
         let result = aggregator.record_send("agent-a", "agent-b", false).await;
-        assert!(result.is_none(), "Sending to same target should not create batch");
+        assert!(
+            result.is_none(),
+            "Sending to same target should not create batch"
+        );
     }
 
     #[tokio::test]
@@ -601,7 +632,9 @@ mod tests {
         assert!(batch_id.is_some());
 
         // B 回复 A
-        let result1 = aggregator.on_reply("agent-b", "agent-a", "Hello from B").await;
+        let result1 = aggregator
+            .on_reply("agent-b", "agent-a", "Hello from B")
+            .await;
         assert_eq!(result1, Some(true), "Reply should be collected");
 
         // 检查状态
@@ -609,7 +642,9 @@ mod tests {
         assert_eq!(info[0].replies_collected, 1);
 
         // C 回复 A
-        let result2 = aggregator.on_reply("agent-c", "agent-a", "Hello from C").await;
+        let result2 = aggregator
+            .on_reply("agent-c", "agent-a", "Hello from C")
+            .await;
         assert_eq!(result2, Some(true), "Reply should be collected");
 
         // 检查状态：应该已收齐
@@ -637,11 +672,16 @@ mod tests {
 
         // 再发一条回复，也不应该触发 batch
         let result2 = aggregator.record_send("agent-a", "agent-c", true).await;
-        assert!(result2.is_none(), "Reply sends should not create batch even to multiple targets");
+        assert!(
+            result2.is_none(),
+            "Reply sends should not create batch even to multiple targets"
+        );
 
         // 检查 send_records 应该是空的
         let records = aggregator.send_records.lock().await;
-        assert!(records.get("agent-a").is_none() || records.get("agent-a").unwrap().is_empty(),
-            "Reply sends should not be recorded");
+        assert!(
+            records.get("agent-a").is_none() || records.get("agent-a").unwrap().is_empty(),
+            "Reply sends should not be recorded"
+        );
     }
 }

@@ -153,7 +153,10 @@ impl DagContext {
             }
             Value::Array(arr) => {
                 // Serialize arrays as JSON strings
-                map.insert(prefix.to_string(), serde_json::to_string(arr).unwrap_or_default());
+                map.insert(
+                    prefix.to_string(),
+                    serde_json::to_string(arr).unwrap_or_default(),
+                );
             }
             Value::String(s) => {
                 map.insert(prefix.to_string(), s.clone());

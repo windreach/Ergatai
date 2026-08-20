@@ -82,11 +82,7 @@ pub struct TaskScheduler {
 
 impl TaskScheduler {
     /// Create a new task scheduler (private, use global_scheduler() instead)
-    fn new(
-        project_root: PathBuf,
-        strategy: ScheduleStrategy,
-        concurrency_limit: usize,
-    ) -> Self {
+    fn new(project_root: PathBuf, strategy: ScheduleStrategy, concurrency_limit: usize) -> Self {
         let queue_file = project_root.join(".ergatai").join(".scheduler-queue.json");
         let limit = if concurrency_limit == 0 {
             DEFAULT_CONCURRENCY_LIMIT
@@ -325,8 +321,7 @@ impl TaskScheduler {
         let parsed_agents: Vec<(String, String)> = agent_ids
             .iter()
             .filter_map(|id| {
-                AgentLauncher::parse_agent_id(id)
-                    .map(|(t, a)| (t.to_string(), a.to_string()))
+                AgentLauncher::parse_agent_id(id).map(|(t, a)| (t.to_string(), a.to_string()))
             })
             .collect();
 
@@ -785,6 +780,142 @@ impl TaskScheduler {
 
         Ok(())
     }
+
+    /// Start a lifecycle event consumer that reacts to agent state changes.
+    ///
+    /// Subscribes to `ergatai.agent.lifecycle.*` (all agents). When an agent
+    /// transitions to a terminal state (failed, timed_out, signaled) while
+    /// holding a task, the task is cancelled and released so it can be
+    /// retried or re-scheduled.
+    ///
+    /// Uses core NATS (not JetStream) for low-latency fan-out.
+    ///
+    /// Returns a [`LifecycleConsumerHandle`] that can be used to gracefully
+    /// shut down the consumer. Dropping the handle without calling
+    /// `shutdown()` will leave the consumer running until the NATS
+    /// subscription closes.
+    pub fn start_lifecycle_consumer(self: &Arc<Self>) -> LifecycleConsumerHandle {
+        let scheduler = Arc::clone(self);
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+        let join_handle = tokio::spawn(async move {
+            let conn = match ergatai_nats::get_nats_connection().await {
+                Some(c) => c,
+                None => {
+                    tracing::warn!("NATS not initialized, lifecycle consumer not started");
+                    return;
+                }
+            };
+
+            let event_bus = ergatai_nats::EventBus::new(conn);
+
+            let mut subscriber = match event_bus.subscribe_all_agent_lifecycles().await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to subscribe to agent lifecycle events");
+                    return;
+                }
+            };
+
+            tracing::info!("Agent lifecycle consumer started (subject: ergatai.agent.lifecycle.*)");
+
+            let mut shutdown_rx = shutdown_rx;
+            use futures_util::StreamExt;
+            loop {
+                tokio::select! {
+                    biased; // Check shutdown first
+
+                    _ = shutdown_rx.changed() => {
+                        if *shutdown_rx.borrow() {
+                            tracing::info!("Agent lifecycle consumer received shutdown signal");
+                            break;
+                        }
+                    }
+
+                    msg = subscriber.next() => {
+                        let Some(msg) = msg else {
+                            tracing::warn!("Agent lifecycle consumer stream closed");
+                            break;
+                        };
+
+                        let payload: ergatai_nats::AgentLifecycleEventPayload =
+                            match serde_json::from_slice(&msg.payload) {
+                                Ok(p) => p,
+                                Err(e) => {
+                                    tracing::warn!(error = %e, "Failed to deserialize lifecycle event");
+                                    continue;
+                                }
+                            };
+
+                        // Only react to terminal states where the agent had a task
+                        if !payload.is_terminal {
+                            continue;
+                        }
+
+                        let Some(task_id) = &payload.task_id else {
+                            continue;
+                        };
+
+                        tracing::warn!(
+                            agent_uuid = %payload.agent_uuid,
+                            agent_id = %payload.agent_id,
+                            task_id = %task_id,
+                            from_state = %payload.from_state,
+                            to_state = %payload.to_state,
+                            reason = ?payload.reason,
+                            "Agent terminated while holding task — cancelling task"
+                        );
+
+                        // Cancel the running task (releases concurrency permit)
+                        scheduler.cancel_running_task(task_id).await;
+                    }
+                }
+            }
+        });
+
+        LifecycleConsumerHandle {
+            join_handle: Some(join_handle),
+            shutdown_tx: Some(shutdown_tx),
+        }
+    }
+}
+
+/// Handle to a running lifecycle consumer task.
+///
+/// Call [`shutdown`](Self::shutdown) to gracefully stop the consumer.
+/// Dropping the handle without shutdown leaves the consumer running.
+pub struct LifecycleConsumerHandle {
+    join_handle: Option<tokio::task::JoinHandle<()>>,
+    shutdown_tx: Option<tokio::sync::watch::Sender<bool>>,
+}
+
+impl LifecycleConsumerHandle {
+    /// Signal the consumer to stop and wait for it to finish.
+    ///
+    /// Returns immediately if the consumer has already exited.
+    pub async fn shutdown(mut self) {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(true);
+        }
+        if let Some(handle) = self.join_handle.take() {
+            let _ = handle.await;
+        }
+    }
+
+    /// Check if the consumer task has finished.
+    pub fn is_finished(&self) -> bool {
+        self.join_handle.as_ref().is_none_or(|h| h.is_finished())
+    }
+}
+
+impl Drop for LifecycleConsumerHandle {
+    fn drop(&mut self) {
+        // If dropped without shutdown(), signal the consumer to stop but don't await.
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(true);
+        }
+        // JoinHandle is detached — task continues until it observes the shutdown signal.
+    }
 }
 
 /// Initialize the JetStream pull consumer for task submissions on the DAG_EVENTS stream.
@@ -1239,7 +1370,11 @@ mod tests {
     async fn test_concurrency_limit_enforced() {
         let temp_dir = tempfile::tempdir().unwrap();
         // Create a scheduler with a small concurrency limit
-        let scheduler = TaskScheduler::new(temp_dir.path().to_path_buf(), ScheduleStrategy::WaitForAgent, 2);
+        let scheduler = TaskScheduler::new(
+            temp_dir.path().to_path_buf(),
+            ScheduleStrategy::WaitForAgent,
+            2,
+        );
 
         assert_eq!(scheduler.concurrency_limit(), 2);
         assert_eq!(scheduler.available_concurrency().await, 2);
@@ -1270,7 +1405,11 @@ mod tests {
     #[tokio::test]
     async fn test_mark_completed_releases_permit() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let scheduler = TaskScheduler::new(temp_dir.path().to_path_buf(), ScheduleStrategy::WaitForAgent, 2);
+        let scheduler = TaskScheduler::new(
+            temp_dir.path().to_path_buf(),
+            ScheduleStrategy::WaitForAgent,
+            2,
+        );
 
         // Start with 2 available slots
         assert_eq!(scheduler.available_concurrency().await, 2);

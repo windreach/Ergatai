@@ -36,6 +36,8 @@
 //! ```
 
 // Core types
+pub mod agent_lifecycle;
+pub mod agent_record;
 pub mod types;
 
 // Backend trait
@@ -48,6 +50,13 @@ pub mod backends;
 pub mod runtime;
 
 // Re-export primary API
+pub use agent_lifecycle::{
+    AgentLifecycleState, ProcessingPhase, ResourceType, StopReason, TimeoutType,
+};
+pub use agent_record::{
+    AgentHandle as RecordAgentHandle, AgentRecord, StateTransition,
+    WorkspaceHandle as RecordWorkspaceHandle,
+};
 pub use backend::AgentRuntimeBackend;
 pub use backends::direct_process::DirectProcessBackend;
 pub use backends::local_pty::LocalPtyBackend;

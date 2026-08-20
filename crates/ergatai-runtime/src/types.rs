@@ -164,8 +164,12 @@ pub struct AgentInfo {
     /// Backend handle for this agent
     pub handle: AgentHandle,
 
-    /// Current lifecycle state
+    /// Current lifecycle state (deprecated - use lifecycle instead)
+    #[deprecated(note = "Use lifecycle field instead")]
     pub state: AgentState,
+
+    /// New unified lifecycle state machine
+    pub lifecycle: crate::agent_lifecycle::AgentLifecycleState,
 
     /// Optional task ID (for DAG orchestration)
     pub task_id: Option<String>,
@@ -177,6 +181,12 @@ pub struct AgentInfo {
     /// Set when an MCP client connects and is bound to this runtime agent.
     /// Enables resolving MCP IDs to runtime IDs for message injection.
     pub mcp_agent_id: Option<String>,
+
+    /// Last heartbeat timestamp (for hang detection)
+    pub last_heartbeat: chrono::DateTime<chrono::Utc>,
+
+    /// State transition history (for debugging and audit)
+    pub state_history: Vec<crate::agent_record::StateTransition>,
 }
 
 #[cfg(test)]
@@ -452,6 +462,7 @@ mod tests {
 
     #[test]
     fn test_agent_info_construction() {
+        let now = chrono::Utc::now();
         let info = AgentInfo {
             agent_uuid: "550e8400-e29b-41d4-a716-446655440000".to_string(),
             agent_id: "agent-1".to_string(),
@@ -467,20 +478,32 @@ mod tests {
                 process_id: None,
                 metadata: HashMap::new(),
             },
+            #[allow(deprecated)]
             state: AgentState::Running,
+            lifecycle: crate::agent_lifecycle::AgentLifecycleState::Running {
+                task_id: None,
+                started_at: now,
+                last_heartbeat: now,
+            },
             task_id: None,
-            created_at: chrono::Utc::now(),
+            created_at: now,
             mcp_agent_id: None,
+            last_heartbeat: now,
+            state_history: Vec::new(),
         };
         assert_eq!(info.agent_id, "agent-1");
         assert_eq!(info.agent_uuid, "550e8400-e29b-41d4-a716-446655440000");
         assert_eq!(info.workspace_id, "ws-1");
-        assert_eq!(info.state, AgentState::Running);
+        #[allow(deprecated)]
+        {
+            assert_eq!(info.state, AgentState::Running);
+        }
         assert!(info.task_id.is_none());
     }
 
     #[test]
     fn test_agent_info_with_task() {
+        let now = chrono::Utc::now();
         let info = AgentInfo {
             agent_uuid: "550e8400-e29b-41d4-a716-446655440001".to_string(),
             agent_id: "agent-1".to_string(),
@@ -496,10 +519,18 @@ mod tests {
                 process_id: None,
                 metadata: HashMap::new(),
             },
+            #[allow(deprecated)]
             state: AgentState::Starting,
+            lifecycle: crate::agent_lifecycle::AgentLifecycleState::Starting {
+                workspace_id: "ws-1".to_string(),
+                command: "test".to_string(),
+                started_at: now,
+            },
             task_id: Some("task-42".to_string()),
-            created_at: chrono::Utc::now(),
+            created_at: now,
             mcp_agent_id: None,
+            last_heartbeat: now,
+            state_history: Vec::new(),
         };
         assert_eq!(info.task_id, Some("task-42".to_string()));
     }

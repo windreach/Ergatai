@@ -24,6 +24,7 @@
 //! | `FileReadyPayload`           | `ergatai.file.ready.{file_hash}`           | FileLockMgr     | Waiters       |
 //! | `FileErrorPayload`           | `ergatai.file.error.{file_hash}`           | FileLockMgr     | Waiters       |
 //! | `SystemTokenPayload`         | `ergatai.system.token.{agent_id}`          | System          | Agent         |
+//! | `AgentLifecycleEventPayload` | `ergatai.agent.lifecycle.{agent_uuid}`     | UnifiedRegistry | TaskScheduler |
 
 use std::collections::HashMap;
 
@@ -400,6 +401,39 @@ pub struct FileEnforcementPayload {
     pub timestamp: u64,
 }
 
+/// Agent lifecycle state change event
+///
+/// Published by the unified agent registry whenever an agent's lifecycle
+/// state transitions. Subscribers (e.g., TaskScheduler) can react to
+/// agent state changes — for example, re-scheduling a task when an
+/// agent fails or times out.
+///
+/// Subject: `ergatai.agent.lifecycle.{agent_uuid}`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentLifecycleEventPayload {
+    /// Stable agent UUID (persistent across pane restarts)
+    pub agent_uuid: String,
+    /// Dynamic agent ID (e.g., pane ID like "%72")
+    pub agent_id: String,
+    /// State name before transition (lowercase, e.g., "running")
+    pub from_state: String,
+    /// State name after transition (lowercase, e.g., "failed")
+    pub to_state: String,
+    /// Human-readable reason for the transition (if any)
+    pub reason: Option<String>,
+    /// Task ID the agent was working on (if any)
+    pub task_id: Option<String>,
+    /// Whether the new state is terminal (agent is done)
+    pub is_terminal: bool,
+    /// Whether the agent is still alive after this transition
+    pub is_alive: bool,
+    /// Timestamp of the transition (RFC3339)
+    pub timestamp: String,
+    /// Additional metadata (JSON)
+    #[serde(default)]
+    pub metadata: serde_json::Value,
+}
+
 /// Enum wrapping all event types — useful for a single subscriber
 /// that wants to handle multiple event kinds.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -425,6 +459,8 @@ pub enum DagEvent {
     SystemToken(SystemTokenPayload),
     /// Kernel-level enforcement event (fanotify decisions).
     FileEnforcement(FileEnforcementPayload),
+    /// Agent lifecycle state change event.
+    AgentLifecycle(AgentLifecycleEventPayload),
 }
 
 #[cfg(test)]
@@ -479,8 +515,14 @@ mod tests {
     #[test]
     fn test_node_complete_roundtrip() {
         let mut outputs = serde_json::Map::new();
-        outputs.insert("review_result".to_string(), serde_json::Value::String("LGTM".to_string()));
-        outputs.insert("issues".to_string(), serde_json::Value::String("3".to_string()));
+        outputs.insert(
+            "review_result".to_string(),
+            serde_json::Value::String("LGTM".to_string()),
+        );
+        outputs.insert(
+            "issues".to_string(),
+            serde_json::Value::String("3".to_string()),
+        );
 
         let payload = NodeCompletePayload {
             node_id: "n1".to_string(),

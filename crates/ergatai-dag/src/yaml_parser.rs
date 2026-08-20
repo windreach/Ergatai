@@ -63,6 +63,7 @@ struct YamlParameter {
     /// 参数名称
     name: String,
     /// 参数描述（可选）
+    #[allow(dead_code)]
     description: Option<String>,
     /// 默认值（可选）
     default: Option<serde_yaml::Value>,
@@ -130,10 +131,12 @@ fn default_agent() -> String {
 ///
 /// # Returns
 /// 解析后的 TaskGraph
-pub fn parse_dag_yaml(content: &str, params: Option<HashMap<String, serde_json::Value>>) -> ErgataiResult<TaskGraph> {
-    let yaml_dag: YamlDag = serde_yaml::from_str(content).map_err(|e| {
-        ErgataiError::InvalidArgument(format!("YAML parse error: {}", e))
-    })?;
+pub fn parse_dag_yaml(
+    content: &str,
+    params: Option<HashMap<String, serde_json::Value>>,
+) -> ErgataiResult<TaskGraph> {
+    let yaml_dag: YamlDag = serde_yaml::from_str(content)
+        .map_err(|e| ErgataiError::InvalidArgument(format!("YAML parse error: {}", e)))?;
 
     if yaml_dag.tasks.is_empty() {
         return Err(ErgataiError::InvalidArgument(
@@ -305,7 +308,10 @@ pub fn is_yaml_format(content: &str) -> bool {
 /// 自动检测格式并解析 DAG 定义
 ///
 /// 优先尝试 YAML 解析，如果不符合 YAML 格式则回退到 Markdown 解析。
-pub fn parse_dag_auto(content: &str, params: Option<HashMap<String, serde_json::Value>>) -> ErgataiResult<TaskGraph> {
+pub fn parse_dag_auto(
+    content: &str,
+    params: Option<HashMap<String, serde_json::Value>>,
+) -> ErgataiResult<TaskGraph> {
     if is_yaml_format(content) {
         parse_dag_yaml(content, params)
     } else {
@@ -362,7 +368,11 @@ fn resolve_parameters(
 }
 
 /// 验证参数类型
-fn validate_param_type(name: &str, value: &serde_json::Value, expected_type: &str) -> ErgataiResult<()> {
+fn validate_param_type(
+    name: &str,
+    value: &serde_json::Value,
+    expected_type: &str,
+) -> ErgataiResult<()> {
     let is_valid = match expected_type.to_lowercase().as_str() {
         "string" => value.is_string(),
         "number" | "int" | "integer" | "float" => value.is_number(),
@@ -547,7 +557,10 @@ tasks:
 "#;
         let result = parse_dag_yaml(yaml, None);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Duplicate task name"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Duplicate task name"));
     }
 
     #[test]
@@ -598,7 +611,10 @@ tasks:
 "#;
         let graph = parse_dag_yaml(yaml, None).unwrap();
         let node = &graph.nodes[0];
-        assert_eq!(node.metadata.get("custom_key"), Some(&"custom_value".to_string()));
+        assert_eq!(
+            node.metadata.get("custom_key"),
+            Some(&"custom_value".to_string())
+        );
         assert_eq!(node.metadata.get("another"), Some(&"42".to_string()));
     }
 

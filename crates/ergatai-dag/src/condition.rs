@@ -72,11 +72,11 @@ impl Condition {
             match ch {
                 '(' => depth += 1,
                 ')' => depth -= 1,
-                _ if depth == 0 => {
+                _ if depth == 0
                     // Check if this position starts the operator
-                    if expr[i..].starts_with(op) {
-                        return Some(i);
-                    }
+                    && expr[i..].starts_with(op) =>
+                {
+                    return Some(i);
                 }
                 _ => {}
             }
@@ -93,9 +93,7 @@ impl Condition {
             "==" => left_val == right_val,
             "!=" => left_val != right_val,
             "<" => Self::compare_values(&left_val, &right_val) == Some(std::cmp::Ordering::Less),
-            ">" => {
-                Self::compare_values(&left_val, &right_val) == Some(std::cmp::Ordering::Greater)
-            }
+            ">" => Self::compare_values(&left_val, &right_val) == Some(std::cmp::Ordering::Greater),
             "<=" => matches!(
                 Self::compare_values(&left_val, &right_val),
                 Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
@@ -113,8 +111,7 @@ impl Condition {
         let s = s.trim();
 
         // Remove quotes if present
-        if (s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\''))
-        {
+        if (s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')) {
             return Value::String(s[1..s.len() - 1].to_string());
         }
 

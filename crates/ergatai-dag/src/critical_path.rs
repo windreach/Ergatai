@@ -3,7 +3,7 @@
 //! 关键路径法用于识别 DAG 中最长的执行路径，从而优化整体执行时间。
 //! 关键路径上的节点决定了 DAG 的最短完成时间，应该优先执行。
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 
 use crate::dag_topology::{TaskGraph, TaskNode, TaskStatus};
 
@@ -45,11 +45,8 @@ pub fn calculate_critical_path(
     }
 
     // 构建节点映射和依赖图
-    let node_map: HashMap<String, &TaskNode> = graph
-        .nodes
-        .iter()
-        .map(|n| (n.id.clone(), n))
-        .collect();
+    let node_map: HashMap<String, &TaskNode> =
+        graph.nodes.iter().map(|n| (n.id.clone(), n)).collect();
 
     // 构建反向依赖图（谁依赖我）
     let mut dependents: HashMap<String, Vec<String>> = HashMap::new();
@@ -87,7 +84,7 @@ pub fn calculate_critical_path(
 
     // BFS 正向遍历
     while let Some(node_id) = queue.pop_front() {
-        let node = node_map.get(&node_id)?;
+        let _node = node_map.get(&node_id)?;
         let node_est = *earliest_start.get(&node_id)?;
         let duration = estimated_durations.get(&node_id).copied().unwrap_or(10); // 默认 10 秒
 
@@ -126,14 +123,14 @@ pub fn calculate_critical_path(
     let end_nodes: Vec<String> = graph
         .nodes
         .iter()
-        .filter(|n| dependents.get(&n.id).map_or(true, |d| d.is_empty()))
+        .filter(|n| dependents.get(&n.id).is_none_or(|d| d.is_empty()))
         .filter(|n| n.status != TaskStatus::Skipped)
         .map(|n| n.id.clone())
         .collect();
 
     let mut total_duration = 0u64;
     for end_id in &end_nodes {
-        let end_node = node_map.get(end_id)?;
+        let _end_node = node_map.get(end_id)?;
         let end_est = earliest_start.get(end_id)?;
         let duration = estimated_durations.get(end_id).copied().unwrap_or(10);
         let end_eft = end_est + duration;
@@ -146,7 +143,7 @@ pub fn calculate_critical_path(
 
     // 结束节点的 LST = total_duration - duration
     for end_id in &end_nodes {
-        let end_node = node_map.get(end_id)?;
+        let _end_node = node_map.get(end_id)?;
         let duration = estimated_durations.get(end_id).copied().unwrap_or(10);
         let lst = total_duration.saturating_sub(duration);
         latest_start.insert(end_id.clone(), lst);
@@ -175,7 +172,7 @@ pub fn calculate_critical_path(
             // 检查是否所有依赖此节点的节点都已计算
             let all_dependents_calculated = dependents
                 .get(dep_id)
-                .map_or(true, |deps| deps.iter().all(|d| latest_start.contains_key(d)));
+                .is_none_or(|deps| deps.iter().all(|d| latest_start.contains_key(d)));
 
             if all_dependents_calculated {
                 queue.push_back(dep_id.clone());

@@ -26,7 +26,8 @@ use axum::{
 };
 use clap::Parser;
 use ergatai_core::cross_agent::{
-    get_dag_scheduler, get_dag_scheduler_by_id, list_dag_schedulers, set_dag_scheduler, DagScheduler,
+    get_dag_scheduler, get_dag_scheduler_by_id, list_dag_schedulers, set_dag_scheduler,
+    DagScheduler,
 };
 use ergatai_core::nats;
 use serde::{Deserialize, Serialize};
@@ -926,7 +927,8 @@ async fn submit_dag(body: String) -> impl IntoResponse {
     }
 
     // Try to parse as JSON first (new format with parameters)
-    let (definition, parameters) = if let Ok(req) = serde_json::from_str::<SubmitDagRequest>(&body) {
+    let (definition, parameters) = if let Ok(req) = serde_json::from_str::<SubmitDagRequest>(&body)
+    {
         (req.definition, req.parameters)
     } else {
         // Fallback to plain string (old format)

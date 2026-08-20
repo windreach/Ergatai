@@ -32,9 +32,20 @@ pub struct SpawnAgentResponse {
 #[derive(Debug, Serialize)]
 pub struct AgentInfoResponse {
     pub agent_id: String,
+    pub agent_uuid: String,
     pub workspace_id: String,
+    /// Lifecycle state name (lowercase, e.g., "running", "idle", "processing")
     pub state: String,
+    /// Detailed lifecycle state from the unified state machine
+    pub lifecycle_state: String,
+    pub display_name: Option<String>,
+    pub task_id: Option<String>,
+    pub mcp_agent_id: Option<String>,
+    pub is_alive: bool,
+    pub is_idle: bool,
+    pub is_processing: bool,
     pub created_at: String,
+    pub last_heartbeat: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -48,11 +59,25 @@ pub async fn list_agents(State(_state): State<AppState>) -> impl IntoResponse {
 
     let response: Vec<AgentInfoResponse> = agents
         .into_iter()
-        .map(|a| AgentInfoResponse {
-            agent_id: a.agent_id,
-            workspace_id: a.workspace_id,
-            state: format!("{:?}", a.state),
-            created_at: a.created_at.to_rfc3339(),
+        .map(|a| {
+            // Use lifecycle state_name() which returns lowercase (fixes the bug)
+            let lifecycle_state = a.lifecycle.state_name().to_string();
+            AgentInfoResponse {
+                agent_id: a.agent_id,
+                agent_uuid: a.agent_uuid,
+                workspace_id: a.workspace_id,
+                // Fix: use lowercase lifecycle state instead of Debug-formatted AgentState
+                state: lifecycle_state.clone(),
+                lifecycle_state,
+                display_name: a.display_name,
+                task_id: a.task_id,
+                mcp_agent_id: a.mcp_agent_id,
+                is_alive: a.lifecycle.is_alive(),
+                is_idle: a.lifecycle.is_idle(),
+                is_processing: a.lifecycle.is_processing(),
+                created_at: a.created_at.to_rfc3339(),
+                last_heartbeat: a.last_heartbeat.to_rfc3339(),
+            }
         })
         .collect();
 
@@ -124,7 +149,11 @@ fn validate_command(command: &str) -> Result<(), String> {
     // Check against env var if set, otherwise use static whitelist.
     // This avoids allocating a Vec<String> on every validation call.
     if let Ok(commands) = std::env::var("ERGATAI_ALLOWED_COMMANDS") {
-        for pattern in commands.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        for pattern in commands
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
             if matches_pattern(binary_name, pattern) || matches_pattern(program, pattern) {
                 return Ok(());
             }
@@ -137,7 +166,10 @@ fn validate_command(command: &str) -> Result<(), String> {
         }
     }
 
-    Err(format!("Command '{}' is not allowed (strict mode)", binary_name))
+    Err(format!(
+        "Command '{}' is not allowed (strict mode)",
+        binary_name
+    ))
 }
 
 pub async fn spawn_agent(
@@ -331,14 +363,27 @@ mod tests {
     fn test_agent_info_response_serialization() {
         let resp = AgentInfoResponse {
             agent_id: "a-1".to_string(),
+            agent_uuid: "uuid-1".to_string(),
             workspace_id: "ws-1".to_string(),
-            state: "Running".to_string(),
+            state: "running".to_string(),
+            lifecycle_state: "running".to_string(),
+            display_name: None,
+            task_id: None,
+            mcp_agent_id: None,
+            is_alive: true,
+            is_idle: false,
+            is_processing: false,
             created_at: "2026-01-01T00:00:00Z".to_string(),
+            last_heartbeat: "2026-01-01T00:00:00Z".to_string(),
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["agent_id"], "a-1");
+        assert_eq!(json["agent_uuid"], "uuid-1");
         assert_eq!(json["workspace_id"], "ws-1");
-        assert_eq!(json["state"], "Running");
+        // Fixed: state is now lowercase
+        assert_eq!(json["state"], "running");
+        assert_eq!(json["lifecycle_state"], "running");
+        assert_eq!(json["is_alive"], true);
         assert_eq!(json["created_at"], "2026-01-01T00:00:00Z");
     }
 

@@ -27,6 +27,11 @@
 // ── Business logic modules ──
 pub mod agent_registry;
 pub mod signal;
+pub mod unified_registry;
+
+// ── Re-export lifecycle types from ergatai-runtime ──
+pub use ergatai_runtime::agent_lifecycle;
+pub use ergatai_runtime::agent_record;
 
 // ── Re-export extracted crates ──
 pub use ergatai_agent as agent;

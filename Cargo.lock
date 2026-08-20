@@ -862,6 +862,7 @@ dependencies = [
  "ergatai-error",
  "ergatai-lock",
  "ergatai-nats",
+ "ergatai-runtime",
  "evalexpr",
  "futures",
  "futures-util",

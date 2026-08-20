@@ -276,13 +276,17 @@ async fn handle_message(msg: &async_nats::jetstream::Message) {
                     to_agent = %payload.to_agent,
                     "UUID not found, falling back to pane ID"
                 );
-                runtime.resolve_agent_id(&payload.to_agent).await
+                runtime
+                    .resolve_agent_id(&payload.to_agent)
+                    .await
                     .unwrap_or_else(|| payload.to_agent.clone())
             }
         }
     } else {
         // No UUID, use pane ID (legacy message)
-        runtime.resolve_agent_id(&payload.to_agent).await
+        runtime
+            .resolve_agent_id(&payload.to_agent)
+            .await
             .unwrap_or_else(|| payload.to_agent.clone())
     };
 
@@ -291,12 +295,16 @@ async fn handle_message(msg: &async_nats::jetstream::Message) {
         if let Some(id) = runtime.resolve_agent_uuid(from_uuid).await {
             id
         } else {
-            runtime.resolve_agent_id(&payload.from_agent).await
+            runtime
+                .resolve_agent_id(&payload.from_agent)
+                .await
                 .unwrap_or_else(|| payload.from_agent.clone())
         }
     } else {
         // No UUID, use pane ID (legacy message)
-        runtime.resolve_agent_id(&payload.from_agent).await
+        runtime
+            .resolve_agent_id(&payload.from_agent)
+            .await
             .unwrap_or_else(|| payload.from_agent.clone())
     };
 
@@ -355,7 +363,10 @@ async fn handle_message(msg: &async_nats::jetstream::Message) {
         "Delivering message: MCP target → runtime resolution"
     );
 
-    match runtime.inject_message(&to_runtime_id, formatted_message).await {
+    match runtime
+        .inject_message(&to_runtime_id, formatted_message)
+        .await
+    {
         Ok(()) => {
             info!(
                 from = from,

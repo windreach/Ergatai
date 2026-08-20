@@ -1520,10 +1520,10 @@ impl AgentRuntimeBackend for RmuxBackend {
 
         // Cache work_dir so list_workspaces can return it and start_agent
         // can find it when reusing an existing workspace.
-        self.work_dir_cache.write().await.insert(
-            spec.id.clone(),
-            spec.work_dir.to_string_lossy().to_string(),
-        );
+        self.work_dir_cache
+            .write()
+            .await
+            .insert(spec.id.clone(), spec.work_dir.to_string_lossy().to_string());
 
         // Mark as freshly created so start_agent knows to spawn (not reattach).
         // Only if the rmux session was actually created here (not reused).
@@ -1558,7 +1558,9 @@ impl AgentRuntimeBackend for RmuxBackend {
         let rmux = self.get_rmux().await?;
         // Read work_dir from metadata (stored during create_workspace)
         let work_dir = handle.metadata.get("work_dir").map(|s| s.as_str());
-        let (session, _freshly_created) = self.ensure_session_handle(&rmux, &handle.id, work_dir).await?;
+        let (session, _freshly_created) = self
+            .ensure_session_handle(&rmux, &handle.id, work_dir)
+            .await?;
         let session_name = self.session_name(&handle.id);
 
         let mut anchors = self.anchor_panes.write().await;
@@ -1579,7 +1581,9 @@ impl AgentRuntimeBackend for RmuxBackend {
                             pane_index = dp.pane_index,
                             "Reattaching to existing agent pane"
                         );
-                        anchors.entry(handle.id.clone()).or_insert_with(|| pane.clone());
+                        anchors
+                            .entry(handle.id.clone())
+                            .or_insert_with(|| pane.clone());
                         let agent_id = format!("agent-{}", uuid::Uuid::new_v4().as_simple());
                         return Ok(AgentHandle {
                             agent_id,
@@ -1630,9 +1634,9 @@ impl AgentRuntimeBackend for RmuxBackend {
                         if let Some(dir) = work_dir {
                             builder = builder.cwd(dir);
                         }
-                        builder
-                            .await
-                            .map_err(|e| ErgataiError::internal(format!("rmux shell spawn failed: {}", e)))?;
+                        builder.await.map_err(|e| {
+                            ErgataiError::internal(format!("rmux shell spawn failed: {}", e))
+                        })?;
                         new_pane
                     }
                     Err(e) => {
@@ -1650,9 +1654,9 @@ impl AgentRuntimeBackend for RmuxBackend {
                         if let Some(dir) = work_dir {
                             builder = builder.cwd(dir);
                         }
-                        builder
-                            .await
-                            .map_err(|e| ErgataiError::internal(format!("rmux shell respawn failed: {}", e)))?;
+                        builder.await.map_err(|e| {
+                            ErgataiError::internal(format!("rmux shell respawn failed: {}", e))
+                        })?;
                         pane
                     }
                 }
@@ -1670,9 +1674,9 @@ impl AgentRuntimeBackend for RmuxBackend {
                 if let Some(dir) = work_dir {
                     builder = builder.cwd(dir);
                 }
-                builder
-                    .await
-                    .map_err(|e| ErgataiError::internal(format!("rmux shell respawn failed: {}", e)))?;
+                builder.await.map_err(|e| {
+                    ErgataiError::internal(format!("rmux shell respawn failed: {}", e))
+                })?;
                 pane
             }
         };
