@@ -140,6 +140,20 @@ impl NatsConnection {
         Ok(subscriber)
     }
 
+    /// Query the total number of messages pending in the AGENT_MESSAGES stream.
+    /// Used by EventBus::check_backpressure() to throttle publishes when the
+    /// stream backlog exceeds the configured threshold.
+    pub async fn agent_messages_pending_count(&self) -> ErgataiResult<u64> {
+        let stream_name = crate::agent_message_stream::AGENT_MESSAGES_STREAM;
+        let mut stream = self.jetstream.get_stream(stream_name).await.map_err(|e| {
+            ErgataiError::NatsError(format!("stream lookup failed: {e}"))
+        })?;
+        let info = stream.info().await.map_err(|e| {
+            ErgataiError::NatsError(format!("stream info failed: {e}"))
+        })?;
+        Ok(info.state.messages)
+    }
+
     /// Create or get a JetStream stream
     pub async fn create_stream(&self, config: Config) -> ErgataiResult<stream::Stream> {
         let mut stream = self

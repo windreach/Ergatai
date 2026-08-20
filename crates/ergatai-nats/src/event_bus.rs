@@ -3,12 +3,31 @@
 //! Wraps `NatsConnection` with typed publish/subscribe methods for each
 //! DAG event payload.  Handles JSON serialization and subject naming.
 
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
 use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
 use crate::connection::NatsConnection;
 use crate::events::*;
 use ergatai_error::{ErgataiError, ErgataiResult};
+
+/// Cache for the last backpressure check result. Avoids calling
+/// `stream.info()` per message — re-queries only if older than 5s.
+struct BackpressureCache {
+    last_check: Instant,
+    last_depth: u64,
+}
+
+/// How long to trust a cached backpressure depth before re-querying NATS.
+const BACKPRESSURE_CACHE_TTL: Duration = Duration::from_secs(5);
+
+/// Returns true if the cache should be refreshed (stale or empty).
+fn should_requery(cache: &BackpressureCache, now: Instant) -> bool {
+    now.duration_since(cache.last_check) > BACKPRESSURE_CACHE_TTL
+}
 
 /// Event bus for typed NATS pub/sub
 ///
@@ -17,12 +36,19 @@ use ergatai_error::{ErgataiError, ErgataiResult};
 #[derive(Clone)]
 pub struct EventBus {
     connection: NatsConnection,
+    backpressure_cache: Arc<Mutex<BackpressureCache>>,
 }
 
 impl EventBus {
     /// Create a new event bus from an existing NATS connection
     pub fn new(connection: NatsConnection) -> Self {
-        Self { connection }
+        Self {
+            connection,
+            backpressure_cache: Arc::new(Mutex::new(BackpressureCache {
+                last_check: Instant::now() - BACKPRESSURE_CACHE_TTL, // force first re-query
+                last_depth: 0,
+            })),
+        }
     }
 
     /// Get the underlying connection
@@ -139,6 +165,35 @@ impl EventBus {
         self.publish(&subject, payload).await
     }
 
+    /// Check whether the AGENT_MESSAGES stream is under the backpressure threshold.
+    /// Returns Ok(()) if under threshold, or Err if the stream is overloaded.
+    /// Caches the last check result for 5s to avoid per-message NATS round-trips.
+    pub async fn check_backpressure(&self) -> ErgataiResult<()> {
+        let threshold = std::env::var("ERGATAI_BACKPRESSURE_THRESHOLD")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(crate::agent_message_stream::BACKPRESSURE_THRESHOLD);
+
+        let mut cache = self.backpressure_cache.lock().await;
+        let now = Instant::now();
+        let depth = if should_requery(&cache, now) {
+            let d = self.connection.agent_messages_pending_count().await?;
+            cache.last_check = now;
+            cache.last_depth = d;
+            d
+        } else {
+            cache.last_depth
+        };
+
+        if depth >= threshold {
+            Err(ErgataiError::NatsError(format!(
+                "backpressure: AGENT_MESSAGES stream has {depth} pending (threshold {threshold})"
+            )))
+        } else {
+            Ok(())
+        }
+    }
+
     /// Publish an agent-to-agent message via JetStream (reliable, persisted)
     ///
     /// Same subject routing as [`publish_agent_message`](Self::publish_agent_message),
@@ -155,6 +210,9 @@ impl EventBus {
         &self,
         payload: &AgentMessagePayload,
     ) -> ErgataiResult<async_nats::jetstream::publish::PublishAck> {
+        // Backpressure check: refuse publish if stream is overloaded.
+        self.check_backpressure().await?;
+
         let subject = format!(
             "ergatai.agent.message.{}",
             sanitize_agent_name(&payload.to_agent)
@@ -588,6 +646,24 @@ fn sanitize_agent_name(name: &str) -> String {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn backpressure_cache_fresh_skips_requery() {
+        let cache = BackpressureCache {
+            last_check: Instant::now(),
+            last_depth: 500,
+        };
+        assert!(!should_requery(&cache, Instant::now()));
+    }
+
+    #[test]
+    fn backpressure_cache_stale_triggers_requery() {
+        let cache = BackpressureCache {
+            last_check: Instant::now() - Duration::from_secs(10),
+            last_depth: 500,
+        };
+        assert!(should_requery(&cache, Instant::now()));
+    }
 
     #[test]
     fn test_sanitize_agent_name() {

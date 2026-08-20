@@ -25,6 +25,10 @@ use std::time::Duration;
 /// JetStream stream name for agent-to-agent messages
 pub const AGENT_MESSAGES_STREAM: &str = "AGENT_MESSAGES";
 
+/// Total message count in the AGENT_MESSAGES stream above which publish
+/// is refused with a backpressure error. Tunable via ERGATAI_BACKPRESSURE_THRESHOLD env.
+pub const BACKPRESSURE_THRESHOLD: u64 = 1000;
+
 /// Create JetStream stream configuration for agent messages
 ///
 /// This stream persists agent-to-agent messages so they survive:
