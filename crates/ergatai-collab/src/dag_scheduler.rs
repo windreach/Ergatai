@@ -57,6 +57,9 @@ pub struct DagScheduler {
     /// subsequent callers return early.
     finalized: Arc<AtomicBool>,
 
+    /// Wall-clock of last observable progress (node completed, failed, or new submit).
+    last_progress: Arc<Mutex<std::time::Instant>>,
+
     /// Monotonic counter of agent invocations (generate_and_submit calls).
     agent_call_count: Arc<AtomicU64>,
     /// Cap on agent invocations, from TaskGraph.max_agent_calls.
@@ -138,6 +141,7 @@ impl DagScheduler {
             dag_timeout_watcher: Arc::new(Mutex::new(None)),
             collaboration: Arc::new(Mutex::new(collaboration)),
             finalized: Arc::new(AtomicBool::new(false)),
+            last_progress: Arc::new(Mutex::new(std::time::Instant::now())),
             agent_call_count: Arc::new(AtomicU64::new(0)),
             max_agent_calls,
         }
@@ -297,6 +301,10 @@ impl DagScheduler {
             filtered_ready
         };
 
+        // Mark progress at the top of submit_graph (once, not inside the per-node loop).
+        // A stall watchdog will later compare this timestamp against now.
+        self.touch_progress().await;
+
         let mut submitted = Vec::with_capacity(ready_nodes.len());
         for (node, priority) in ready_nodes {
             match self.generate_and_submit(&node, priority).await {
@@ -435,6 +443,25 @@ impl DagScheduler {
     /// Get elapsed time since DAG creation (for duration reporting)
     fn elapsed_secs(&self) -> u64 {
         self.created_at.elapsed().as_secs()
+    }
+
+    /// Refresh the last-progress timestamp to `Instant::now()`.
+    ///
+    /// Called on every observable progress event: a new submit, a node
+    /// completion, or a node failure. The stall watchdog (Phase 2) polls
+    /// `last_progress_age_secs()` and raises an alarm if this goes stale.
+    async fn touch_progress(&self) {
+        let mut lp = self.last_progress.lock().await;
+        *lp = std::time::Instant::now();
+    }
+
+    /// Seconds elapsed since the last progress event.
+    ///
+    /// A large value indicates the DAG is stalled (no node completions,
+    /// failures, or new submits for a while).
+    pub async fn last_progress_age_secs(&self) -> u64 {
+        let lp = self.last_progress.lock().await;
+        lp.elapsed().as_secs()
     }
 
     /// Returns Ok(()) if budget allows another agent call, or Err if exhausted.
@@ -814,6 +841,8 @@ impl DagScheduler {
             self.finalize_if_terminal().await;
             return Err(ErgataiError::internal(reason));
         }
+        // Node completion is observable progress — refresh the stall watchdog timestamp.
+        self.touch_progress().await;
         // Cancel timeout watchdog (node completed normally)
         self.cancel_timeout_watcher(node_id).await;
 
@@ -923,6 +952,8 @@ impl DagScheduler {
             self.finalize_if_terminal().await;
             return Err(ErgataiError::internal(reason));
         }
+        // Node failure is observable progress — refresh the stall watchdog timestamp.
+        self.touch_progress().await;
         // Cancel timeout watchdog (node already failed)
         self.cancel_timeout_watcher(node_id).await;
 
@@ -2197,6 +2228,38 @@ mod tests {
             reason.contains(scheduler.dag_id()),
             "expected dag_id in reason, got: {}",
             reason
+        );
+    }
+
+    #[tokio::test]
+    async fn last_progress_initializes_grows_and_refreshes() {
+        let graph = sample_graph();
+        let scheduler = DagScheduler::new(PathBuf::from("/tmp/progress-ts"), graph);
+
+        // 1. Immediately after construction, age should be small (< 2s).
+        let initial = scheduler.last_progress_age_secs().await;
+        assert!(
+            initial < 2,
+            "initial last_progress age should be < 2s, got {}s",
+            initial
+        );
+
+        // 2. Wait a bit, then age should have grown to >= 1s.
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        let grown = scheduler.last_progress_age_secs().await;
+        assert!(
+            grown >= 1,
+            "last_progress age should have grown to >= 1s after sleeping, got {}s",
+            grown
+        );
+
+        // 3. touch_progress resets the timestamp; age should be small again.
+        scheduler.touch_progress().await;
+        let refreshed = scheduler.last_progress_age_secs().await;
+        assert!(
+            refreshed < 2,
+            "last_progress age should be < 2s after touch_progress, got {}s",
+            refreshed
         );
     }
 }
