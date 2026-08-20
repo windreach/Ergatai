@@ -6,8 +6,8 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use ergatai_dag::context::DagContext;
 use ergatai_error::{ErgataiError, ErgataiResult};
@@ -56,6 +56,11 @@ pub struct DagScheduler {
     /// to `swap(true)` proceeds with the NATS publish + registry cleanup;
     /// subsequent callers return early.
     finalized: Arc<AtomicBool>,
+
+    /// Monotonic counter of agent invocations (generate_and_submit calls).
+    agent_call_count: Arc<AtomicU64>,
+    /// Cap on agent invocations, from TaskGraph.max_agent_calls.
+    max_agent_calls: Option<u64>,
 }
 
 impl DagScheduler {
@@ -118,6 +123,8 @@ impl DagScheduler {
             })
             .unwrap_or_default();
         let collaboration = CollaborationSession::from_graph(&dag_id, &graph, policy);
+        // Read max_agent_calls before moving graph into the Arc.
+        let max_agent_calls = graph.max_agent_calls;
 
         Self {
             graph: Arc::new(Mutex::new(graph)),
@@ -131,6 +138,8 @@ impl DagScheduler {
             dag_timeout_watcher: Arc::new(Mutex::new(None)),
             collaboration: Arc::new(Mutex::new(collaboration)),
             finalized: Arc::new(AtomicBool::new(false)),
+            agent_call_count: Arc::new(AtomicU64::new(0)),
+            max_agent_calls,
         }
     }
 
@@ -349,6 +358,21 @@ impl DagScheduler {
     /// Prefers NATS event publishing when available (decoupled, event-driven).
     /// Falls back to direct `task_scheduler.submit_task()` call otherwise.
     async fn generate_and_submit(&self, node: &TaskNode, priority: u32) -> ErgataiResult<String> {
+        // Budget check: refuse dispatch when DAG-level agent call cap is exhausted.
+        // On exhaustion, defensively nudge terminal finalization so the DAG can
+        // settle (callers already handle the propagated Err by reverting the
+        // node to Pending and logging).
+        if let Err(e) = self.check_budget() {
+            self.finalize_if_terminal().await;
+            return Err(e);
+        }
+        let new_count = self.increment_agent_calls();
+        tracing::debug!(
+            dag_id = %self.dag_id,
+            count = new_count,
+            "agent call dispatched"
+        );
+
         // Generate plan file (still needed — agents read it as a document)
         let plan_file = self.generate_node_plan(node).await?;
         let task_id = node.id.clone();
@@ -404,6 +428,26 @@ impl DagScheduler {
     /// Get elapsed time since DAG creation (for duration reporting)
     fn elapsed_secs(&self) -> u64 {
         self.created_at.elapsed().as_secs()
+    }
+
+    /// Returns Ok(()) if budget allows another agent call, or Err if exhausted.
+    fn check_budget(&self) -> Result<(), ErgataiError> {
+        let Some(limit) = self.max_agent_calls else {
+            return Ok(());
+        };
+        let current = self.agent_call_count.load(Ordering::SeqCst);
+        if current >= limit {
+            Err(ErgataiError::internal(format!(
+                "DAG {} budget exhausted: {} / {} agent calls",
+                self.dag_id, current, limit
+            )))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn increment_agent_calls(&self) -> u64 {
+        self.agent_call_count.fetch_add(1, Ordering::SeqCst) + 1
     }
 
     /// Spawn a timeout watchdog for a node.
@@ -1016,14 +1060,15 @@ impl DagScheduler {
                 let bus = ergatai_nats::EventBus::new(conn);
                 let graph = self.graph.lock().await;
                 let total = graph.nodes.len() as u32;
-                let (completed, failed) = graph
-                    .nodes
-                    .iter()
-                    .fold((0u32, 0u32), |(c, f), n| match n.status {
-                        TaskStatus::Completed => (c + 1, f),
-                        TaskStatus::Failed => (c, f + 1),
-                        _ => (c, f),
-                    });
+                let (completed, failed) =
+                    graph
+                        .nodes
+                        .iter()
+                        .fold((0u32, 0u32), |(c, f), n| match n.status {
+                            TaskStatus::Completed => (c + 1, f),
+                            TaskStatus::Failed => (c, f + 1),
+                            _ => (c, f),
+                        });
                 drop(graph);
 
                 let payload = ergatai_nats::DagCompletePayload {
@@ -2068,5 +2113,34 @@ mod tests {
         let scheduler = DagScheduler::new(PathBuf::from("/tmp/status"), graph);
         let prompt = scheduler.status_prompt().await;
         assert!(!prompt.is_empty());
+    }
+
+    #[tokio::test]
+    async fn dag_budget_exhausted_returns_error() {
+        // Setup: construct a DagScheduler with max_agent_calls = Some(1).
+        let mut graph = sample_graph();
+        graph.max_agent_calls = Some(1);
+        let scheduler = DagScheduler::new(PathBuf::from("/tmp/budget"), graph);
+
+        // First budget check should succeed (counter = 0, limit = 1).
+        assert!(
+            scheduler.check_budget().is_ok(),
+            "check_budget should be Ok before any calls"
+        );
+
+        // Consume the single allowed agent call.
+        let new_count = scheduler.increment_agent_calls();
+        assert_eq!(new_count, 1, "first increment should yield 1");
+
+        // Second budget check should fail with "budget exhausted" in message.
+        let err = scheduler
+            .check_budget()
+            .expect_err("check_budget should be Err after exhausting the budget");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("budget exhausted"),
+            "expected 'budget exhausted' in error message, got: {}",
+            msg
+        );
     }
 }
