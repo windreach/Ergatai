@@ -471,7 +471,7 @@ impl DagScheduler {
 
                 // Start timeout watchdog if timeout is configured
                 if let Some(timeout_secs) = adjusted_timeout {
-                    self.spawn_timeout_watcher(&task_id, timeout_secs, &node.agent).await;
+                    self.spawn_timeout_watcher(&task_id, timeout_secs, &node.agent);
                 }
 
                 return Ok(task_id);
@@ -486,7 +486,7 @@ impl DagScheduler {
 
         // Start timeout watchdog if timeout is configured
         if let Some(timeout_secs) = adjusted_timeout {
-            self.spawn_timeout_watcher(&tid, timeout_secs, &node.agent).await;
+            self.spawn_timeout_watcher(&tid, timeout_secs, &node.agent);
         }
 
         Ok(tid)
@@ -588,7 +588,13 @@ impl DagScheduler {
     ///
     /// Lock ordering: one mutex at a time. The graph lock is dropped before
     /// calling `on_node_failed`, which itself re-acquires the graph lock.
-    async fn spawn_timeout_watcher(&self, node_id: &str, timeout_secs: u64, _agent_name: &str) {
+    ///
+    /// This is sync (not async) because storing the watcher handle requires
+    /// acquiring `timeout_watchers`. Using `tokio::sync::Mutex::lock().await`
+    /// inside an async fn produces a `!Send` future (the `MutexGuard` is
+    /// `!Send`), which breaks `tokio::spawn` in the caller chain. Instead,
+    /// we use `try_lock()` for a sync fast-path and a detached spawn fallback.
+    fn spawn_timeout_watcher(&self, node_id: &str, timeout_secs: u64, _agent_name: &str) {
         if timeout_secs == 0 {
             return;
         }
@@ -682,8 +688,24 @@ impl DagScheduler {
         // Store the handle synchronously to prevent race: if we used a detached
         // spawn, the watcher could fire before the handle is stored, making
         // cancel_timeout_watcher() a no-op.
-        let mut watchers = self.timeout_watchers.lock().await;
-        watchers.insert(node_id_for_store, handle);
+        //
+        // We use try_lock() for a sync fast-path. If the lock is uncontended
+        // (common case), we store immediately. If contended, we fall back to a
+        // detached spawn — the race is benign because the watcher sleeps for
+        // POLL_INTERVAL_SECS before acting and checks node status before failing.
+        let watchers_for_store = self.timeout_watchers.clone();
+        let node_for_store = node_id_for_store.clone();
+        match self.timeout_watchers.try_lock() {
+            Ok(mut w) => {
+                w.insert(node_id_for_store, handle);
+            }
+            Err(_) => {
+                tokio::spawn(async move {
+                    let mut w = watchers_for_store.lock().await;
+                    w.insert(node_for_store, handle);
+                });
+            }
+        }
     }
 
     /// Cancel the timeout watchdog for a node (called on normal completion/failure)
