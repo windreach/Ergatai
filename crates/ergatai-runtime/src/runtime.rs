@@ -74,6 +74,8 @@ pub struct AgentRuntime {
     /// Ensures that even if multiple MCP agents connect concurrently,
     /// they are bound sequentially in creation-time order.
     binding_mutex: Arc<Mutex<()>>,
+    /// Tracks consecutive unhealthy observations per agent. Agents pruned after 2 consecutive Zombie/Dead samples.
+    unhealthy_streaks: Arc<Mutex<HashMap<String, u32>>>,
 }
 
 impl AgentRuntime {
@@ -86,6 +88,7 @@ impl AgentRuntime {
             mcp_index: Arc::new(RwLock::new(HashMap::new())),
             pending_mcp: Arc::new(RwLock::new(Vec::new())),
             binding_mutex: Arc::new(Mutex::new(())),
+            unhealthy_streaks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -382,6 +385,50 @@ impl AgentRuntime {
         }
 
         Ok(count)
+    }
+
+    /// Prune agents that have been observed as Zombie or Dead for 2 consecutive health checks.
+    ///
+    /// Called from the periodic discovery loop (main.rs). One bad sample isn't
+    /// enough — a process briefly in Z state during exit is normal.
+    ///
+    /// Backends that don't support health checks (non-Rmux backends) are no-ops.
+    /// This method uses `as_any()` downcast to call RmuxBackend's health check;
+    /// if the downcast fails, the method returns silently.
+    pub async fn prune_unhealthy_agents(&self) {
+        use crate::backends::proc_linux::ProcessState;
+        use crate::backends::rmux::RmuxBackend;
+
+        let backend_any = self.backend.as_any();
+        let rmux_backend = match backend_any.downcast_ref::<RmuxBackend>() {
+            Some(b) => b,
+            None => {
+                debug!("health check not supported by backend, skipping prune");
+                return;
+            }
+        };
+
+        let health = rmux_backend.health_check_agents().await;
+
+        let mut streaks = self.unhealthy_streaks.lock().await;
+        for (agent_id, state) in health {
+            let is_bad = matches!(state, ProcessState::Zombie | ProcessState::Dead);
+            let entry = streaks.entry(agent_id.clone()).or_insert(0);
+            if is_bad {
+                *entry += 1;
+                if *entry >= 2 {
+                    warn!(
+                        %agent_id,
+                        ?state,
+                        "pruning unhealthy agent (2 consecutive Zombie/Dead samples)"
+                    );
+                    self.registry.write().await.remove(&agent_id);
+                    streaks.remove(&agent_id);
+                }
+            } else {
+                *entry = 0;
+            }
+        }
     }
 
     // ── MCP-to-Runtime agent ID binding ──
@@ -1284,5 +1331,20 @@ mod tests {
 
         let result = runtime.inject_message(&agent_id, "hello").await;
         assert!(result.is_err(), "backend failure should propagate as error");
+    }
+
+    #[tokio::test]
+    async fn test_prune_unhealthy_agents_no_panic_without_rmux() {
+        // With a non-Rmux backend, prune_unhealthy_agents() should be a silent no-op
+        // (the downcast to RmuxBackend fails and the method returns early).
+        let runtime = make_runtime();
+        runtime
+            .launch_agent(make_spec("ws-1"), "cmd", None)
+            .await
+            .unwrap();
+        // Should not panic; agent remains in registry since health check is unsupported.
+        runtime.prune_unhealthy_agents().await;
+        let agents = runtime.list_agents().await;
+        assert_eq!(agents.len(), 1);
     }
 }

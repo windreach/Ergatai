@@ -367,6 +367,8 @@ async fn async_main(args: Args) -> Result<()> {
                                     );
                                 }
                             }
+                            // Prune agents that have been unhealthy for 2 consecutive checks
+                            periodic_runtime.prune_unhealthy_agents().await;
                         }
                     }
                 }
