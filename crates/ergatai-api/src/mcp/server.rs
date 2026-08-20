@@ -135,6 +135,30 @@ struct ListAgentsParams {
     /// Whether to include agent capabilities
     #[serde(default)]
     include_capabilities: Option<bool>,
+
+    /// Optional filter to narrow results.
+    /// - `can_communicate_with`: Only return agents that can communicate with the given agent
+    ///   (based on active DAG MeshPolicy). Without a DAG, all agents can communicate.
+    /// - `in_dag`: Only return agents that are participants in the specified DAG.
+    /// - `status`: Only return agents whose lifecycle state matches (e.g., "running", "idle", "processing").
+    #[serde(default)]
+    filter: Option<AgentFilter>,
+}
+
+/// Filter criteria for `list_agents`. All fields are optional and combined with AND.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct AgentFilter {
+    /// Filter agents that can communicate with the specified agent (based on DAG MeshPolicy).
+    /// The value is an agent identifier (runtime ID like "%15", display name, or MCP ID).
+    /// When no DAG is active, all agents can communicate, so this filter has no effect.
+    pub can_communicate_with: Option<String>,
+
+    /// Filter agents that are participants in the specified DAG (by dag_id).
+    pub in_dag: Option<String>,
+
+    /// Filter agents by lifecycle status (case-insensitive).
+    /// Valid values: "created", "initializing", "idle", "starting", "running", "processing", "stopping", "terminated".
+    pub status: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -241,33 +265,228 @@ elicit_safe!(ApprovalResponse);
 
 #[tool_router]
 impl ErgataiMcpServer {
-    /// List all connected agents and their status
-    #[tool(description = "List all connected agents and their status")]
+    /// List agents you can communicate with, with optional filtering.
+    ///
+    /// # Behavior
+    /// - **Without active DAG**: Returns all online agents (discovered via rmux).
+    /// - **With active DAG**: Returns only agents allowed by the DAG's MeshPolicy.
+    ///   - `Open` — all DAG participants
+    ///   - `Adjacent` — only agents directly connected to you in the DAG
+    ///   - `Star:{hub}` — only the hub (if you are a spoke) or all spokes (if you are the hub)
+    ///   - `Restricted` — only agents in the explicit allow-list
+    ///
+    /// # Filter Options (combined with AND)
+    /// - `can_communicate_with: "<agent_id>"` — Only agents that can communicate with the
+    ///   specified agent under the active MeshPolicy. Without a DAG, all agents are returned.
+    /// - `in_dag: "<dag_id>"` — Only agents participating in the specified DAG.
+    /// - `status: "<state>"` — Only agents whose lifecycle state matches (case-insensitive).
+    ///   Valid states: created, initializing, idle, starting, running, processing, stopping, terminated.
+    ///
+    /// Use this to determine who you can message before calling `send_message`.
+    /// Agents filtered out are not reachable — `send_message` would reject them.
+    #[tool(
+        description = "List agents you can communicate with. Without a DAG, returns all online agents. With a DAG, returns only agents allowed by the DAG's MeshPolicy. Supports optional filter: {can_communicate_with, in_dag, status}."
+    )]
     async fn list_agents(
         &self,
         params: Parameters<ListAgentsParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let _include_capabilities = params.0.include_capabilities.unwrap_or(false);
+        let filter = params.0.filter;
 
         // Get runtime agents (discovered via rmux) instead of just MCP agents
         let runtime = get_agent_runtime();
         let runtime_agents = runtime.list_agents().await;
 
-        // Get the calling agent's ID to mark is_self
+        // Get the calling agent's ID to mark is_self and to filter by MeshPolicy
         let my_agent_id = self.session_agent_id.read().await.clone();
+
+        // Resolve caller's runtime ID so we can match against DAG participants
+        // (participants are identified by runtime ID / TaskNode.agent).
+        let my_runtime_id = match &my_agent_id {
+            Some(id) => runtime.resolve_agent_id(id).await,
+            None => None,
+        };
+
+        // Determine the set of allowed peer IDs under any active DAG.
+        // `None` = no DAG covers me → return everyone (backward compat).
+        // `Some(set)` = only agents in this set are reachable.
+        let allowed_peers: Option<std::collections::HashSet<String>> = {
+            let schedulers = ergatai_core::cross_agent::list_dag_schedulers();
+            let mut covered = false;
+            let mut peers = std::collections::HashSet::new();
+            for scheduler in &schedulers {
+                let session = scheduler.collaboration().await;
+                // Check whether I am a participant (by runtime ID or MCP ID).
+                let i_am_participant = my_runtime_id
+                    .as_ref()
+                    .is_some_and(|rid| session.participants.contains(rid))
+                    || my_agent_id
+                        .as_ref()
+                        .is_some_and(|mid| session.participants.contains(mid));
+                if !i_am_participant {
+                    continue;
+                }
+                covered = true;
+                // I am a participant — enumerate peers allowed by the policy.
+                for other in &session.participants {
+                    // Skip self
+                    if my_runtime_id.as_ref().is_some_and(|rid| other == rid)
+                        || my_agent_id.as_ref().is_some_and(|mid| other == mid)
+                    {
+                        continue;
+                    }
+                    if session.allows(
+                        my_runtime_id.as_deref().or(my_agent_id.as_deref()).unwrap_or(""),
+                        other,
+                    ) {
+                        peers.insert(other.clone());
+                    }
+                }
+            }
+            if covered { Some(peers) } else { None }
+        };
+
+        // ── Pre-compute filter state for `can_communicate_with` ──
+        // When filter.can_communicate_with is set, we need the set of agents that
+        // can communicate with the specified target under all active DAGs.
+        // This is analogous to `allowed_peers` but centered on the filter target
+        // rather than the caller.
+        let comm_with_target: Option<std::collections::HashSet<String>> =
+            if let Some(ref f) = filter {
+                if let Some(ref target_agent) = f.can_communicate_with {
+                    // Resolve the target agent's runtime ID for matching
+                    let target_runtime_id = runtime.resolve_agent_id(target_agent).await;
+                    let schedulers = ergatai_core::cross_agent::list_dag_schedulers();
+                    let mut covered = false;
+                    let mut peers = std::collections::HashSet::new();
+                    for scheduler in &schedulers {
+                        let session = scheduler.collaboration().await;
+                        // Check whether the target is a participant
+                        let target_is_participant = target_runtime_id
+                            .as_ref()
+                            .is_some_and(|rid| session.participants.contains(rid))
+                            || session.participants.contains(target_agent);
+                        if !target_is_participant {
+                            continue;
+                        }
+                        covered = true;
+                        let target_id_ref = target_runtime_id
+                            .as_deref()
+                            .unwrap_or(target_agent.as_str());
+                        for other in &session.participants {
+                            // Skip the target itself
+                            if target_runtime_id.as_ref().is_some_and(|rid| other == rid)
+                                || other == target_agent
+                            {
+                                continue;
+                            }
+                            if session.allows(target_id_ref, other) {
+                                peers.insert(other.clone());
+                            }
+                        }
+                    }
+                    if covered { Some(peers) } else { None }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+        // ── Pre-compute filter state for `in_dag` ──
+        let dag_participants: Option<std::collections::HashSet<String>> =
+            if let Some(ref f) = filter {
+                if let Some(ref dag_id) = f.in_dag {
+                    let scheduler =
+                        ergatai_core::cross_agent::get_dag_scheduler_by_id(Some(dag_id));
+                    match scheduler {
+                        Some(s) => Some(s.collaboration().await.participants),
+                        None => {
+                            // DAG not found — treat as empty filter (nothing matches)
+                            Some(std::collections::HashSet::new())
+                        }
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+        // ── Pre-compute status filter ──
+        let status_filter: Option<String> = filter
+            .as_ref()
+            .and_then(|f| f.status.as_ref().map(|s| s.to_lowercase()));
 
         let agents_json: Vec<serde_json::Value> = runtime_agents
             .iter()
-            .map(|info| {
+            .filter(|info| {
+                // Skip self from the listing
                 let is_self = my_agent_id.as_ref().is_some_and(|id| {
-                    // Check both runtime ID and MCP ID
                     id == &info.agent_id
                         || info
                             .mcp_agent_id
                             .as_ref()
                             .is_some_and(|mcp_id| mcp_id == id)
-                });
-
+                }) || my_runtime_id.as_ref().is_some_and(|rid| rid == &info.agent_id);
+                if is_self {
+                    return false;
+                }
+                // Apply MeshPolicy filter when a DAG covers me
+                if let Some(ref allowed) = allowed_peers {
+                    let matches = allowed.contains(&info.agent_id)
+                        || info
+                            .display_name
+                            .as_ref()
+                            .is_some_and(|dn| allowed.contains(dn))
+                        || info
+                            .mcp_agent_id
+                            .as_ref()
+                            .is_some_and(|mid| allowed.contains(mid));
+                    if !matches {
+                        return false;
+                    }
+                }
+                // Apply can_communicate_with filter
+                if let Some(ref peers) = comm_with_target {
+                    let matches = peers.contains(&info.agent_id)
+                        || info
+                            .display_name
+                            .as_ref()
+                            .is_some_and(|dn| peers.contains(dn))
+                        || info
+                            .mcp_agent_id
+                            .as_ref()
+                            .is_some_and(|mid| peers.contains(mid));
+                    if !matches {
+                        return false;
+                    }
+                }
+                // Apply in_dag filter
+                if let Some(ref participants) = dag_participants {
+                    let matches = participants.contains(&info.agent_id)
+                        || info
+                            .display_name
+                            .as_ref()
+                            .is_some_and(|dn| participants.contains(dn))
+                        || info
+                            .mcp_agent_id
+                            .as_ref()
+                            .is_some_and(|mid| participants.contains(mid));
+                    if !matches {
+                        return false;
+                    }
+                }
+                // Apply status filter
+                if let Some(ref status) = status_filter {
+                    if info.lifecycle.state_name().to_lowercase() != *status {
+                        return false;
+                    }
+                }
+                true
+            })
+            .map(|info| {
                 serde_json::json!({
                     "agent_id": info.agent_id,
                     "agent_uuid": info.agent_uuid,
@@ -282,16 +501,29 @@ impl ErgataiMcpServer {
                     "is_idle": info.lifecycle.is_idle(),
                     "is_processing": info.lifecycle.is_processing(),
                     "status": if info.mcp_agent_id.is_some() { "active" } else { "discovered" },
-                    "is_self": is_self,
                     "ergatai_agent_id": info.handle.metadata.get("ergatai_agent_id"),
                     "last_heartbeat": info.last_heartbeat.to_rfc3339(),
                 })
             })
             .collect();
 
+        let dag_mode = allowed_peers.is_some();
+        let filter_applied = filter.as_ref().is_some_and(|f| {
+            f.can_communicate_with.is_some()
+                || f.in_dag.is_some()
+                || f.status.is_some()
+        });
         let result = serde_json::json!({
             "agents": agents_json,
-            "total": agents_json.len()
+            "total": agents_json.len(),
+            "dag_mode": dag_mode,
+            "filter_applied": filter_applied,
+            "note": match (dag_mode, filter_applied) {
+                (true, true) => "Filtered by active DAG MeshPolicy and user-supplied filter. Only reachable agents are listed.",
+                (true, false) => "Filtered by active DAG MeshPolicy. Only reachable agents are listed.",
+                (false, true) => "No active DAG. All online agents are reachable. User-supplied filter applied.",
+                (false, false) => "No active DAG. All online agents are reachable.",
+            }
         });
 
         Ok(CallToolResult::success(vec![ContentBlock::text(
@@ -391,14 +623,30 @@ impl ErgataiMcpServer {
 
     /// Send a message to another agent.
     ///
-    /// Delivery order:
-    /// 1. **NATS JetStream** (preferred) — message is persisted to `AGENT_MESSAGES` stream,
-    ///    then delivered by the background `MessageDeliveryConsumer` via tmux injection.
-    ///    Provides durability, retry on failure, and delivery confirmation.
-    /// 2. **Direct tmux injection** (fallback) — when NATS is unavailable, falls back to
-    ///    direct AgentRuntime injection. No persistence guarantee.
+    /// # Communication Rules
+    /// - **Without active DAG**: You can message any online agent.
+    ///   Use `list_agents` to see who is available.
+    /// - **With active DAG**: Communication is restricted by the DAG's MeshPolicy.
+    ///   You can only message agents allowed by the policy. Use `list_agents` —
+    ///   it returns only reachable agents under the active policy. If your message
+    ///   is rejected, call `get_collaboration_status` to inspect the DAG rules.
+    ///
+    /// # Task Complexity Annotation (for DAG YAML authors)
+    /// When authoring tasks in a DAG YAML, annotate each task's complexity so the
+    /// scheduler and other agents can reason about effort:
+    /// - `complexity: low`    — format fixes, docs, config changes, simple tech-debt
+    ///                          cleanup (< 30 min)
+    /// - `complexity: medium` — normal feature work, bug fixes, small refactors
+    ///                          (30 min – 2 hours)
+    /// - `complexity: high`   — architectural changes, cross-module refactors,
+    ///                          large migrations (> 2 hours)
+    ///
+    /// # Delivery
+    /// Messages are persisted to NATS JetStream (`AGENT_MESSAGES` stream) and
+    /// delivered by a background consumer via tmux/rmux injection. Direct tmux
+    /// injection is used as a fallback when NATS is unavailable.
     #[tool(
-        description = "Send a message to another agent (NATS JetStream for reliability, tmux fallback)"
+        description = "Send a message to another agent. Without a DAG, any online agent is reachable. With a DAG, only agents allowed by the MeshPolicy are reachable (use list_agents to see who). Persists via NATS JetStream with tmux fallback."
     )]
     async fn send_message(
         &self,
@@ -516,7 +764,12 @@ impl ErgataiMcpServer {
                                     "MeshPolicy denied message"
                                 );
                                 return Ok(CallToolResult::error(vec![ContentBlock::text(
-                                    format!("Message blocked by collaboration policy: {}", reason),
+                                    format!(
+                                        "Message rejected by DAG communication policy: {}. \
+                                         Use `list_agents` to see which agents you can message, \
+                                         or `get_collaboration_status` to inspect the active DAG rules.",
+                                        reason
+                                    ),
                                 )]));
                             }
                             ergatai_core::cross_agent::CommunicationCheck::Allowed => {
@@ -681,9 +934,38 @@ impl ErgataiMcpServer {
         }
     }
 
-    /// Submit a DAG workflow for multi-agent collaboration
+    /// Submit a DAG workflow for multi-agent collaboration.
+    ///
+    /// # DAG Definition Format
+    /// Accepts YAML (recommended) or legacy Markdown. Auto-detected.
+    ///
+    /// ```yaml
+    /// tasks:
+    ///   - name: Task A
+    ///     agent: agent-a
+    ///     task: tasks/a.md
+    ///     complexity: medium        # optional: low | medium | high
+    ///   - name: Task B
+    ///     agent: agent-b
+    ///     depends_on: [Task A]
+    ///     timeout: 300
+    /// communication: adjacent       # optional: open (default) | adjacent | star:{hub}
+    /// ```
+    ///
+    /// # Task Complexity Annotation
+    /// Each task may carry a `complexity` hint. Use it to calibrate expectations:
+    /// - `low`    — format fixes, docs, config changes, simple tech-debt (< 30 min)
+    /// - `medium` — normal features, bug fixes, small refactors (30 min – 2 hours)
+    /// - `high`   — architectural changes, cross-module refactors, large migrations (> 2 hours)
+    ///
+    /// # Communication Policy
+    /// Optional top-level `communication` field sets the MeshPolicy for agents
+    /// participating in this DAG:
+    /// - `open` (default) — any participant can message any other
+    /// - `adjacent` — only agents connected by a dependency edge can talk
+    /// - `star:{hub_agent}` — all traffic routes through the named hub
     #[tool(
-        description = "Submit a DAG workflow for multi-agent collaboration. Accepts YAML format (recommended) or legacy Markdown format. The system auto-detects the format."
+        description = "Submit a DAG workflow for multi-agent collaboration. Accepts YAML (recommended) or Markdown. Supports per-task `complexity: low|medium|high` and top-level `communication: open|adjacent|star:{hub}`."
     )]
     async fn submit_orchestration(
         &self,
