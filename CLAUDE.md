@@ -194,6 +194,42 @@ YAML 顶层 `communication` 字段声明模式（`open` / `adjacent` / `star:{hu
 
 ---
 
+## 防御性编排（Defensive Orchestration）
+
+DAG 调度器新增多层防御机制，防止资源失控和 agent 僵死：
+
+### DAG 预算与超时
+
+| 字段 | 类型 | 含义 |
+|------|------|------|
+| `max_agent_calls` | `Option<u64>` | DAG 全局 agent 调用次数上限（所有节点共享） |
+| `stall_timeout_secs` | `Option<u64>` | 节点无进度超时（触发 stall watcher） |
+| `node_timeout_secs` | `Option<u64>` | 节点硬性超时（三阶段：warn → escalate → fail） |
+
+- **预算检查**：`DagScheduler::check_budget()` 在节点提交、完成、失败时调用，超限则标记 DAG 失败。
+- **僵死检测**：`spawn_stall_watcher()` 每 5 秒检查 `last_progress_age_secs()`，超过 `stall_timeout_secs` 则标记节点失败。
+- **三阶段超时**：`spawn_timeout_watcher()` 在 50%/80%/100% 时分别触发 `publish_node_warned`、`publish_node_escalated`、标记失败。超时错误记录到 `node.metadata["timeout_error"]`。
+
+### 中间件控制
+
+| 机制 | 位置 | 阈值 |
+|------|------|------|
+| Agent 速率限制 | `ergatai-api/src/mcp/rate_limiter.rs` | 60 msg/min/agent（滑动窗口） |
+| NATS 背压 | `ergatai-nats/src/event_bus.rs` | 1000 pending messages（`ERGATAI_BACKPRESSURE_THRESHOLD`） |
+| Agent 健康检查 | `ergatai-runtime/src/backends/proc_linux.rs` | 读取 `/proc/{pid}/stat` 检测 Zombie/Dead |
+| 僵死 agent 清理 | `ergatai-runtime/src/runtime.rs` | 连续 2 次 Zombie/Dead 观察后从 registry 移除 |
+
+- **速率限制**：`AgentRateLimiter` 全局单例（`OnceLock`），在 `send_message()` 中检查，超限返回 `ErrorData::invalid_params(...)`。
+- **背压检查**：`EventBus::check_backpressure()` 在 `publish_agent_message_reliable()` 顶部调用，缓存 5 秒避免频繁 NATS 查询。
+- **健康检查**：`RmuxBackend::health_check_agents()` 遍历所有 pane，提取 PID，读取 `/proc/{pid}/stat` 判断进程状态。
+- **自动清理**：`AgentRuntime::prune_unhealthy_agents()` 在 30 秒发现循环中调用，连续 2 次 Zombie/Dead 则从 registry 移除。
+
+### 通信策略（已有，未改动）
+
+`MeshPolicy` 枚举定义 DAG 内 agent 通信规则：`Open`（默认，任意 participant 可通信）、`Adjacent`（仅依赖边）、`Star { hub }`（中心辐射）、`Restricted { pairs }`（显式白名单）。`send_message` 在投递前调用 `CollaborationSession::allows(from, to)` 校验。
+
+---
+
 ## NATS Subject 命名
 
 ```
