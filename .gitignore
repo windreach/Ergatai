@@ -18,6 +18,9 @@ target/
 .DS_Store
 Thumbs.db
 
+# Superpowers SDD scratch (per-plan workspaces)
+.superpowers/
+
 # Logs
 *.log
 npm-debug.log*
