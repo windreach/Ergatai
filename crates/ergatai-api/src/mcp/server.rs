@@ -337,14 +337,21 @@ impl ErgataiMcpServer {
                         continue;
                     }
                     if session.allows(
-                        my_runtime_id.as_deref().or(my_agent_id.as_deref()).unwrap_or(""),
+                        my_runtime_id
+                            .as_deref()
+                            .or(my_agent_id.as_deref())
+                            .unwrap_or(""),
                         other,
                     ) {
                         peers.insert(other.clone());
                     }
                 }
             }
-            if covered { Some(peers) } else { None }
+            if covered {
+                Some(peers)
+            } else {
+                None
+            }
         };
 
         // ── Pre-compute filter state for `can_communicate_with` ──
@@ -386,7 +393,11 @@ impl ErgataiMcpServer {
                             }
                         }
                     }
-                    if covered { Some(peers) } else { None }
+                    if covered {
+                        Some(peers)
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 }
@@ -395,24 +406,24 @@ impl ErgataiMcpServer {
             };
 
         // ── Pre-compute filter state for `in_dag` ──
-        let dag_participants: Option<std::collections::HashSet<String>> =
-            if let Some(ref f) = filter {
-                if let Some(ref dag_id) = f.in_dag {
-                    let scheduler =
-                        ergatai_core::cross_agent::get_dag_scheduler_by_id(Some(dag_id));
-                    match scheduler {
-                        Some(s) => Some(s.collaboration().await.participants),
-                        None => {
-                            // DAG not found — treat as empty filter (nothing matches)
-                            Some(std::collections::HashSet::new())
-                        }
+        let dag_participants: Option<std::collections::HashSet<String>> = if let Some(ref f) =
+            filter
+        {
+            if let Some(ref dag_id) = f.in_dag {
+                let scheduler = ergatai_core::cross_agent::get_dag_scheduler_by_id(Some(dag_id));
+                match scheduler {
+                    Some(s) => Some(s.collaboration().await.participants),
+                    None => {
+                        // DAG not found — treat as empty filter (nothing matches)
+                        Some(std::collections::HashSet::new())
                     }
-                } else {
-                    None
                 }
             } else {
                 None
-            };
+            }
+        } else {
+            None
+        };
 
         // ── Pre-compute status filter ──
         let status_filter: Option<String> = filter
@@ -429,7 +440,9 @@ impl ErgataiMcpServer {
                             .mcp_agent_id
                             .as_ref()
                             .is_some_and(|mcp_id| mcp_id == id)
-                }) || my_runtime_id.as_ref().is_some_and(|rid| rid == &info.agent_id);
+                }) || my_runtime_id
+                    .as_ref()
+                    .is_some_and(|rid| rid == &info.agent_id);
                 if is_self {
                     return false;
                 }
@@ -509,9 +522,7 @@ impl ErgataiMcpServer {
 
         let dag_mode = allowed_peers.is_some();
         let filter_applied = filter.as_ref().is_some_and(|f| {
-            f.can_communicate_with.is_some()
-                || f.in_dag.is_some()
-                || f.status.is_some()
+            f.can_communicate_with.is_some() || f.in_dag.is_some() || f.status.is_some()
         });
         let result = serde_json::json!({
             "agents": agents_json,
@@ -2043,6 +2054,83 @@ mod tests {
         let params: ListAgentsParams =
             serde_json::from_value(json!({"include_capabilities": true, "unknown": 123})).unwrap();
         assert_eq!(params.include_capabilities, Some(true));
+    }
+
+    // ── AgentFilter deserialization tests ──
+
+    #[test]
+    fn test_list_agents_params_no_filter_by_default() {
+        let params: ListAgentsParams = serde_json::from_value(json!({})).unwrap();
+        assert!(params.filter.is_none());
+    }
+
+    #[test]
+    fn test_agent_filter_all_fields() {
+        let filter: AgentFilter = serde_json::from_value(json!({
+            "can_communicate_with": "%15",
+            "in_dag": "feature_dag",
+            "status": "running"
+        }))
+        .unwrap();
+        assert_eq!(filter.can_communicate_with.as_deref(), Some("%15"));
+        assert_eq!(filter.in_dag.as_deref(), Some("feature_dag"));
+        assert_eq!(filter.status.as_deref(), Some("running"));
+    }
+
+    #[test]
+    fn test_agent_filter_only_can_communicate_with() {
+        let filter: AgentFilter =
+            serde_json::from_value(json!({"can_communicate_with": "frontend-dev"})).unwrap();
+        assert_eq!(filter.can_communicate_with.as_deref(), Some("frontend-dev"));
+        assert!(filter.in_dag.is_none());
+        assert!(filter.status.is_none());
+    }
+
+    #[test]
+    fn test_agent_filter_only_in_dag() {
+        let filter: AgentFilter = serde_json::from_value(json!({"in_dag": "my-dag"})).unwrap();
+        assert_eq!(filter.in_dag.as_deref(), Some("my-dag"));
+        assert!(filter.can_communicate_with.is_none());
+        assert!(filter.status.is_none());
+    }
+
+    #[test]
+    fn test_agent_filter_only_status() {
+        let filter: AgentFilter = serde_json::from_value(json!({"status": "idle"})).unwrap();
+        assert_eq!(filter.status.as_deref(), Some("idle"));
+        assert!(filter.can_communicate_with.is_none());
+        assert!(filter.in_dag.is_none());
+    }
+
+    #[test]
+    fn test_agent_filter_empty_object_all_none() {
+        let filter: AgentFilter = serde_json::from_value(json!({})).unwrap();
+        assert!(filter.can_communicate_with.is_none());
+        assert!(filter.in_dag.is_none());
+        assert!(filter.status.is_none());
+    }
+
+    #[test]
+    fn test_list_agents_params_with_filter() {
+        let params: ListAgentsParams = serde_json::from_value(json!({
+            "filter": {
+                "can_communicate_with": "%42",
+                "status": "running"
+            }
+        }))
+        .unwrap();
+        assert!(params.filter.is_some());
+        let f = params.filter.unwrap();
+        assert_eq!(f.can_communicate_with.as_deref(), Some("%42"));
+        assert_eq!(f.status.as_deref(), Some("running"));
+        assert!(f.in_dag.is_none());
+    }
+
+    #[test]
+    fn test_agent_filter_ignores_unknown_fields() {
+        let filter: AgentFilter =
+            serde_json::from_value(json!({"status": "busy", "bogus": 999})).unwrap();
+        assert_eq!(filter.status.as_deref(), Some("busy"));
     }
 
     #[test]
