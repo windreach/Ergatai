@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
-use ergatai_error::ErgataiResult;
+use ergatai_error::{ErgataiError, ErgataiResult};
 use ergatai_lock::{FileMode, FileToken, SystemToken};
 use ergatai_runtime::{get_agent_runtime, WorkspaceSpec};
 use serde::{Deserialize, Serialize};
@@ -33,6 +33,44 @@ pub enum AgentSessionStatus {
     Running,
     Completed,
     Failed,
+}
+
+impl AgentSessionStatus {
+    /// Check if a state transition is valid.
+    ///
+    /// Valid transitions:
+    /// - `Starting → Running` (agent launched successfully)
+    /// - `Starting → Failed` (agent launch failed)
+    /// - `Running → Completed` (agent finished successfully)
+    /// - `Running → Failed` (agent finished with error)
+    /// - `Completed` and `Failed` are terminal states (no transitions out)
+    pub fn can_transition_to(&self, next: &AgentSessionStatus) -> bool {
+        matches!(
+            (self, next),
+            (AgentSessionStatus::Starting, AgentSessionStatus::Running)
+                | (AgentSessionStatus::Starting, AgentSessionStatus::Failed)
+                | (AgentSessionStatus::Running, AgentSessionStatus::Completed)
+                | (AgentSessionStatus::Running, AgentSessionStatus::Failed)
+        )
+    }
+
+    /// Transition to a new status, returning an error if the transition is invalid.
+    ///
+    /// This enforces the state machine and prevents invalid transitions like
+    /// `Completed → Starting` or `Failed → Running`.
+    pub fn transition_to(
+        &self,
+        next: AgentSessionStatus,
+    ) -> Result<AgentSessionStatus, ErgataiError> {
+        if self.can_transition_to(&next) {
+            Ok(next)
+        } else {
+            Err(ErgataiError::internal(format!(
+                "Invalid agent status transition: {:?} → {:?}",
+                self, next
+            )))
+        }
+    }
 }
 
 /// Running agent information
@@ -503,11 +541,24 @@ Write your results in markdown:
             "Agent launched via AgentRuntime"
         );
 
-        // 6. Update RunningAgent with status
+        // 6. Update RunningAgent with status (validate state transition)
         {
             let mut agents = self.running_agents.lock().await;
             if let Some(agent) = agents.get_mut(agent_id) {
-                agent.status = AgentSessionStatus::Running;
+                match agent.status.transition_to(AgentSessionStatus::Running) {
+                    Ok(new_status) => {
+                        agent.status = new_status;
+                        tracing::debug!(agent_id = %agent_id, "Agent status: Starting → Running");
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            agent_id = %agent_id,
+                            current_status = ?agent.status,
+                            error = %e,
+                            "Invalid state transition to Running"
+                        );
+                    }
+                }
             }
         }
 
@@ -610,11 +661,29 @@ Write your results in markdown:
                     )
                 };
 
-                // Update RunningAgent status
+                // Update RunningAgent status (validate state transition)
                 {
                     let mut agents = running_agents.lock().await;
                     if let Some(agent) = agents.get_mut(&agent_id_monitor) {
-                        agent.status = status.clone();
+                        match agent.status.transition_to(status.clone()) {
+                            Ok(new_status) => {
+                                agent.status = new_status;
+                                tracing::info!(
+                                    agent_id = %agent_id_monitor,
+                                    "Agent status: Running → {:?}",
+                                    agent.status
+                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    agent_id = %agent_id_monitor,
+                                    current_status = ?agent.status,
+                                    target_status = ?status,
+                                    error = %e,
+                                    "Invalid state transition to terminal state"
+                                );
+                            }
+                        }
                     }
                 }
 
@@ -1340,5 +1409,108 @@ mod tests {
         let truncated = safe_truncate_utf8("hello", 0);
         assert!(truncated.ends_with("[... truncated ...]"));
         // Should not panic; result prefix should be empty before the marker
+    }
+
+    // ===== State Machine Transition Tests =====
+
+    #[test]
+    fn test_state_transition_starting_to_running() {
+        let status = AgentSessionStatus::Starting;
+        assert!(status.can_transition_to(&AgentSessionStatus::Running));
+        let result = status.transition_to(AgentSessionStatus::Running);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), AgentSessionStatus::Running);
+    }
+
+    #[test]
+    fn test_state_transition_starting_to_failed() {
+        let status = AgentSessionStatus::Starting;
+        assert!(status.can_transition_to(&AgentSessionStatus::Failed));
+        let result = status.transition_to(AgentSessionStatus::Failed);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), AgentSessionStatus::Failed);
+    }
+
+    #[test]
+    fn test_state_transition_running_to_completed() {
+        let status = AgentSessionStatus::Running;
+        assert!(status.can_transition_to(&AgentSessionStatus::Completed));
+        let result = status.transition_to(AgentSessionStatus::Completed);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), AgentSessionStatus::Completed);
+    }
+
+    #[test]
+    fn test_state_transition_running_to_failed() {
+        let status = AgentSessionStatus::Running;
+        assert!(status.can_transition_to(&AgentSessionStatus::Failed));
+        let result = status.transition_to(AgentSessionStatus::Failed);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), AgentSessionStatus::Failed);
+    }
+
+    #[test]
+    fn test_state_transition_invalid_starting_to_completed() {
+        let status = AgentSessionStatus::Starting;
+        assert!(!status.can_transition_to(&AgentSessionStatus::Completed));
+        let result = status.transition_to(AgentSessionStatus::Completed);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_state_transition_invalid_completed_to_starting() {
+        let status = AgentSessionStatus::Completed;
+        assert!(!status.can_transition_to(&AgentSessionStatus::Starting));
+        let result = status.transition_to(AgentSessionStatus::Starting);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_state_transition_invalid_completed_to_running() {
+        let status = AgentSessionStatus::Completed;
+        assert!(!status.can_transition_to(&AgentSessionStatus::Running));
+        let result = status.transition_to(AgentSessionStatus::Running);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_state_transition_invalid_completed_to_failed() {
+        let status = AgentSessionStatus::Completed;
+        assert!(!status.can_transition_to(&AgentSessionStatus::Failed));
+        let result = status.transition_to(AgentSessionStatus::Failed);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_state_transition_invalid_failed_to_starting() {
+        let status = AgentSessionStatus::Failed;
+        assert!(!status.can_transition_to(&AgentSessionStatus::Starting));
+        let result = status.transition_to(AgentSessionStatus::Starting);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_state_transition_invalid_failed_to_running() {
+        let status = AgentSessionStatus::Failed;
+        assert!(!status.can_transition_to(&AgentSessionStatus::Running));
+        let result = status.transition_to(AgentSessionStatus::Running);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_state_transition_invalid_failed_to_completed() {
+        let status = AgentSessionStatus::Failed;
+        assert!(!status.can_transition_to(&AgentSessionStatus::Completed));
+        let result = status.transition_to(AgentSessionStatus::Completed);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_state_transition_invalid_same_state() {
+        // Cannot transition to the same state
+        assert!(!AgentSessionStatus::Starting.can_transition_to(&AgentSessionStatus::Starting));
+        assert!(!AgentSessionStatus::Running.can_transition_to(&AgentSessionStatus::Running));
+        assert!(!AgentSessionStatus::Completed.can_transition_to(&AgentSessionStatus::Completed));
+        assert!(!AgentSessionStatus::Failed.can_transition_to(&AgentSessionStatus::Failed));
     }
 }

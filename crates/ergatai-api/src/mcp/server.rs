@@ -21,7 +21,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use ergatai_core::agent_registry::AgentRegistry;
 use ergatai_runtime::get_agent_runtime;
@@ -1179,28 +1179,66 @@ impl ErgataiMcpServer {
             }
         };
 
-        // Try to get lock manager (may not be initialized)
+        // Try to get lock manager (must be initialized for security)
         let lock_manager = match ergatai_lock::get_lock_manager("default").await {
             Ok(lm) => lm,
             Err(e) => {
-                // File lock not initialized - return success with note
-                // In single-agent mode, file locks are not needed
-                return Ok(CallToolResult::success(vec![ContentBlock::text(
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "status": "granted",
-                        "file_path": file_path,
-                        "mode": mode_str,
-                        "note": "File lock system not active (single-agent mode). Access granted directly.",
-                        "warning": format!("Lock manager not available: {}", e)
-                    }))
-                    .unwrap_or_default(),
-                )]));
+                // SECURITY: Deny access when lock manager is unavailable.
+                // Do NOT grant access - this would bypass file locking entirely.
+                // The lock manager should always be initialized in production.
+                return Err(ErrorData::internal_error(
+                    format!(
+                        "File lock system not available: {}. Cannot grant file access without lock manager.",
+                        e
+                    ),
+                    None,
+                ));
             }
         };
 
         // Create a file token for this request
         let session_id = format!("mcp-{}", agent_id);
-        let system_token_id = ergatai_lock::TokenId::new();
+
+        // SECURITY: Create and register a SystemToken first to update the session counter.
+        // This is critical for is_single_agent_mode() detection to work correctly.
+        // Without this, active_session_count stays at 0 and the system is permanently
+        // stuck in "multi-agent mode" even when there's only one agent.
+        let system_token = ergatai_lock::SystemToken::new(
+            agent_id.clone(),
+            session_id.clone(),
+            "default".to_string(), // project_root will be resolved by lock manager
+            7200, // 2 hour TTL for system token
+            60,   // heartbeat every 60s
+        );
+
+        let system_token_id = match lock_manager.register_system_token(&system_token) {
+            Ok(()) => system_token.id.clone(),
+            Err(e) => {
+                // Likely a UNIQUE constraint collision on session_id (same agent calling
+                // request_file_access again). Look up the existing system token so the
+                // file token's FK reference is valid.
+                warn!(
+                    agent_id = %agent_id,
+                    session_id = %session_id,
+                    error = %e,
+                    "Failed to register new system token, falling back to existing session token"
+                );
+                match lock_manager.get_system_token(&session_id) {
+                    Ok(Some(existing)) => existing.id,
+                    _ => {
+                        error!(
+                            agent_id = %agent_id,
+                            session_id = %session_id,
+                            "No existing system token found after registration failure; cannot create file token"
+                        );
+                        return Err(ErrorData::internal_error(
+                            format!("Failed to register system token and no existing token found for session: {}", e),
+                            None,
+                        ));
+                    }
+                }
+            }
+        };
 
         let file_token = ergatai_lock::FileToken::new(
             agent_id.clone(),

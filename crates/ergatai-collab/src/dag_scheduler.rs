@@ -356,15 +356,7 @@ impl DagScheduler {
                 }
                 Err(e) => {
                     tracing::error!("Failed to submit node {}: {}", node.id, e);
-                    // Revert status so the node can be retried
-                    let mut graph = self.graph.lock().await;
-                    if let Err(revert_err) = graph.update_status(&node.id, TaskStatus::Pending) {
-                        tracing::warn!(
-                            "Failed to revert node {} status to Pending after submission error: {}. \
-                             Node may be stuck in incorrect state.",
-                            node.id, revert_err
-                        );
-                    }
+                    self.handle_submission_error(&node.id, &e).await;
                 }
             }
         }
@@ -995,7 +987,13 @@ impl DagScheduler {
         let upstream_context = self.build_upstream_context_block(node).await;
 
         // 3. Build the plan content
-        let result_path = format!(".ergatai/.dag-results/{}.md", node.id);
+        // Use the SAME result path convention as TaskCoordinator::get_result_path()
+        // so the agent-exit watcher finds the result file when checking RunningAgent.result_file.
+        // Path: .ergatai/.plan/results/{node_id}-{agent_name}.md
+        let result_path = format!(
+            ".ergatai/.plan/results/{}-{}.md",
+            node.id, node.agent
+        );
         let content = format!(
             r#"# Task: {}
 
@@ -1021,8 +1019,8 @@ impl DagScheduler {
 
         tokio::fs::write(&plan_file, content).await?;
 
-        // Create results directory
-        let results_dir = self.project_root.join(".ergatai").join(".dag-results");
+        // Create results directory (matching TaskCoordinator's path convention)
+        let results_dir = self.project_root.join(".ergatai").join(".plan").join("results");
         tokio::fs::create_dir_all(&results_dir).await?;
 
         Ok(plan_file)
@@ -1164,15 +1162,7 @@ impl DagScheduler {
                 }
                 Err(e) => {
                     tracing::error!("Failed to submit node {}: {}", node.id, e);
-                    // Revert status so the node can be retried
-                    let mut graph = self.graph.lock().await;
-                    if let Err(revert_err) = graph.update_status(&node.id, TaskStatus::Pending) {
-                        tracing::warn!(
-                            "Failed to revert node {} status to Pending after submission error: {}. \
-                             Node may be stuck in incorrect state.",
-                            node.id, revert_err
-                        );
-                    }
+                    self.handle_submission_error(&node.id, &e).await;
                 }
             }
         }
@@ -1295,16 +1285,24 @@ impl DagScheduler {
                 }
                 Err(e) => {
                     tracing::error!("Failed to retry node {}: {}", node_id, e);
-                    let mut graph = self.graph.lock().await;
-                    if let Err(status_err) = graph.update_status(node_id, TaskStatus::Failed) {
-                        tracing::warn!(
-                            "Failed to update node {} status to Failed: {}",
-                            node_id,
-                            status_err
-                        );
+                    // CRITICAL: Retry exhausted (generate_and_submit failed due to budget,
+                    // agent launch failure, etc.) — must skip downstream to prevent the DAG
+                    // from hanging with nodes stuck in Pending forever.
+                    {
+                        let mut graph = self.graph.lock().await;
+                        if let Err(status_err) = graph.update_status(node_id, TaskStatus::Failed) {
+                            tracing::warn!(
+                                "Failed to update node {} status to Failed: {}",
+                                node_id,
+                                status_err
+                            );
+                        }
                     }
-                    drop(graph);
+                    // Propagate failure to downstream dependents
+                    self.skip_downstream(node_id).await?;
                     self.save_graph_unlocked().await?;
+                    // If cascading failures left the DAG fully terminal, finalize.
+                    self.finalize_if_terminal().await;
                 }
             }
         } else {
@@ -1332,6 +1330,55 @@ impl DagScheduler {
         }
 
         Ok(())
+    }
+
+    /// Handle a node submission error by classifying it as permanent (budget
+    /// exhausted / deadline exceeded) or transient. Permanent failures mark the
+    /// node as `Failed` and skip downstream dependents. Transient failures revert
+    /// the node to `Pending` so it can be retried when another node completes.
+    async fn handle_submission_error(&self, node_id: &str, error: &ErgataiError) {
+        let error_msg = error.to_string();
+        let is_permanent = error_msg.contains("budget exhausted")
+            || error_msg.contains("exceeded deadline")
+            || error_msg.contains("deadline");
+
+        if is_permanent {
+            tracing::error!(
+                "Node {} failed permanently (budget/deadline): {}. Marking as Failed and skipping downstream.",
+                node_id,
+                error
+            );
+            let mut graph = self.graph.lock().await;
+            if let Err(status_err) = graph.update_status(node_id, TaskStatus::Failed) {
+                tracing::warn!(
+                    "Failed to mark node {} as Failed after permanent error: {}",
+                    node_id,
+                    status_err
+                );
+            }
+            drop(graph);
+            if let Err(skip_err) = self.skip_downstream(node_id).await {
+                tracing::warn!(
+                    "Failed to skip downstream after permanent failure of {}: {}",
+                    node_id,
+                    skip_err
+                );
+            }
+        } else {
+            tracing::warn!(
+                "Node {} submission failed (transient), reverting to Pending: {}",
+                node_id,
+                error
+            );
+            let mut graph = self.graph.lock().await;
+            if let Err(revert_err) = graph.update_status(node_id, TaskStatus::Pending) {
+                tracing::warn!(
+                    "Failed to revert node {} status to Pending after submission error: {}. \
+                     Node may be stuck in incorrect state.",
+                    node_id, revert_err
+                );
+            }
+        }
     }
 
     /// If the DAG has reached a terminal state (all nodes are either
@@ -2751,5 +2798,114 @@ tasks:
             .clone();
         // 100 × 2.0 = 200 (DAG default used since no per-node timeout)
         assert_eq!(adjusted[&high_id], 200);
+    }
+
+    // ===== handle_submission_error tests =====
+
+    /// Helper: build a 3-node chain n1 → n2 → n3 in a scheduler.
+    /// n1 is set to the given initial status.
+    async fn chain_scheduler(
+        n1_status: TaskStatus,
+    ) -> (DagScheduler, tempfile::TempDir) {
+        let graph = TaskGraph::new(vec![
+            TaskNode::new("n1", "a", "A"),
+            TaskNode::new("n2", "a", "B").with_dependencies(vec!["n1".into()]),
+            TaskNode::new("n3", "a", "C").with_dependencies(vec!["n2".into()]),
+        ]);
+        let temp_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp_dir.path().join(".ergatai")).unwrap();
+        let scheduler = DagScheduler::new(temp_dir.path().to_path_buf(), graph);
+        // Put n1 into Running first so update_status to the desired state is valid
+        if n1_status != TaskStatus::Pending {
+            let mut g = scheduler.graph.lock().await;
+            g.update_status("n1", TaskStatus::Running).unwrap();
+            if n1_status != TaskStatus::Running {
+                g.update_status("n1", n1_status).unwrap();
+            }
+        }
+        (scheduler, temp_dir)
+    }
+
+    #[tokio::test]
+    async fn test_handle_submission_error_budget_exhausted_marks_failed() {
+        let (scheduler, _temp) = chain_scheduler(TaskStatus::Running).await;
+        let error = ErgataiError::internal("DAG dag-1 budget exhausted: 10 / 10 agent calls");
+
+        scheduler.handle_submission_error("n1", &error).await;
+
+        let g = scheduler.graph.lock().await;
+        assert_eq!(
+            g.find_node("n1").unwrap().status,
+            TaskStatus::Failed,
+            "budget exhausted should mark node as Failed"
+        );
+        assert_eq!(
+            g.find_node("n2").unwrap().status,
+            TaskStatus::Skipped,
+            "downstream n2 should be skipped"
+        );
+        assert_eq!(
+            g.find_node("n3").unwrap().status,
+            TaskStatus::Skipped,
+            "downstream n3 should be skipped"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_submission_error_deadline_exceeded_marks_failed() {
+        let (scheduler, _temp) = chain_scheduler(TaskStatus::Running).await;
+        let error = ErgataiError::internal("DAG dag-1 exceeded deadline by 30s");
+
+        scheduler.handle_submission_error("n1", &error).await;
+
+        let g = scheduler.graph.lock().await;
+        assert_eq!(
+            g.find_node("n1").unwrap().status,
+            TaskStatus::Failed,
+            "deadline exceeded should mark node as Failed"
+        );
+        assert_eq!(g.find_node("n2").unwrap().status, TaskStatus::Skipped);
+    }
+
+    #[tokio::test]
+    async fn test_handle_submission_error_generic_reverts_to_pending() {
+        let (scheduler, _temp) = chain_scheduler(TaskStatus::Running).await;
+        let error = ErgataiError::internal("agent launch failed: connection refused");
+
+        scheduler.handle_submission_error("n1", &error).await;
+
+        let g = scheduler.graph.lock().await;
+        assert_eq!(
+            g.find_node("n1").unwrap().status,
+            TaskStatus::Pending,
+            "transient error should revert node to Pending"
+        );
+        // Downstream nodes should NOT be skipped for transient errors
+        assert_eq!(
+            g.find_node("n2").unwrap().status,
+            TaskStatus::Pending,
+            "downstream n2 should remain Pending"
+        );
+        assert_eq!(
+            g.find_node("n3").unwrap().status,
+            TaskStatus::Pending,
+            "downstream n3 should remain Pending"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_submission_error_from_pending_reverts_to_pending() {
+        // If the node is already Pending (e.g., submit_graph loop), transient
+        // errors should keep it Pending (Pending→Pending is not a valid
+        // transition, but update_status will return Err which is logged).
+        let (scheduler, _temp) = chain_scheduler(TaskStatus::Pending).await;
+        let error = ErgataiError::internal("NATS publish failed");
+
+        scheduler.handle_submission_error("n1", &error).await;
+
+        let g = scheduler.graph.lock().await;
+        // Node stays at whatever status update_status manages (Pending→Pending
+        // is not a valid transition in the TaskGraph, so it stays Pending).
+        assert_eq!(g.find_node("n1").unwrap().status, TaskStatus::Pending);
     }
 }

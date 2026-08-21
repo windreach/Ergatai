@@ -367,10 +367,10 @@ impl FileLockManager {
                 priority INTEGER
             );
 
-            -- Unique constraint: only one WRITE per file (enforced at DB level)
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_file_locks_write_unique
+            -- Unique constraint: only one WRITE or ADMIN lock per file (enforced at DB level)
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_file_locks_write_admin_unique
                 ON file_locks(file_path)
-                WHERE mode = 'WRITE' AND status = 'ACTIVE';
+                WHERE mode IN ('WRITE', 'ADMIN') AND status = 'ACTIVE';
 
             CREATE INDEX IF NOT EXISTS idx_file_locks_path
                 ON file_locks(file_path);
@@ -461,6 +461,9 @@ impl FileLockManager {
             ],
         )
         .map_err(|e| ErgataiError::internal(format!("Failed to insert system token: {}", e)))?;
+
+        // Register the session to update active_session_count for single-agent detection
+        self.register_session_with_id(&token.session_id);
 
         debug!(
             "Registered system token {} for agent {}",
@@ -577,15 +580,15 @@ impl FileLockManager {
                 ErgataiError::internal(format!("Failed to begin transaction: {}", e))
             })?;
 
-            // Check for WRITE conflict (unique index will enforce this)
+            // Check for WRITE/ADMIN conflict (unique index will enforce this)
             // In single-agent mode, skip the conflict check — there is no contention risk
             // from other agents, so the approval flow / arbitration is unnecessary overhead.
             let single_agent = self.is_single_agent_mode();
-            if token.mode == FileMode::Write && !single_agent {
+            if (token.mode == FileMode::Write || token.mode == FileMode::Admin) && !single_agent {
                 // Get conflict information for arbitration
                 match conn.query_row(
                     "SELECT agent_id, session_id, token_id, reason, priority FROM file_locks
-                         WHERE file_path = ?1 AND mode = 'WRITE' AND status = 'ACTIVE'
+                         WHERE file_path = ?1 AND mode IN ('WRITE', 'ADMIN') AND status = 'ACTIVE'
                          LIMIT 1",
                     params![normalized_path],
                     |row| {
@@ -2062,11 +2065,25 @@ impl FileLockManager {
     pub fn expire_token(&self, token_id: &str) -> Result<(), ErgataiError> {
         let conn = self.conn.lock();
 
+        // Get the session_id before expiring so we can unregister the session
+        let session_id: Option<String> = conn
+            .query_row(
+                "SELECT session_id FROM system_tokens WHERE id = ?1",
+                params![token_id],
+                |row| row.get(0),
+            )
+            .ok();
+
         conn.execute(
             "UPDATE system_tokens SET status = 'EXPIRED' WHERE id = ?1",
             params![token_id],
         )
         .map_err(|e| ErgataiError::internal(format!("Failed to expire token: {}", e)))?;
+
+        // Unregister the session if we found it
+        if let Some(sid) = session_id {
+            self.unregister_session_with_id(&sid);
+        }
 
         info!("Token {} marked as expired", token_id);
         Ok(())

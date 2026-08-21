@@ -80,6 +80,24 @@ pub struct TaskScheduler {
     semaphore: Arc<Semaphore>,
 }
 
+/// Extract the objective from a plan's markdown content.
+///
+/// Looks for a line containing `**Objective**:` and returns the trimmed value
+/// after the colon. Falls back to `task_id` when no such line exists, so
+/// downstream agents always receive a non-empty task description.
+fn extract_objective_from_plan(plan_content: &str, task_id: &str) -> String {
+    plan_content
+        .lines()
+        .find_map(|line| {
+            if line.contains("**Objective**:") {
+                line.split_once(':').map(|(_, v)| v.trim().to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| task_id.to_string())
+}
+
 impl TaskScheduler {
     /// Create a new task scheduler (private, use global_scheduler() instead)
     fn new(project_root: PathBuf, strategy: ScheduleStrategy, concurrency_limit: usize) -> Self {
@@ -747,14 +765,16 @@ impl TaskScheduler {
         };
 
         // Build a minimal TaskPlan from the payload
+        let objective = extract_objective_from_plan(&payload.plan_content, &payload.task_id);
+
         let plan = TaskPlan {
             task_id: payload.task_id.clone(),
-            task_name: payload.task_id.clone(),
+            task_name: objective.clone(),
             coordinator: "nats".to_string(),
             status: super::task_coordinator::PlanStatus::InProgress,
             assignments: vec![AgentAssignment {
                 agent_name: payload.target_agent.clone(),
-                objective: String::new(),
+                objective,
                 files_to_create: vec![],
                 files_to_modify: vec![],
                 files_to_read: vec![],
@@ -1434,5 +1454,45 @@ mod tests {
         // Back to 2 available slots
         assert_eq!(scheduler.available_concurrency().await, 2);
         assert_eq!(scheduler.running_count().await, 0);
+    }
+
+    // ===== Objective extraction tests =====
+
+    #[test]
+    fn test_extract_objective_with_marker() {
+        let plan = r#"# Task: Fix bug
+- **Objective**: Fix the null pointer in parser
+- **Files**: src/parser.rs
+"#;
+        let result = extract_objective_from_plan(plan, "node-42");
+        assert_eq!(result, "Fix the null pointer in parser");
+    }
+
+    #[test]
+    fn test_extract_objective_without_marker_falls_back_to_task_id() {
+        let plan = "# Task: Fix bug\nSome content without objective marker\n";
+        let result = extract_objective_from_plan(plan, "node-42");
+        assert_eq!(result, "node-42");
+    }
+
+    #[test]
+    fn test_extract_objective_empty_content_falls_back_to_task_id() {
+        let result = extract_objective_from_plan("", "fallback-id");
+        assert_eq!(result, "fallback-id");
+    }
+
+    #[test]
+    fn test_extract_objective_trims_whitespace() {
+        let plan = "- **Objective**:   Fix the thing   \n";
+        let result = extract_objective_from_plan(plan, "node-1");
+        assert_eq!(result, "Fix the thing");
+    }
+
+    #[test]
+    fn test_extract_objective_with_multiple_colons() {
+        // split_once on ':' should only split on the first colon after **Objective**
+        let plan = "- **Objective**: Fix: handle colons: in description\n";
+        let result = extract_objective_from_plan(plan, "node-1");
+        assert_eq!(result, "Fix: handle colons: in description");
     }
 }
