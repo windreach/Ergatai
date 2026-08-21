@@ -11,7 +11,6 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -49,21 +48,15 @@ const EXIT_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 // ── tmux binary resolution ──
 
-/// Cached tmux binary path. Resolved once via `ergatai_binary::find_tmux_binary()`
-/// (env var → bundled → sibling → PATH). Avoids repeated multi-layer searches.
-static TMUX_PATH: OnceLock<PathBuf> = OnceLock::new();
-
-/// Get the tmux binary path, resolving and caching on first call.
+/// Get the tmux binary path, using the shared cache from `ergatai_binary`.
+///
+/// Delegates to [`ergatai_binary::find_tmux_binary_cached`] which resolves
+/// the path once per process (env var → bundled → sibling → PATH) and caches
+/// the result in a global `OnceLock`.
 fn tmux_binary() -> ErgataiResult<&'static PathBuf> {
-    // Fast path: already resolved.
-    if let Some(path) = TMUX_PATH.get() {
-        return Ok(path);
-    }
-    // Slow path: resolve via BinaryLocator (env → bundled → sibling → PATH)
-    // and cache. `get_or_init` is stable; if two threads race, both compute
-    // the same path and one wins — harmless since the result is identical.
-    let path = ergatai_binary::find_tmux_binary()?;
-    Ok(TMUX_PATH.get_or_init(|| path))
+    ergatai_binary::find_tmux_binary_cached().map_err(|e| {
+        ErgataiError::internal(format!("tmux binary not found: {}", e))
+    })
 }
 
 // ── TmuxBackend ──
@@ -493,12 +486,9 @@ impl TmuxBackend {
         grace_period: Duration,
     ) -> ErgataiResult<()> {
         // Determine if exit_command is a tmux key name or text to type.
-        let is_key = exit_command.starts_with("C-")
-            || exit_command.starts_with("M-")
-            || matches!(
-                exit_command,
-                "Enter" | "Escape" | "Tab" | "BSpace" | "Up" | "Down" | "Left" | "Right"
-            );
+        // Uses exact matching to avoid false positives (e.g., "Create-file" should
+        // NOT be treated as key "C-" + "reate-file").
+        let is_key = is_tmux_key_name(exit_command);
 
         if is_key {
             Self::run_tmux_cmd(&["send-keys", "-t", pane_id, exit_command]).await?;
@@ -1400,6 +1390,47 @@ impl AgentRuntimeBackend for TmuxBackend {
 
 // ── Helper functions ──
 
+/// Check if a string is a valid tmux key name (for `send-keys` without `-l`).
+///
+/// Matches:
+/// - Modifier + single char: `C-a`, `M-x`, `S-b` (exactly 3 chars)
+/// - Named keys: `Enter`, `Escape`, `Tab`, `BSpace`, `Up`, `Down`, etc.
+/// - Modifier + named key: `C-Up`, `M-Enter`, `S-Tab`, etc.
+///
+/// Does NOT match arbitrary text that happens to start with `C-` or `M-`
+/// (e.g., `"Create-file"` is text, not a key).
+fn is_tmux_key_name(s: &str) -> bool {
+    // Named keys recognized by tmux send-keys.
+    const NAMED_KEYS: &[&str] = &[
+        "Enter", "Return", "Escape", "Esc", "Tab", "BSpace", "BackSpace", "Bspace",
+        "Up", "Down", "Left", "Right", "Home", "End",
+        "NPage", "PPage", "PageUp", "PageDown", "Space", "BTab",
+        "Insert", "Delete",
+        "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12",
+    ];
+
+    // Modifier + single char: C-a, M-x, S-b (exactly 3 chars).
+    if s.len() == 3 && (s.starts_with("C-") || s.starts_with("M-") || s.starts_with("S-")) {
+        return true;
+    }
+
+    // Bare named key.
+    if NAMED_KEYS.contains(&s) {
+        return true;
+    }
+
+    // Modifier + named key: C-Up, M-Enter, S-Tab, etc.
+    for prefix in &["C-", "M-", "S-"] {
+        if let Some(rest) = s.strip_prefix(prefix) {
+            if NAMED_KEYS.contains(&rest) {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
 /// Convert a shell exit code to a `WaitResult`.
 ///
 /// Shell convention: if a process was killed by signal N, the exit code is 128 + N.
@@ -1530,5 +1561,50 @@ mod tests {
         assert!(caps.supports_message_injection);
         assert!(caps.supports_output_capture);
         assert!(!caps.supports_resource_limits);
+    }
+
+    #[test]
+    fn test_is_tmux_key_name_modifier_single_char() {
+        assert!(is_tmux_key_name("C-c"));
+        assert!(is_tmux_key_name("C-a"));
+        assert!(is_tmux_key_name("M-x"));
+        assert!(is_tmux_key_name("S-b"));
+    }
+
+    #[test]
+    fn test_is_tmux_key_name_named_keys() {
+        assert!(is_tmux_key_name("Enter"));
+        assert!(is_tmux_key_name("Escape"));
+        assert!(is_tmux_key_name("Tab"));
+        assert!(is_tmux_key_name("BSpace"));
+        assert!(is_tmux_key_name("Up"));
+        assert!(is_tmux_key_name("F1"));
+        assert!(is_tmux_key_name("F12"));
+    }
+
+    #[test]
+    fn test_is_tmux_key_name_modifier_plus_named() {
+        assert!(is_tmux_key_name("C-Up"));
+        assert!(is_tmux_key_name("M-Enter"));
+        assert!(is_tmux_key_name("S-Tab"));
+        assert!(is_tmux_key_name("C-F1"));
+    }
+
+    #[test]
+    fn test_is_tmux_key_name_rejects_text() {
+        // These look like they start with a modifier but are actually text.
+        assert!(!is_tmux_key_name("Create-file"));
+        assert!(!is_tmux_key_name("Move-ahead"));
+        assert!(!is_tmux_key_name("Save-all"));
+        assert!(!is_tmux_key_name("exit"));
+        assert!(!is_tmux_key_name("/exit"));
+        assert!(!is_tmux_key_name(""));
+    }
+
+    #[test]
+    fn test_is_tmux_key_name_rejects_long_modifier_strings() {
+        // Modifier + multi-char non-key should not match.
+        assert!(!is_tmux_key_name("C-abc"));
+        assert!(!is_tmux_key_name("M-hello"));
     }
 }

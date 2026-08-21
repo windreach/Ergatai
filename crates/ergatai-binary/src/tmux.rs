@@ -14,6 +14,7 @@
 use crate::finder::BinaryLocator;
 use ergatai_error::{ErgataiError, ErgataiResult};
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 static TMUX_LOCATOR: BinaryLocator = BinaryLocator {
     name: "tmux",
@@ -22,6 +23,10 @@ static TMUX_LOCATOR: BinaryLocator = BinaryLocator {
     // future bundled downloads are discovered automatically.
     resource_subdir_pattern: None,
 };
+
+/// Cached tmux binary path. Shared across all crates (ergatai-runtime, ergatai-collab)
+/// so the BinaryLocator search runs at most once per process.
+static TMUX_PATH: OnceLock<PathBuf> = OnceLock::new();
 
 /// Find tmux binary via BinaryLocator (env var → bundled → sibling → PATH).
 ///
@@ -40,6 +45,22 @@ static TMUX_LOCATOR: BinaryLocator = BinaryLocator {
 /// instructions if tmux is not found.
 pub fn find_tmux_binary() -> ErgataiResult<PathBuf> {
     TMUX_LOCATOR.find().map_err(|_| tmux_not_found_error())
+}
+
+/// Find tmux binary and cache the result for the lifetime of the process.
+///
+/// Subsequent calls return the cached path without re-running the BinaryLocator
+/// search. If two threads call this simultaneously, both may compute the path
+/// but only one wins — the result is identical so the race is harmless.
+///
+/// Use this in hot paths (e.g., every `run_tmux_cmd` call) to avoid repeated
+/// multi-layer searches. For one-shot checks, [`find_tmux_binary`] is fine.
+pub fn find_tmux_binary_cached() -> ErgataiResult<&'static PathBuf> {
+    if let Some(path) = TMUX_PATH.get() {
+        return Ok(path);
+    }
+    let path = find_tmux_binary()?;
+    Ok(TMUX_PATH.get_or_init(|| path))
 }
 
 /// Check if tmux is available on this system.

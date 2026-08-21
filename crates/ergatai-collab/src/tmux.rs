@@ -15,7 +15,6 @@ use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::process::Command;
 use tokio::sync::RwLock;
@@ -23,19 +22,10 @@ use tracing::{debug, info, trace, warn};
 
 // ── tmux binary resolution ──
 
-/// Cached tmux binary path. Resolved once via `ergatai_binary::find_tmux_binary()`.
-static TMUX_PATH: OnceLock<PathBuf> = OnceLock::new();
-
-/// Get the tmux binary path, resolving and caching on first call.
+/// Get the tmux binary path, using the shared cache from `ergatai_binary`.
 fn tmux_binary() -> Result<&'static PathBuf> {
-    // Fast path: already resolved.
-    if let Some(path) = TMUX_PATH.get() {
-        return Ok(path);
-    }
-    // Slow path: resolve via BinaryLocator and cache.
-    let path = ergatai_binary::find_tmux_binary()
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
-    Ok(TMUX_PATH.get_or_init(|| path))
+    ergatai_binary::find_tmux_binary_cached()
+        .map_err(|e| anyhow::anyhow!("{}", e))
 }
 
 // ── Configuration constants (override via environment variables) ──
@@ -750,10 +740,9 @@ impl Drop for TmuxManager {
 
             // Try to clean up the tmux session synchronously
             // Use std::process::Command since we're in a synchronous Drop context.
-            // Try the cached path first (already resolved from async usage);
-            // fall back to ergatai_binary::find_tmux_binary() if not yet cached.
-            let tmux_path = TMUX_PATH
-                .get()
+            // Use the shared cache; fall back to find_tmux_binary() if not yet cached.
+            let tmux_path = ergatai_binary::find_tmux_binary_cached()
+                .ok()
                 .cloned()
                 .or_else(|| ergatai_binary::find_tmux_binary().ok());
             let result = match tmux_path {
