@@ -40,6 +40,7 @@ pub async fn handle(
     work_dir: Option<&str>,
     api_url: &str,
     token: Option<&str>,
+    persist: bool,
 ) -> Result<()> {
     let client = ErgataiClient::new(api_url, token);
 
@@ -92,7 +93,7 @@ pub async fn handle(
         effective_work_dir.as_deref().unwrap_or("<default>")
     );
     let workspace = client
-        .create_workspace(&workspace_id, effective_work_dir.as_deref())
+        .create_workspace(&workspace_id, effective_work_dir.as_deref(), persist)
         .await
         .context("Failed to create workspace")?;
     println!("✓ Workspace ready: {} (id: {})", agent_name, workspace.id);
@@ -133,14 +134,14 @@ pub async fn handle(
     println!("   (Press Ctrl+B, D to detach)");
     println!();
 
-    // Call rmux attach
-    let status = Command::new("rmux")
-        .args(["attach", "-t", session_name])
+    // Call tmux attach
+    let status = Command::new("tmux")
+        .args(["attach-session", "-t", session_name])
         .status()
-        .context("Failed to execute 'rmux attach'. Is rmux installed?")?;
+        .context("Failed to execute 'tmux attach-session'. Is tmux installed?")?;
 
     if !status.success() {
-        anyhow::bail!("rmux attach exited with status: {}", status);
+        anyhow::bail!("tmux attach-session exited with status: {}", status);
     }
 
     Ok(())

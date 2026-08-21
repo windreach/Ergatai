@@ -35,9 +35,6 @@ pub struct AgentRecord {
     /// Dynamic runtime agent ID (e.g., pane ID like "%72", changes on restart)
     pub agent_id: String,
 
-    /// Human-readable display name (user-defined, optional)
-    pub display_name: Option<String>,
-
     /// Current lifecycle state
     pub state: AgentLifecycleState,
 
@@ -110,7 +107,6 @@ impl AgentRecord {
         Self {
             agent_uuid,
             agent_id,
-            display_name: None,
             state: AgentLifecycleState::Created,
             workspace_id,
             task_id: None,

@@ -173,14 +173,6 @@ struct SendMessageParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-struct RegisterAgentNameParams {
-    /// Human-readable display name for this agent (e.g., "frontend-dev", "code-reviewer")
-    /// Once set, other agents can send messages to you using this name instead of your auto-generated ID.
-    /// Names must be unique across all agents.
-    display_name: String,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
 struct SubmitOrchestrationParams {
     /// DAG definition in YAML format.
     ///
@@ -459,10 +451,6 @@ impl ErgataiMcpServer {
                 if let Some(ref allowed) = allowed_peers {
                     let matches = allowed.contains(&info.agent_id)
                         || info
-                            .display_name
-                            .as_ref()
-                            .is_some_and(|dn| allowed.contains(dn))
-                        || info
                             .mcp_agent_id
                             .as_ref()
                             .is_some_and(|mid| allowed.contains(mid));
@@ -474,10 +462,6 @@ impl ErgataiMcpServer {
                 if let Some(ref peers) = comm_with_target {
                     let matches = peers.contains(&info.agent_id)
                         || info
-                            .display_name
-                            .as_ref()
-                            .is_some_and(|dn| peers.contains(dn))
-                        || info
                             .mcp_agent_id
                             .as_ref()
                             .is_some_and(|mid| peers.contains(mid));
@@ -488,10 +472,6 @@ impl ErgataiMcpServer {
                 // Apply in_dag filter
                 if let Some(ref participants) = dag_participants {
                     let matches = participants.contains(&info.agent_id)
-                        || info
-                            .display_name
-                            .as_ref()
-                            .is_some_and(|dn| participants.contains(dn))
                         || info
                             .mcp_agent_id
                             .as_ref()
@@ -512,7 +492,6 @@ impl ErgataiMcpServer {
                 serde_json::json!({
                     "agent_id": info.agent_id,
                     "agent_uuid": info.agent_uuid,
-                    "display_name": info.display_name,
                     "mcp_agent_id": info.mcp_agent_id,
                     "workspace_id": info.workspace_id,
                     // Lifecycle state (lowercase) from unified state machine
@@ -549,96 +528,6 @@ impl ErgataiMcpServer {
         Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&result).unwrap_or_default(),
         )]))
-    }
-
-    /// Register a human-readable display name for this agent.
-    ///
-    /// Once registered, other agents can send messages to you using this name
-    /// instead of the auto-generated ID (e.g., "%198"). Names must be unique.
-    /// You can call this multiple times to change your display name.
-    #[tool(
-        description = "Register a human-readable display name for this agent (enables name-based messaging)"
-    )]
-    async fn register_agent_name(
-        &self,
-        params: Parameters<RegisterAgentNameParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let display_name = &params.0.display_name;
-
-        // Validate display name format
-        if display_name.is_empty() {
-            return Ok(CallToolResult::error(vec![ContentBlock::text(
-                "Display name cannot be empty",
-            )]));
-        }
-        if display_name.len() > 64 {
-            return Ok(CallToolResult::error(vec![ContentBlock::text(
-                "Display name must be 64 characters or less",
-            )]));
-        }
-        if !display_name
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-        {
-            return Ok(CallToolResult::error(vec![ContentBlock::text(
-                "Display name can only contain letters, numbers, hyphens, and underscores",
-            )]));
-        }
-
-        // Get the calling agent's runtime ID
-        let my_agent_id = match self.session_agent_id.read().await.clone() {
-            Some(id) => id,
-            None => {
-                return Ok(CallToolResult::error(vec![ContentBlock::text(
-                    "Cannot register name: agent identity not established",
-                )]));
-            }
-        };
-
-        let runtime = get_agent_runtime();
-
-        // Resolve MCP ID to runtime ID if needed
-        let runtime_id = match runtime.resolve_agent_id(&my_agent_id).await {
-            Some(id) => id,
-            None => {
-                return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
-                    "Cannot register name: agent '{}' not found in runtime",
-                    my_agent_id
-                ))]));
-            }
-        };
-
-        // Set the display name
-        match runtime
-            .set_display_name(&runtime_id, display_name.clone())
-            .await
-        {
-            Ok(()) => {
-                let result = serde_json::json!({
-                    "status": "registered",
-                    "agent_id": runtime_id,
-                    "display_name": display_name,
-                    "message": format!(
-                        "Display name '{}' registered. Other agents can now send messages to you using this name.",
-                        display_name
-                    )
-                });
-
-                info!(
-                    agent_id = %runtime_id,
-                    display_name = %display_name,
-                    "Agent registered display name"
-                );
-
-                Ok(CallToolResult::success(vec![ContentBlock::text(
-                    serde_json::to_string_pretty(&result).unwrap_or_default(),
-                )]))
-            }
-            Err(e) => Ok(CallToolResult::error(vec![ContentBlock::text(format!(
-                "Failed to register display name: {}",
-                e
-            ))])),
-        }
     }
 
     /// Send a message to another agent.
@@ -708,13 +597,18 @@ impl ErgataiMcpServer {
             })
             .map(|a| a.agent_id.clone())
             .or_else(|| {
-                // Check runtime agents (by agent_id, task_id, or display_name)
+                // Check runtime agents (by agent_id, task_id, ergatai_agent_id, or agent_uuid)
                 runtime_agents
                     .iter()
                     .find(|a| {
                         a.agent_id == *target_agent_id
+                            || a.agent_uuid == *target_agent_id
                             || a.task_id.as_deref() == Some(target_agent_id)
-                            || a.display_name.as_ref() == Some(target_agent_id)
+                            || a.handle
+                                .metadata
+                                .get("ergatai_agent_id")
+                                .map(|id| id == target_agent_id)
+                                .unwrap_or(false)
                     })
                     .map(|a| a.agent_id.clone())
             });
@@ -879,8 +773,13 @@ impl ErgataiMcpServer {
                 .await
                 .unwrap_or_else(|| from_agent.clone());
 
-            // Get human-readable display name (e.g., "frontend-dev (%72)")
-            let sender_display = Self::get_agent_display_name(&runtime, &sender_runtime_id).await;
+            // Use human-readable ergatai_agent_id (e.g., "agent-2") for display.
+            // Fall back to runtime ID (pane ID or UUID) if not available.
+            let sender_display = runtime
+                .get_agent(&sender_runtime_id)
+                .await
+                .and_then(|info| info.handle.metadata.get("ergatai_agent_id").cloned())
+                .unwrap_or_else(|| sender_runtime_id.clone());
 
             // Format message with contextual hint based on message type
             let formatted_content = Self::format_agent_message(&sender_display, message, is_reply);
@@ -1652,29 +1551,12 @@ impl ErgataiMcpServer {
         false
     }
 
-    /// Get human-readable agent display name.
+    /// Format message as JSON payload with minimal terminal hint.
+    /// All protocol/tool rules live in MCP initialize instructions (get_info).
+    /// Terminal hint is kept SHORT — just enough to trigger the right action.
     ///
-    /// Returns the display_name if set (e.g., "frontend-dev"),
-    /// otherwise falls back to the runtime ID (e.g., "%72").
-    async fn get_agent_display_name(
-        runtime: &ergatai_runtime::AgentRuntime,
-        agent_id: &str,
-    ) -> String {
-        if let Some(info) = runtime.get_agent(agent_id).await {
-            if let Some(ref display_name) = info.display_name {
-                return display_name.clone();
-            }
-        }
-        agent_id.to_string()
-    }
-
-    /// Format message as JSON payload with contextual hint.
-    /// Protocol rules are sent once during MCP initialize (via ServerInfo.instructions),
-    /// so we only send the message content here — saving ~800 tokens per message.
-    ///
-    /// Different hints are injected based on message type:
-    /// - Initial send (A→B): `[用 send_message MCP 回复，不要提问]`
-    /// - Reply (B→A): `[如无疑问题，展示"收到"即可]`
+    /// - is_reply=false (答方收到问题): hint → use send_message MCP to reply
+    /// - is_reply=true  (问方收到回答): hint → no questions → terminal "Received"; has questions → send_message MCP
     fn format_agent_message(sender_display: &str, message: &str, is_reply: bool) -> String {
         let message_json = serde_json::json!({
             "from": sender_display,
@@ -1682,9 +1564,11 @@ impl ErgataiMcpServer {
         });
 
         let hint = if is_reply {
-            "[If no questions, just show \"Received\"]\n"
+            // Questioner receives the answer
+            "[No questions → output \"Received\" in terminal, DO NOT call any tools; Has questions → reply via send_message MCP]\n"
         } else {
-            "[Reply via send_message MCP. Answer as requested; if no request, do not ask questions]\n"
+            // Answerer receives the question → reply via send_message MCP
+            "[Reply via send_message MCP, then TERMINATE]\n"
         };
 
         format!("{}{}", message_json, hint)
@@ -1705,8 +1589,12 @@ impl ErgataiMcpServer {
             .await
             .unwrap_or_else(|| from_agent.to_string());
 
-        // Get human-readable display name (e.g., "frontend-dev (%72)")
-        let sender_display = Self::get_agent_display_name(&runtime, &sender_runtime_id).await;
+        // Use human-readable ergatai_agent_id (e.g., "agent-2") for display.
+        let sender_display = runtime
+            .get_agent(&sender_runtime_id)
+            .await
+            .and_then(|info| info.handle.metadata.get("ergatai_agent_id").cloned())
+            .unwrap_or_else(|| sender_runtime_id.clone());
 
         // Format message with contextual hint based on message type
         let formatted_message = Self::format_agent_message(&sender_display, message, is_reply);
@@ -1825,26 +1713,6 @@ impl ServerHandler for ErgataiMcpServer {
                             agent_identifier = identifier,
                             "MCP agent bound to runtime agent by identifier"
                         );
-
-                        // Auto-set display_name from URL path identifier
-                        // This allows agents to be addressed by their URL name (e.g., "agent-1")
-                        if let Err(e) = runtime
-                            .set_display_name(&runtime_id, identifier.clone())
-                            .await
-                        {
-                            warn!(
-                                runtime_id = runtime_id,
-                                display_name = identifier,
-                                error = %e,
-                                "Failed to auto-set display_name from URL path"
-                            );
-                        } else {
-                            info!(
-                                runtime_id = runtime_id,
-                                display_name = identifier,
-                                "Auto-set display_name from URL path"
-                            );
-                        }
                     }
                     None => {
                         warn!(
@@ -1896,35 +1764,67 @@ impl ServerHandler for ErgataiMcpServer {
 
     /// Return server info with tools capability
     fn get_info(&self) -> ServerInfo {
-        let instructions = r#"# CRITICAL: Multi-Agent Communication Protocol
+        let instructions = r#"# Multi-Agent Communication Protocol (CRITICAL)
 
-## When you receive a message from another agent:
-**You MUST reply using the `send_message` MCP tool, NOT by typing in the terminal.**
+## 1. Your Identity
 
-Example: If you receive "你好！" from agent %45, you must call:
+Your agent name is the `ergatai_agent_id` field from `list_agents` (e.g., "agent-2").
+The `agent_id` field (e.g., "%15") is an internal pane ID — never use it.
+
+## 2. Receiving & Replying to Messages
+
+### Message Format (MUST follow)
+Every message injected into your terminal has this exact format:
 ```
-send_message(target_agent_id="%45", message="你的回复")
+{"from":"<agent-name>","message":"<content>"}[<hint>]
 ```
+- `from`: the sender's agent name — use this as `target_agent_id` when replying
+- `message`: the actual content from the sender
+- `hint`: instruction tag in square brackets — tells you how to respond
 
-## ONE-QUESTION-ONE-ANSWER Protocol
-1. Receive one message → Reply exactly once via `send_message` → TERMINATE
-2. Do NOT reply again after TERMINATE
-3. Do NOT ask follow-up questions
+### Hint Rules:
+| Hint text | Who receives it | Your action |
+|-----------|----------------|-------------|
+| `Reply via send_message MCP, then TERMINATE` | Answerer (received a question) | Answer via `send_message`, then TERMINATE |
+| `No questions → output "Received" in terminal, DO NOT call any tools; Has questions → reply via send_message MCP` | Questioner (received an answer) | If no questions: type "Received" in terminal, NO tools. If has questions: reply via `send_message` |
 
-## Reply Format
-- Max 150 Chinese characters
-- Direct, no pleasantries
-- End with "TERMINATE" on a new line
+### Examples:
+**Answerer receives a question:**
+```
+{"from":"agent-2","message":"Help me write a quicksort"}[Reply via send_message MCP, then TERMINATE]
+```
+→ Answer via `send_message(target_agent_id="agent-2", ...)`, then output TERMINATE.
 
-## Exception Handling
-- Vague question → Point out what's missing, then TERMINATE
-- Harmful content → Decline, then TERMINATE
-- Need tools → Call tool once, integrate result, then TERMINATE
+**Questioner receives an answer (no questions):**
+```
+{"from":"agent-3","message":"Here is the result: [1,2,3]"}[No questions → output "Received" in terminal, DO NOT call any tools; Has questions → reply via send_message MCP]
+```
+→ Just type "Received" in terminal. DO NOT call `send_message` or any other tool. Then output TERMINATE.
 
-# DO NOT:
-- Reply in terminal (use send_message MCP tool instead)
-- Ask "Anything else I can help?"
-- Continue conversation after TERMINATE"#;
+**Questioner receives an answer (has follow-up questions):**
+→ Reply via `send_message(target_agent_id="<from>", message="your question")`, then TERMINATE.
+
+## 3. Sending Messages
+
+```
+send_message(target_agent_id="<from field value>", message="your reply")
+```
+Always use the `from` field as `target_agent_id`. Never use pane IDs like %N.
+
+## 4. Anti-Loop Rules (CRITICAL)
+
+- Send at most ONE reply message per received message
+- After TERMINATE, do NOT send any more messages
+- NEVER ask "Anything else I can help?" or "有什么我可以帮助你的吗？"
+- If the message is a greeting or has no specific request, just acknowledge briefly and TERMINATE — do NOT ask questions back
+- If you already replied, STOP
+
+## 5. Reply Format
+
+- Concise and direct
+- End your terminal output with "TERMINATE" on a new line
+- If the question is vague → point out what's missing, then TERMINATE
+- If you need tools → call once, integrate result, then TERMINATE"#;
 
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(rmcp::model::Implementation::new(

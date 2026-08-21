@@ -157,14 +157,13 @@ struct Args {
     sse_keep_alive: u64,
 
     /// Agent runtime backend. Controls how agent workspaces (sessions/panes) are created.
-    /// Valid values: `rmux` (rmux SDK, preferred) or `tmux` (tmux CLI, original).
+    /// Valid values: `tmux` (tmux CLI, default) or `rmux` (rmux SDK, deprecated).
     /// Can also be set via ERGATAI_RUNTIME_BACKEND environment variable.
-    #[arg(long, env = "ERGATAI_RUNTIME_BACKEND", default_value = "rmux")]
+    #[arg(long, env = "ERGATAI_RUNTIME_BACKEND", default_value = "tmux")]
     runtime_backend: String,
 
     /// Session name prefix for the agent runtime backend.
-    /// For rmux: rmux session names will be `{prefix}-{workspace_id}`.
-    /// For tmux: tmux session names will be `{prefix}-{workspace_id}`.
+    /// tmux session names will be `{prefix}-{workspace_id}`.
     /// Can also be set via ERGATAI_TMUX_SESSION environment variable.
     #[arg(long, env = "ERGATAI_TMUX_SESSION", default_value = "ergatai")]
     session_prefix: String,
@@ -183,27 +182,18 @@ fn setup_env_before_runtime() -> Args {
         unsafe { std::env::set_var("RUST_LOG", "debug") };
     }
 
-    // rmux is the primary infrastructure — locate daemon and auto-start if needed.
-    // Must happen before tokio runtime because it calls std::env::set_var.
-    //
-    // Search order:
-    // 1. ERGATAI_RMUX_BINARY environment variable
-    // 2. Bundled resources (downloaded by build.rs)
-    // 3. Sibling directory (next to ergatai-api binary)
-    // 4. System PATH (development fallback)
-    match ergatai_binary::ensure_rmux_daemon(true) {
-        Ok(path) => {
-            tracing::info!(path = %path.display(), "rmux-daemon ready");
+    // tmux is the primary infrastructure — check if tmux is available.
+    // Must happen before tokio runtime because it may call std::env::set_var.
+    match std::process::Command::new("tmux").arg("-V").output() {
+        Ok(output) if output.status.success() => {
+            let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            tracing::info!(version = version, "tmux available");
         }
-        Err(e) => {
-            // rmux is required for production use. If not found, the backend will
-            // fail to initialize. We log the error but continue so the user sees
-            // a clear error message from the backend initialization.
+        _ => {
             tracing::error!(
-                "rmux-daemon not found: {}. \
-                 Ergatai requires rmux as its terminal multiplexer infrastructure. \
-                 The daemon should be bundled with the release, or set ERGATAI_RMUX_BINARY.",
-                e
+                "tmux not found. \
+                 Ergatai requires tmux as its terminal multiplexer infrastructure. \
+                 Install tmux or ensure it is on PATH."
             );
         }
     }
@@ -284,22 +274,22 @@ async fn async_main(args: Args) -> Result<()> {
     let peer_registry = mcp::server::new_peer_registry();
 
     // Initialize AgentRuntime with selected backend
-    // Backend choice: --runtime-backend rmux|tmux (default: rmux)
+    // Backend choice: --runtime-backend tmux|rmux (default: tmux)
     // Session prefix: --session-prefix or ERGATAI_TMUX_SESSION (default: ergatai)
     let runtime_backend_name = args.runtime_backend.to_lowercase();
     let runtime_backend: std::sync::Arc<dyn ergatai_runtime::AgentRuntimeBackend> =
         match runtime_backend_name.as_str() {
-            "rmux" => {
-                tracing::info!("Using rmux backend (rmux SDK-based terminal multiplexer)");
-                std::sync::Arc::new(ergatai_runtime::RmuxBackend::new(&args.session_prefix))
-            }
             "tmux" | "local-pty" => {
                 tracing::info!("Using tmux backend (tmux CLI-based terminal multiplexer)");
-                std::sync::Arc::new(ergatai_runtime::LocalPtyBackend::new(&args.session_prefix))
+                std::sync::Arc::new(ergatai_runtime::TmuxBackend::new(&args.session_prefix))
+            }
+            "rmux" => {
+                tracing::warn!("rmux backend is deprecated, consider using tmux");
+                std::sync::Arc::new(ergatai_runtime::RmuxBackend::new(&args.session_prefix))
             }
             other => {
                 return Err(anyhow::anyhow!(
-                    "Unknown runtime backend '{}'. Valid options: rmux, tmux",
+                    "Unknown runtime backend '{}'. Valid options: tmux, rmux",
                     other
                 ));
             }
@@ -337,7 +327,7 @@ async fn async_main(args: Args) -> Result<()> {
             }
 
             // Periodic re-discovery: scan for new agents every 30 seconds.
-            // This handles the race condition where the rmux daemon isn't ready
+            // This handles the race condition where the tmux session isn't ready
             // at startup, or agents are started after the server.
             // Uses the shared cancellation token for graceful shutdown.
             let periodic_runtime = runtime.clone();
@@ -394,7 +384,7 @@ async fn async_main(args: Args) -> Result<()> {
 
     // Create MCP services for each agent instance (agent-1, agent-2, agent-3)
     // Each service has its own URL path (/mcp/agent-1, /mcp/agent-2, /mcp/agent-3)
-    // This allows ergatai to bind MCP connections to specific rmux panes.
+    // This allows ergatai to bind MCP connections to specific tmux panes.
     //
     // IMPORTANT: A single ConversationManager is shared across ALL services.
     // The token-based turn model requires both sides of a conversation to share state:
@@ -439,7 +429,7 @@ async fn async_main(args: Args) -> Result<()> {
         "MCP server initialized (protocol 2025-06-18, Streamable HTTP, SSE keep-alive: {}s)",
         args.sse_keep_alive
     );
-    tracing::info!("Agent messaging: AgentRuntime injection (rmux/tmux send_text)");
+    tracing::info!("Agent messaging: AgentRuntime injection (tmux send-keys)");
 
     // Start background peer reaper — detects abrupt disconnects (kill, network drop)
     // and cleans up stale agent registrations within 10 seconds.
@@ -462,7 +452,7 @@ async fn async_main(args: Args) -> Result<()> {
             tracing::info!("✅ NATS initialized successfully");
 
             // Start the message delivery consumer — pulls from AGENT_MESSAGES
-            // JetStream stream and delivers via AgentRuntime injection (rmux/tmux).
+            // JetStream stream and delivers via AgentRuntime injection (tmux).
             // This provides reliable, persisted delivery for agent-to-agent messages.
             let delivery_handle =
                 start_message_delivery_consumer(conn, mcp_cancellation_token.clone());
@@ -809,7 +799,6 @@ struct ErrorResponse {
 #[allow(dead_code)] // Reserved for future agent listing API
 struct AgentSummary {
     name: String,
-    display_name: Option<String>,
     source: String, // "hosted" | "builtin"
     available: bool,
 }

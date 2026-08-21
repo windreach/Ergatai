@@ -1,6 +1,6 @@
 # CLAUDE.md — Ergatai
 
-多 agent 协作中间件。将独立运行的 AI 编码助手（如 OpenCode）组织成协作团队，通过 rmux pane 注入实现消息投递。提供 CLI（`ergatai`）、REST API、MCP 协议三种接入方式。
+多 agent 协作中间件。将独立运行的 AI 编码助手（如 OpenCode）组织成协作团队，通过 tmux pane 注入实现消息投递。提供 CLI（`ergatai`）、REST API、MCP 协议三种接入方式。
 
 ---
 
@@ -9,7 +9,7 @@
 ### 消息发送流程
 
 ```
-Agent A (rmux pane)
+Agent A (tmux pane)
   │  通过 MCP 协议调用 send_message tool
   ▼
 ┌──────────────────────────────────────────────────────────────────┐
@@ -47,14 +47,14 @@ Agent A (rmux pane)
   │
   ▼
 ┌──────────────────────────────────────────────────────────────────┐
-│  ⑤ RmuxBackend — inject_message()                 [rmux.rs]     │
+│  ⑤ TmuxBackend — inject_message()                 [tmux.rs]     │
 │     从 panes_map 查找 Pane handle                                │
 │     sanitize_message() (去换行, 截断 64KiB)                       │
-│     pane.send_text() → rmux daemon → 写入 pane 终端              │
+│     pane.send_text() → tmux daemon → 写入 pane 终端              │
 └──────────────────────────────────────────────────────────────────┘
   │
   ▼
-Agent B 的 rmux pane 中显示消息
+Agent B 的 tmux pane 中显示消息
 ```
 
 ### Agent 发现与注册
@@ -68,15 +68,15 @@ Agent B 的 rmux pane 中显示消息
   │
   ▼
 ┌──────────────────────────────────────────────────────────────────┐
-│  RmuxBackend::discover_agents()                   [rmux.rs]     │
-│     rmux.list_sessions() → 获取所有 session                       │
-│     rmux.find_panes().all() → 获取所有 pane                       │
+│  TmuxBackend::discover_agents()                   [tmux.rs]     │
+│     tmux.list_sessions() → 获取所有 session                       │
+│     tmux.find_panes().all() → 获取所有 pane                       │
 │     过滤: 跳过非 Running 状态的 pane                              │
 │     过滤: 跳过 session 名以 _ 开头的 (warmup session)             │
 │     对每个 pane:                                                  │
 │       从 PaneProcessState::Running { pid } 提取子进程 PID          │
-│       读 /proc/{pid}/environ 获取 RMUX_PANE 环境变量               │
-│       用 RMUX_PANE (如 "%15") 作为 agent_id (确定性绑定)           │
+│       读 /proc/{pid}/environ 获取 TMUX_PANE 环境变量               │
+│       用 TMUX_PANE (如 "%15") 作为 agent_id (确定性绑定)           │
 │       fallback: 读不到则用 "pane_N"                               │
 │     注册到 AgentRuntime registry                                  │
 └──────────────────────────────────────────────────────────────────┘
@@ -86,12 +86,12 @@ Agent B 的 rmux pane 中显示消息
 
 | ID 来源 | 格式 | 说明 |
 |---------|------|------|
-| RMUX_PANE 环境变量 | `%15`, `%16` | **确定性 ID**，rmux 自动注入到 pane 进程，从 `/proc/{pid}/environ` 读取 |
-| fallback | `pane_0`, `pane_1` | 读不到 RMUX_PANE 时按发现顺序编号（不稳定） |
+| TMUX_PANE 环境变量 | `%15`, `%16` | **确定性 ID**，tmux 自动注入到 pane 进程，从 `/proc/{pid}/environ` 读取 |
+| fallback | `pane_0`, `pane_1` | 读不到 TMUX_PANE 时按发现顺序编号（不稳定） |
 | MCP client | `opencode@a1b2c3d4` | MCP 连接时自动生成，仅用于 MCP peer registry |
 | 命名注册 | 自定义字符串 | 通过 `register_agent_name` MCP 工具绑定可读名称 |
 
-**关键**: agent 之间发消息使用 RMUX_PANE 值（如 `%15`）或命名注册作为 target_agent_id。
+**关键**: agent 之间发消息使用 TMUX_PANE 值（如 `%15`）或命名注册作为 target_agent_id。
 
 ---
 
@@ -118,7 +118,7 @@ crates/
 │       ├── agent_lifecycle.rs     生命周期状态机
 │       ├── backend.rs             Backend trait 定义
 │       └── backends/
-│           ├── rmux.rs              rmux backend (发现 + 注入, 首选)
+│           ├── tmux.rs              tmux backend (发现 + 注入, 首选)
 │           ├── local_pty.rs         tmux/pty backend (legacy)
 │           ├── direct_process.rs    直接进程 backend
 │           └── proc_linux.rs        /proc/{pid}/stat 健康检查
@@ -175,7 +175,7 @@ crates/
 │       ├── classify.rs            错误分类 (可恢复/不可恢复)
 │       └── lib.rs
 ├── ergatai-agent/         Agent 配置和发现 (占位)
-├── ergatai-binary/        二进制资源 (rmux, nats-server 查找/下载)
+├── ergatai-binary/        二进制资源 (tmux, nats-server 查找/下载)
 └── ergatai-cli/           CLI 工具 (ergatai 命令)
     └── src/
         ├── main.rs              clap CLI (start/workspace/agent/status)
@@ -220,10 +220,10 @@ ergatai status [--watch]                   # 系统状态 (可选 WebSocket 实�
 # 环境变量
 ERGATAI_API_URL=http://localhost:3000      # CLI 连接的 API 地址
 ERGATAI_API_TOKEN=xxx                      # API 认证 token
-ERGATAI_RUNTIME_BACKEND=rmux|tmux          # agent 运行时后端 (默认 rmux)
+ERGATAI_RUNTIME_BACKEND=tmux               # agent 运行时后端 (默认 tmux)
 ERGATAI_TMUX_SESSION=ergatai              # session 名前缀
 ERGATAI_SSE_KEEP_ALIVE=15                 # SSE keep-alive 间隔 (秒)
-ERGATAI_RMUX_BINARY=/path/to/rmux         # rmux 二进制路径 (覆盖查找)
+ERGATAI_TMUX_BINARY=/path/to/tmux         # tmux 二进制路径 (覆盖查找)
 ERGATAI_BACKPRESSURE_THRESHOLD=1000       # NATS 背压阈值
 ```
 
@@ -237,7 +237,7 @@ ERGATAI_BACKPRESSURE_THRESHOLD=1000       # NATS 背压阈值
 | `--api-token` | (无) | API 认证 token（也可通过 `ERGATAI_API_TOKEN` 设置） |
 | `--tls-cert` / `--tls-key` | (无) | TLS 证书/私钥 (PEM) |
 | `--sse-keep-alive` | `15` | SSE keep-alive 秒数 |
-| `--runtime-backend` | `rmux` | agent 运行时后端 |
+| `--runtime-backend` | `tmux` | agent 运行时后端 |
 | `--session-prefix` | `ergatai` | session 名前缀 |
 
 ---
@@ -307,8 +307,8 @@ Agent 通过 MCP 协议 (JSON-RPC over Streamable HTTP, protocol 2025-06-18) 调
 | `AgentRuntime` | `runtime/runtime.rs` | 门面：registry + backend 封装 |
 | `AgentRecord` | `runtime/agent_record.rs` | 统一的 agent 状态记录 (替代旧 AgentInfo) |
 | `AgentLifecycleState` | `runtime/agent_lifecycle.rs` | agent 生命周期状态机 |
-| `Backend` trait | `runtime/backend.rs` | 运行时后端抽象 (rmux/pty/process) |
-| `RmuxBackend` | `runtime/backends/rmux.rs` | rmux 实现 (发现 + 注入 + 健康检查) |
+| `Backend` trait | `runtime/backend.rs` | 运行时后端抽象 (tmux/pty/process) |
+| `TmuxBackend` | `runtime/backends/tmux.rs` | tmux 实现 (发现 + 注入 + 健康检查) |
 | `AgentMessagePayload` | `nats/events.rs` | NATS 消息体 (from, to, content, timestamp) |
 | `NatsConnection` | `nats/connection.rs` | NATS 连接 + JetStream 上下文 |
 | `EventBus` | `nats/event_bus.rs` | 事件发布/订阅门面 (含背压检查) |
@@ -494,7 +494,7 @@ JetStream Streams:
 | Agent ↔ Ergatai | MCP (JSON-RPC over Streamable HTTP, protocol 2025-06-18) |
 | REST API | axum 0.7 (+ tower-governor 限速) |
 | 内部消息 | NATS (async-nats **0.50**) + JetStream |
-| 终端复用 | rmux (tmux 兼容) |
+| 终端复用 | tmux (tmux 兼容) |
 | 数据库 | SQLite (rusqlite 0.31, bundled) |
 | 异步 | tokio 1.36 |
 | CLI | clap 4.5 |

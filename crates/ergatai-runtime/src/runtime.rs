@@ -25,12 +25,12 @@ static AGENT_RUNTIME: OnceLock<Arc<AgentRuntime>> = OnceLock::new();
 
 /// Get the global AgentRuntime singleton.
 ///
-/// Initializes with `LocalPtyBackend` using the "ergatai" session prefix.
+/// Initializes with `TmuxBackend` using the "ergatai" session prefix.
 /// Call `init_agent_runtime()` instead if you need a custom backend.
 pub fn get_agent_runtime() -> Arc<AgentRuntime> {
     AGENT_RUNTIME
         .get_or_init(|| {
-            let backend = Arc::new(crate::backends::local_pty::LocalPtyBackend::new("ergatai"));
+            let backend = Arc::new(crate::backends::tmux::TmuxBackend::new("ergatai"));
             Arc::new(AgentRuntime::new(backend))
         })
         .clone()
@@ -147,7 +147,6 @@ impl AgentRuntime {
         let info = AgentInfo {
             agent_uuid: agent_uuid.clone(),
             agent_id: agent_id.clone(),
-            display_name: None,
             workspace_id: spec.id,
             handle: handle.clone(),
             lifecycle: crate::agent_lifecycle::AgentLifecycleState::Running {
@@ -245,48 +244,6 @@ impl AgentRuntime {
         Ok(())
     }
 
-    /// Set the display name for a runtime agent (for human-readable addressing).
-    ///
-    /// When set, agents can be addressed by this name in send_message instead of
-    /// using the auto-generated ID (e.g., "%198"). Display names must be unique.
-    /// Returns an error if the name is already taken by another agent.
-    pub async fn set_display_name(
-        &self,
-        agent_id: &str,
-        display_name: String,
-    ) -> ErgataiResult<()> {
-        let mut registry = self.registry.write().await;
-
-        // Check if display_name is already taken by another agent
-        let name_taken = registry.values().any(|info| {
-            info.display_name.as_ref() == Some(&display_name) && info.agent_id != agent_id
-        });
-        if name_taken {
-            return Err(ErgataiError::internal(format!(
-                "Display name '{}' is already taken by another agent",
-                display_name
-            )));
-        }
-
-        let info = registry
-            .get_mut(agent_id)
-            .ok_or_else(|| ErgataiError::internal(format!("Agent {} not found", agent_id)))?;
-        info.display_name = Some(display_name.clone());
-        info!(agent_id = agent_id, display_name = %display_name, "Agent display name set");
-        Ok(())
-    }
-
-    /// Find an agent by display name.
-    ///
-    /// Returns the agent_id if an agent with the given display_name exists.
-    pub async fn find_agent_by_display_name(&self, display_name: &str) -> Option<String> {
-        let registry = self.registry.read().await;
-        registry
-            .values()
-            .find(|info| info.display_name.as_ref() == Some(&display_name.to_string()))
-            .map(|info| info.agent_id.clone())
-    }
-
     /// Register an externally-discovered agent (e.g., from rmux pane scan).
     ///
     /// This allows agents started outside the normal `launch_agent()` flow
@@ -302,7 +259,6 @@ impl AgentRuntime {
         let info = AgentInfo {
             agent_uuid: agent_uuid.clone(),
             agent_id: agent_id.clone(),
-            display_name: None,
             workspace_id: handle.workspace.id.clone(),
             handle,
             lifecycle: crate::agent_lifecycle::AgentLifecycleState::Running {
@@ -338,7 +294,19 @@ impl AgentRuntime {
         let mut count = 0;
         let mut new_uuids = Vec::new();
         let mut registry = self.registry.write().await;
+
         for (agent_id, handle) in discovered {
+            // If this workspace already has an agent registered (e.g., via launch_agent),
+            // update its handle metadata with the latest discovery data (especially
+            // ergatai_agent_id, which may have been read from the child process's
+            // ERGATAI_AGENT_ID env var). Then skip re-registration.
+            if let Some(existing) = registry.values_mut().find(|info| info.workspace_id == handle.workspace.id) {
+                // Merge ergatai_agent_id from fresh discovery
+                if let Some(eai) = handle.metadata.get("ergatai_agent_id") {
+                    existing.handle.metadata.insert("ergatai_agent_id".to_string(), eai.clone());
+                }
+                continue;
+            }
             // Atomic check-and-insert under a single write lock acquisition.
             // entry().or_insert() ensures no TOCTOU gap between contains_key and insert.
             registry.entry(agent_id.clone()).or_insert_with(|| {
@@ -349,7 +317,6 @@ impl AgentRuntime {
                 AgentInfo {
                     agent_uuid: agent_uuid.clone(),
                     agent_id: agent_id.clone(),
-                    display_name: None,
                     workspace_id: handle.workspace.id.clone(),
                     handle,
                     lifecycle: crate::agent_lifecycle::AgentLifecycleState::Running {
@@ -392,18 +359,18 @@ impl AgentRuntime {
     /// Called from the periodic discovery loop (main.rs). One bad sample isn't
     /// enough — a process briefly in Z state during exit is normal.
     ///
-    /// Backends that don't support health checks (non-Rmux backends) are no-ops.
-    /// This method uses `as_any()` downcast to call RmuxBackend's health check;
+    /// Backends that don't support health checks are no-ops.
+    /// This method uses `as_any()` downcast to call TmuxBackend's health check;
     /// if the downcast fails, the method returns silently.
     ///
     /// Returns the list of agent IDs that were pruned in this pass, so callers
     /// can perform follow-up cleanup (e.g. dropping rate-limiter windows).
     pub async fn prune_unhealthy_agents(&self) -> Vec<String> {
         use crate::backends::proc_linux::ProcessState;
-        use crate::backends::rmux::RmuxBackend;
+        use crate::backends::tmux::TmuxBackend;
 
         let backend_any = self.backend.as_any();
-        let rmux_backend = match backend_any.downcast_ref::<RmuxBackend>() {
+        let tmux_backend = match backend_any.downcast_ref::<TmuxBackend>() {
             Some(b) => b,
             None => {
                 debug!("health check not supported by backend, skipping prune");
@@ -411,7 +378,7 @@ impl AgentRuntime {
             }
         };
 
-        let health = rmux_backend.health_check_agents().await;
+        let health = tmux_backend.health_check_agents().await;
 
         let mut pruned = Vec::new();
         let mut streaks = self.unhealthy_streaks.lock().await;

@@ -5,7 +5,7 @@
 
 #[cfg(test)]
 mod uuid_routing_tests {
-    use ergatai_runtime::backends::local_pty::LocalPtyBackend;
+    use ergatai_runtime::backends::tmux::TmuxBackend;
     use ergatai_runtime::types::{AgentHandle, WorkspaceHandle};
     use ergatai_runtime::AgentRuntime;
     use std::collections::HashMap;
@@ -28,7 +28,7 @@ mod uuid_routing_tests {
     /// Test: UUID resolution finds the correct agent
     #[tokio::test]
     async fn test_uuid_resolution_finds_agent() {
-        let backend = Arc::new(LocalPtyBackend::new("test"));
+        let backend = Arc::new(TmuxBackend::new("test"));
         let runtime = AgentRuntime::new(backend);
 
         // Register an agent (UUID will be auto-generated)
@@ -51,7 +51,7 @@ mod uuid_routing_tests {
     /// Test: UUID resolution returns None for unknown UUID
     #[tokio::test]
     async fn test_uuid_resolution_returns_none_for_unknown() {
-        let backend = Arc::new(LocalPtyBackend::new("test"));
+        let backend = Arc::new(TmuxBackend::new("test"));
         let runtime = AgentRuntime::new(backend);
 
         // Try to resolve a UUID that doesn't exist
@@ -62,7 +62,7 @@ mod uuid_routing_tests {
     /// Test: Multiple agents with different UUIDs
     #[tokio::test]
     async fn test_multiple_agents_uuid_resolution() {
-        let backend = Arc::new(LocalPtyBackend::new("test"));
+        let backend = Arc::new(TmuxBackend::new("test"));
         let runtime = AgentRuntime::new(backend);
 
         // Register multiple agents
@@ -97,7 +97,7 @@ mod uuid_routing_tests {
     /// Test: AgentInfo has UUID field
     #[tokio::test]
     async fn test_agent_info_has_uuid_field() {
-        let backend = Arc::new(LocalPtyBackend::new("test"));
+        let backend = Arc::new(TmuxBackend::new("test"));
         let runtime = AgentRuntime::new(backend);
 
         let agent_id = "%1";
@@ -117,7 +117,7 @@ mod uuid_routing_tests {
     /// Test: UUID is unique per agent
     #[tokio::test]
     async fn test_uuid_uniqueness() {
-        let backend = Arc::new(LocalPtyBackend::new("test"));
+        let backend = Arc::new(TmuxBackend::new("test"));
         let runtime = AgentRuntime::new(backend);
 
         // Register multiple agents

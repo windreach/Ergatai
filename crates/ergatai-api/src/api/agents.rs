@@ -38,7 +38,6 @@ pub struct AgentInfoResponse {
     pub state: String,
     /// Detailed lifecycle state from the unified state machine
     pub lifecycle_state: String,
-    pub display_name: Option<String>,
     pub task_id: Option<String>,
     pub mcp_agent_id: Option<String>,
     pub is_alive: bool,
@@ -69,7 +68,6 @@ pub async fn list_agents(State(_state): State<AppState>) -> impl IntoResponse {
                 // Fix: use lowercase lifecycle state instead of Debug-formatted AgentState
                 state: lifecycle_state.clone(),
                 lifecycle_state,
-                display_name: a.display_name,
                 task_id: a.task_id,
                 mcp_agent_id: a.mcp_agent_id,
                 is_alive: a.lifecycle.is_alive(),
@@ -367,7 +365,6 @@ mod tests {
             workspace_id: "ws-1".to_string(),
             state: "running".to_string(),
             lifecycle_state: "running".to_string(),
-            display_name: None,
             task_id: None,
             mcp_agent_id: None,
             is_alive: true,

@@ -3,8 +3,8 @@
 //! This crate provides the `AgentRuntimeBackend` trait and concrete implementations
 //! for running agents in different environments:
 //!
-//! - **RmuxBackend**: rmux SDK-based terminal multiplexer (preferred)
-//! - **LocalPtyBackend**: tmux sessions and panes (original default)
+//! - **TmuxBackend**: tmux CLI-based terminal multiplexer (preferred, default)
+//! - **RmuxBackend**: rmux SDK-based terminal multiplexer (deprecated)
 //! - **DirectProcessBackend**: direct process spawning (no terminal multiplexer)
 //!
 //! The `AgentRuntime` facade wraps a backend with state tracking and MCP
@@ -59,7 +59,9 @@ pub use agent_record::{
 };
 pub use backend::AgentRuntimeBackend;
 pub use backends::direct_process::DirectProcessBackend;
-pub use backends::local_pty::LocalPtyBackend;
+pub use backends::tmux::{TmuxBackend, TmuxSessionInfo, TmuxStatus};
+#[allow(deprecated)]
+pub use backends::tmux::TmuxBackend as LocalPtyBackend; // deprecated alias
 pub use backends::rmux::{ManagedPaneInfo, RmuxBackend, RmuxDaemonInfo};
 pub use rmux_sdk::RmuxEndpoint;
 pub use runtime::{get_agent_runtime, init_agent_runtime, AgentRuntime};

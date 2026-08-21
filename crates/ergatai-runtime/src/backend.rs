@@ -15,7 +15,7 @@ use crate::types::{AgentHandle, BackendCapabilities, WaitResult, WorkspaceHandle
 /// Pluggable execution backend for agents.
 ///
 /// Each backend manages a specific type of execution environment:
-/// - **LocalPtyBackend**: tmux sessions and panes (current default)
+/// - **TmuxBackend**: tmux sessions and panes (current default)
 /// - **DirectProcessBackend**: direct process spawning (no terminal)
 /// - **DockerBackend**: Docker containers (future)
 /// - **RemoteSSHBackend**: SSH to remote hosts (future)

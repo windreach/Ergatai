@@ -1,5 +1,5 @@
 use axum::{extract::State, response::IntoResponse, Json};
-use ergatai_runtime::{get_agent_runtime, RmuxBackend, RmuxDaemonInfo};
+use ergatai_runtime::{get_agent_runtime, TmuxBackend, TmuxStatus};
 use serde::Serialize;
 
 use crate::{nats, AppState};
@@ -9,7 +9,7 @@ pub struct StatusResponse {
     pub nats_initialized: bool,
     pub nats_port: Option<u16>,
     pub active_agents: usize,
-    pub daemon_info: Option<RmuxDaemonInfo>,
+    pub backend_info: Option<TmuxStatus>,
 }
 
 pub async fn get_status(State(_state): State<AppState>) -> impl IntoResponse {
@@ -20,13 +20,12 @@ pub async fn get_status(State(_state): State<AppState>) -> impl IntoResponse {
     let nats_port = nats::get_nats_server_port().await;
     let agents = runtime.list_agents().await;
 
-    // Try to get RmuxBackend daemon info
-    let daemon_info = {
+    // Try to get TmuxBackend status
+    let backend_info = {
         let backend = runtime.backend();
-        // Check if backend is RmuxBackend using Any trait
         let backend_any = backend.as_any();
-        if let Some(rmux_backend) = backend_any.downcast_ref::<RmuxBackend>() {
-            Some(rmux_backend.daemon_info().await)
+        if let Some(tmux_backend) = backend_any.downcast_ref::<TmuxBackend>() {
+            Some(tmux_backend.tmux_status().await)
         } else {
             None
         }
@@ -36,7 +35,7 @@ pub async fn get_status(State(_state): State<AppState>) -> impl IntoResponse {
         nats_initialized,
         nats_port,
         active_agents: agents.len(),
-        daemon_info,
+        backend_info,
     })
 }
 
@@ -52,13 +51,13 @@ mod tests {
             nats_initialized: true,
             nats_port: Some(4222),
             active_agents: 3,
-            daemon_info: None,
+            backend_info: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["nats_initialized"], true);
         assert_eq!(json["nats_port"], 4222);
         assert_eq!(json["active_agents"], 3);
-        assert!(json["daemon_info"].is_null());
+        assert!(json["backend_info"].is_null());
     }
 
     #[test]
@@ -67,7 +66,7 @@ mod tests {
             nats_initialized: false,
             nats_port: None,
             active_agents: 0,
-            daemon_info: None,
+            backend_info: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["nats_initialized"], false);
@@ -82,7 +81,7 @@ mod tests {
                 nats_initialized: true,
                 nats_port: Some(4222),
                 active_agents: count,
-                daemon_info: None,
+                backend_info: None,
             };
             let json = serde_json::to_value(&resp).unwrap();
             assert_eq!(json["active_agents"], count);
@@ -95,7 +94,7 @@ mod tests {
             nats_initialized: true,
             nats_port: Some(4222),
             active_agents: 2,
-            daemon_info: None,
+            backend_info: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
         // All 4 fields should be present at the top level
@@ -104,7 +103,7 @@ mod tests {
         assert!(obj.contains_key("nats_initialized"));
         assert!(obj.contains_key("nats_port"));
         assert!(obj.contains_key("active_agents"));
-        assert!(obj.contains_key("daemon_info"));
+        assert!(obj.contains_key("backend_info"));
     }
 
     #[test]
@@ -114,7 +113,7 @@ mod tests {
             nats_initialized: true,
             nats_port: Some(65535),
             active_agents: 0,
-            daemon_info: None,
+            backend_info: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["nats_port"], 65535);

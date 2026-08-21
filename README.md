@@ -103,7 +103,7 @@ Each agent needs a unique path suffix (`/mcp/alice`, `/mcp/bob`, etc.).
 | **Agent Messaging** | Agents send and receive messages through Ergatai's relay (NATS JetStream with rate limiting) |
 | **DAG Orchestration** | Submit YAML workflows with task dependencies and strict validation |
 | **Safe Concurrency** | Two-tier token system (SystemToken + FileToken) with kernel-level enforcement |
-| **Agent Discovery** | Automatic registration via rmux panes, MCP connections, or named registration |
+| **Agent Discovery** | Automatic registration via tmux panes, MCP connections, or named registration |
 | **Agent Agnostic** | Works with any MCP-compatible agent — Claude, Cursor, Codex, and more |
 | **Local First** | All execution runs locally; no data leaves your machine |
 | **Crash Recovery** | DAG state persisted to disk; heartbeat monitoring reclaims stale locks automatically |
@@ -119,7 +119,7 @@ Agents (Claude, Cursor, Codex, ...)
 ┌────────────────────────────────┐
 │     Ergatai Middleware         │
 │  ┌──────────────────────────┐  │
-│  │   MCP Server + rmux      │  │
+│  │   MCP Server + tmux      │  │
 │  └──────────────────────────┘  │
 │  ┌──────────────────────────┐  │
 │  │  Agent Registry │ DAG    │  │

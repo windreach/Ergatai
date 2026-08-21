@@ -38,6 +38,9 @@ enum Commands {
         /// Working directory for the workspace
         #[arg(long)]
         work_dir: Option<String>,
+        /// Keep session after detach (default: auto-close)
+        #[arg(long)]
+        persist: bool,
     },
     /// Manage workspaces
     Workspace {
@@ -115,12 +118,14 @@ async fn main() -> Result<()> {
         Some(Commands::Start {
             agent_name,
             work_dir,
+            persist,
         }) => {
             commands::start::handle(
                 &agent_name,
                 work_dir.as_deref(),
                 &cli.api_url,
                 cli.token.as_deref(),
+                persist,
             )
             .await?;
         }
@@ -141,6 +146,7 @@ async fn main() -> Result<()> {
                     cli.work_dir.as_deref(),
                     &cli.api_url,
                     cli.token.as_deref(),
+                    false, // quick start defaults to non-persist
                 )
                 .await?;
             } else {

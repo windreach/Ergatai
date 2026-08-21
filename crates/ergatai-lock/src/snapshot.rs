@@ -53,21 +53,33 @@ pub struct SnapshotManager {
 }
 
 impl SnapshotManager {
-    /// Create a new snapshot manager for the given repository path
+    /// Create a new snapshot manager for the given repository path.
+    ///
+    /// Uses `Repository::discover` as fallback to walk up the directory tree,
+    /// so the caller can pass a working directory (e.g., `/home/user/code`)
+    /// rather than the exact git root (e.g., `/home/user/code/project`).
     pub fn new(repo_path: &Path) -> Result<Self, ErgataiError> {
-        let repo = Repository::open(repo_path).map_err(|e| {
-            ErgataiError::internal(format!(
-                "Failed to open git repository at {:?}: {}",
-                repo_path, e
-            ))
-        })?;
+        // Try exact path first, then discover upward (like `git rev-parse --show-toplevel`).
+        let repo = Repository::open(repo_path)
+            .or_else(|_| Repository::discover(repo_path))
+            .map_err(|e| {
+                ErgataiError::internal(format!(
+                    "Failed to open git repository at {:?}: {}",
+                    repo_path, e
+                ))
+            })?;
 
-        let canonical_repo_path = repo_path.canonicalize().map_err(|e| {
-            ErgataiError::internal(format!("Failed to canonicalize repo path: {}", e))
-        })?;
+        // Use the actual git workdir as the canonical path (handles discovered repos)
+        let canonical_repo_path = repo
+            .workdir()
+            .unwrap_or(repo_path)
+            .canonicalize()
+            .map_err(|e| {
+                ErgataiError::internal(format!("Failed to canonicalize repo path: {}", e))
+            })?;
 
         Ok(Self {
-            repo_path: repo_path.to_path_buf(),
+            repo_path: canonical_repo_path.clone(),
             canonical_repo_path,
             repo: Mutex::new(repo),
         })

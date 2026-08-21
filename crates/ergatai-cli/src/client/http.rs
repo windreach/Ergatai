@@ -44,11 +44,13 @@ impl ErgataiClient {
         &self,
         id: &str,
         work_dir: Option<&str>,
+        persist: bool,
     ) -> Result<WorkspaceResponse> {
         let url = format!("{}/api/v1/workspaces", self.base_url);
         let body = CreateWorkspaceRequest {
             id: id.to_string(),
             work_dir: work_dir.map(|s| s.to_string()),
+            persist: Some(persist),
         };
         let req = self.client.post(&url).json(&body);
         let req = self.add_auth(req);
@@ -181,8 +183,6 @@ pub struct AgentInfoResponse {
     #[allow(dead_code)]
     pub lifecycle_state: String,
     #[serde(default)]
-    pub display_name: Option<String>,
-    #[serde(default)]
     pub task_id: Option<String>,
     #[serde(default)]
     #[allow(dead_code)]
@@ -209,25 +209,28 @@ pub struct StatusResponse {
     pub nats_initialized: bool,
     pub nats_port: Option<u16>,
     pub active_agents: usize,
-    pub daemon_info: Option<DaemonInfo>,
+    pub backend_info: Option<TmuxBackendInfo>,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct DaemonInfo {
-    pub binary_available: bool,
-    pub binary_path: Option<String>,
-    pub connected: bool,
-    pub tracked_pane_count: usize,
-    pub tracked_workspace_count: usize,
-    pub total_sessions: usize,
-    pub total_daemon_panes: usize,
-    pub ergatai_sessions: Vec<String>,
+pub struct TmuxBackendInfo {
+    pub version: String,
+    pub sessions: Vec<TmuxSessionInfo>,
+    pub total_panes: usize,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TmuxSessionInfo {
+    pub name: String,
+    pub panes: usize,
+    pub created: String,
 }
 
 #[derive(Debug, Serialize)]
 struct CreateWorkspaceRequest {
     id: String,
     work_dir: Option<String>,
+    persist: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -333,6 +336,7 @@ mod tests {
         let req = CreateWorkspaceRequest {
             id: "ws-1".to_string(),
             work_dir: Some("/tmp/work".to_string()),
+            persist: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("\"id\":\"ws-1\""));
@@ -344,6 +348,7 @@ mod tests {
         let req = CreateWorkspaceRequest {
             id: "ws-2".to_string(),
             work_dir: None,
+            persist: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("\"id\":\"ws-2\""));
@@ -409,38 +414,33 @@ mod tests {
     #[test]
     fn test_status_response_deserialization() {
         let json =
-            r#"{"nats_initialized":true,"nats_port":4222,"active_agents":3,"daemon_info":null}"#;
+            r#"{"nats_initialized":true,"nats_port":4222,"active_agents":3,"backend_info":null}"#;
         let resp: StatusResponse = serde_json::from_str(json).unwrap();
         assert!(resp.nats_initialized);
         assert_eq!(resp.nats_port, Some(4222));
         assert_eq!(resp.active_agents, 3);
-        assert!(resp.daemon_info.is_none());
+        assert!(resp.backend_info.is_none());
     }
 
     #[test]
-    fn test_status_response_with_daemon_info() {
+    fn test_status_response_with_backend_info() {
         let json = r#"{
             "nats_initialized":true,
             "nats_port":4222,
             "active_agents":1,
-            "daemon_info":{
-                "binary_available":true,
-                "binary_path":"/usr/bin/rmux",
-                "connected":true,
-                "tracked_pane_count":2,
-                "tracked_workspace_count":1,
-                "total_sessions":1,
-                "total_daemon_panes":3,
-                "ergatai_sessions":["s1"]
+            "backend_info":{
+                "version":"3.4",
+                "sessions":[{"name":"ergatai-ws1","panes":2,"created":"2024-01-01"}],
+                "total_panes":2
             }
         }"#;
         let resp: StatusResponse = serde_json::from_str(json).unwrap();
-        let daemon = resp.daemon_info.unwrap();
-        assert!(daemon.binary_available);
-        assert_eq!(daemon.binary_path.as_deref(), Some("/usr/bin/rmux"));
-        assert!(daemon.connected);
-        assert_eq!(daemon.tracked_pane_count, 2);
-        assert_eq!(daemon.ergatai_sessions, vec!["s1"]);
+        let info = resp.backend_info.unwrap();
+        assert_eq!(info.version, "3.4");
+        assert_eq!(info.total_panes, 2);
+        assert_eq!(info.sessions.len(), 1);
+        assert_eq!(info.sessions[0].name, "ergatai-ws1");
+        assert_eq!(info.sessions[0].panes, 2);
     }
 
     #[test]

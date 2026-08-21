@@ -35,8 +35,6 @@ pub struct UnifiedAgentRegistry {
     agent_id_to_uuid: Arc<RwLock<HashMap<String, String>>>,
     /// Index by mcp_agent_id (for MCP-connected agents)
     mcp_id_to_uuid: Arc<RwLock<HashMap<String, String>>>,
-    /// Index by display_name (user-defined names)
-    name_to_uuid: Arc<RwLock<HashMap<String, String>>>,
     /// Optional NATS event bus for publishing lifecycle events.
     /// Set via `set_event_bus()` during server initialization.
     event_bus: Arc<RwLock<Option<Arc<ergatai_nats::EventBus>>>>,
@@ -47,7 +45,6 @@ pub struct UnifiedAgentRegistry {
 pub struct AgentSummary {
     pub agent_uuid: String,
     pub agent_id: String,
-    pub display_name: Option<String>,
     pub state: String,
     pub workspace_id: String,
     pub task_id: Option<String>,
@@ -67,7 +64,6 @@ impl UnifiedAgentRegistry {
             agents_by_uuid: Arc::new(RwLock::new(HashMap::new())),
             agent_id_to_uuid: Arc::new(RwLock::new(HashMap::new())),
             mcp_id_to_uuid: Arc::new(RwLock::new(HashMap::new())),
-            name_to_uuid: Arc::new(RwLock::new(HashMap::new())),
             event_bus: Arc::new(RwLock::new(None)),
         }
     }
@@ -86,7 +82,6 @@ impl UnifiedAgentRegistry {
         let uuid = record.agent_uuid.clone();
         let agent_id = record.agent_id.clone();
         let mcp_id = record.mcp_agent_id.clone();
-        let name = record.display_name.clone();
 
         // Store the record
         self.agents_by_uuid
@@ -104,10 +99,6 @@ impl UnifiedAgentRegistry {
             self.mcp_id_to_uuid.write().await.insert(mcp, uuid.clone());
         }
 
-        if let Some(n) = name {
-            self.name_to_uuid.write().await.insert(n, uuid.clone());
-        }
-
         debug!(agent_uuid = %uuid, "Agent registered in unified registry");
     }
 
@@ -121,10 +112,6 @@ impl UnifiedAgentRegistry {
 
             if let Some(ref mcp) = r.mcp_agent_id {
                 self.mcp_id_to_uuid.write().await.remove(mcp);
-            }
-
-            if let Some(ref name) = r.display_name {
-                self.name_to_uuid.write().await.remove(name);
             }
 
             debug!(agent_uuid = %agent_uuid, "Agent unregistered from unified registry");
@@ -147,12 +134,6 @@ impl UnifiedAgentRegistry {
     /// Get agent by MCP agent_id (e.g., "opencode@abcd1234")
     pub async fn get_by_mcp_id(&self, mcp_agent_id: &str) -> Option<AgentRecord> {
         let uuid = self.mcp_id_to_uuid.read().await.get(mcp_agent_id)?.clone();
-        self.get_by_uuid(&uuid).await
-    }
-
-    /// Get agent by display name
-    pub async fn get_by_name(&self, display_name: &str) -> Option<AgentRecord> {
-        let uuid = self.name_to_uuid.read().await.get(display_name)?.clone();
         self.get_by_uuid(&uuid).await
     }
 
@@ -255,34 +236,6 @@ impl UnifiedAgentRegistry {
         Ok(())
     }
 
-    /// Update display name
-    pub async fn set_display_name(
-        &self,
-        agent_uuid: &str,
-        display_name: Option<String>,
-    ) -> Result<(), String> {
-        let mut agents = self.agents_by_uuid.write().await;
-        let record = agents
-            .get_mut(agent_uuid)
-            .ok_or_else(|| format!("Agent {} not found", agent_uuid))?;
-
-        // Remove old name binding if exists
-        if let Some(ref old_name) = record.display_name {
-            self.name_to_uuid.write().await.remove(old_name);
-        }
-
-        // Set new binding
-        record.display_name = display_name.clone();
-        if let Some(name) = display_name {
-            self.name_to_uuid
-                .write()
-                .await
-                .insert(name, agent_uuid.to_string());
-        }
-
-        Ok(())
-    }
-
     /// List all agents
     pub async fn list_all(&self) -> Vec<AgentRecord> {
         self.agents_by_uuid.read().await.values().cloned().collect()
@@ -326,7 +279,6 @@ impl UnifiedAgentRegistry {
         Some(AgentSummary {
             agent_uuid: record.agent_uuid,
             agent_id: record.agent_id,
-            display_name: record.display_name,
             state: record.state.state_name().to_string(),
             workspace_id: record.workspace_id,
             task_id: record.task_id,
@@ -352,7 +304,6 @@ impl UnifiedAgentRegistry {
                 AgentSummary {
                     agent_uuid: r.agent_uuid,
                     agent_id: r.agent_id,
-                    display_name: r.display_name,
                     state: r.state.state_name().to_string(),
                     workspace_id: r.workspace_id,
                     task_id: r.task_id,
@@ -507,22 +458,6 @@ mod tests {
         let by_mcp = registry.get_by_mcp_id("opencode@abc").await;
         assert!(by_mcp.is_some());
         assert_eq!(by_mcp.unwrap().agent_uuid, "uuid-3");
-    }
-
-    #[tokio::test]
-    async fn test_display_name_binding() {
-        let registry = UnifiedAgentRegistry::new();
-        let record = create_test_record("uuid-4", "%4");
-
-        registry.register(record).await;
-        registry
-            .set_display_name("uuid-4", Some("my-agent".to_string()))
-            .await
-            .unwrap();
-
-        let by_name = registry.get_by_name("my-agent").await;
-        assert!(by_name.is_some());
-        assert_eq!(by_name.unwrap().agent_uuid, "uuid-4");
     }
 
     #[tokio::test]

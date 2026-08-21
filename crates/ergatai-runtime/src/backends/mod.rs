@@ -1,11 +1,11 @@
 //! Backend implementations for the Agent Runtime.
 //!
 //! Each module provides a concrete `AgentRuntimeBackend` implementation:
-//! - `local_pty`: tmux-based local PTY management (original default)
-//! - `rmux`: rmux SDK-based terminal multiplexer (preferred)
+//! - `tmux`: tmux CLI-based terminal multiplexer (preferred, default)
+//! - `rmux`: rmux SDK-based terminal multiplexer (deprecated)
 //! - `direct_process`: direct process spawning without terminal multiplexer
 
 pub mod direct_process;
-pub mod local_pty;
 pub mod proc_linux;
 pub mod rmux;
+pub mod tmux;

@@ -135,10 +135,6 @@ pub struct AgentInfo {
     /// Changes when the pane dies and a new pane is created.
     pub agent_id: String,
 
-    /// Human-readable display name (user-defined, optional)
-    /// When set, agents can be addressed by this name in send_message.
-    pub display_name: Option<String>,
-
     /// Workspace ID this agent belongs to
     pub workspace_id: String,
 
@@ -419,7 +415,6 @@ mod tests {
         let info = AgentInfo {
             agent_uuid: "550e8400-e29b-41d4-a716-446655440000".to_string(),
             agent_id: "agent-1".to_string(),
-            display_name: None,
             workspace_id: "ws-1".to_string(),
             handle: AgentHandle {
                 workspace: WorkspaceHandle {
@@ -454,7 +449,6 @@ mod tests {
         let info = AgentInfo {
             agent_uuid: "550e8400-e29b-41d4-a716-446655440001".to_string(),
             agent_id: "agent-1".to_string(),
-            display_name: None,
             workspace_id: "ws-1".to_string(),
             handle: AgentHandle {
                 workspace: WorkspaceHandle {

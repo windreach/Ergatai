@@ -59,11 +59,11 @@ fn main() {
     // Only run on ergatai-api builds (the main binary that needs rmux)
     // Skip for library-only builds to avoid unnecessary downloads
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-env-changed=ERGATAI_SKIP_RMUX_DOWNLOAD");
+    println!("cargo:rerun-if-env-changed=ERGATAI_DOWNLOAD_RMUX");
 
-    // Allow skipping download for development/testing
-    if env::var("ERGATAI_SKIP_RMUX_DOWNLOAD").is_ok() {
-        // Silently skip — no warning needed for intentional skip
+    // Default: skip download (most users use tmux backend).
+    // Set ERGATAI_DOWNLOAD_RMUX=1 to explicitly download rmux-daemon.
+    if env::var("ERGATAI_DOWNLOAD_RMUX").is_err() {
         return;
     }
 

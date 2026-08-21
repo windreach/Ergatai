@@ -1,6 +1,6 @@
 //! DirectProcessBackend — spawn agent processes directly without a terminal multiplexer.
 //!
-//! This backend is simpler than LocalPtyBackend: it spawns processes directly,
+//! This backend is simpler than TmuxBackend: it spawns processes directly,
 //! captures stdout/stderr, and tracks them by PID. No message injection support
 //! (agents must use MCP notifications for communication).
 //!

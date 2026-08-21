@@ -26,10 +26,10 @@ pub fn format_agents_table(agents: &[AgentInfoResponse]) {
     }
 
     println!(
-        "{:<30} {:<20} {:<15} {:<10} {:<10} LAST HEARTBEAT",
+        "{:<30} {:<20} {:<10} {:<10} {:<10} LAST HEARTBEAT",
         "AGENT ID", "WORKSPACE", "STATE", "ALIVE", "TASK"
     );
-    println!("{}", "-".repeat(110));
+    println!("{}", "-".repeat(105));
 
     for a in agents {
         let task_display = a.task_id.as_deref().unwrap_or("-");
@@ -41,21 +41,15 @@ pub fn format_agents_table(agents: &[AgentInfoResponse]) {
         } else {
             a.last_heartbeat.clone()
         };
-        let name_suffix = a
-            .display_name
-            .as_ref()
-            .map(|n| format!(" ({})", n))
-            .unwrap_or_default();
 
         println!(
-            "{:<30} {:<20} {:<15} {:<10} {:<10} {}{}",
+            "{:<30} {:<20} {:<10} {:<10} {:<10} {}",
             a.agent_id,
             a.workspace_id,
             a.state,
             if a.is_alive { "yes" } else { "no" },
             task_display,
             heartbeat,
-            name_suffix,
         );
     }
 
@@ -87,24 +81,13 @@ pub fn format_status(status: &StatusResponse) {
     println!("  Active: {}", status.active_agents);
     println!();
 
-    if let Some(daemon) = &status.daemon_info {
-        println!("Rmux Daemon:");
-        println!("  Binary available: {}", daemon.binary_available);
-        if let Some(path) = &daemon.binary_path {
-            println!("  Binary path: {}", path);
-        }
-        println!("  Connected: {}", daemon.connected);
-        println!(
-            "  Tracked locally: {} pane(s), {} workspace(s)",
-            daemon.tracked_pane_count, daemon.tracked_workspace_count
-        );
-        println!(
-            "  Daemon-side totals: {} session(s), {} pane(s)",
-            daemon.total_sessions, daemon.total_daemon_panes
-        );
-        println!("  Ergatai sessions: {}", daemon.ergatai_sessions.len());
-        for session in &daemon.ergatai_sessions {
-            println!("    - {}", session);
+    if let Some(info) = &status.backend_info {
+        println!("Tmux Backend:");
+        println!("  Version: {}", info.version);
+        println!("  Total panes: {}", info.total_panes);
+        println!("  Sessions: {}", info.sessions.len());
+        for session in &info.sessions {
+            println!("    - {} ({} panes)", session.name, session.panes);
         }
     }
 }
@@ -112,7 +95,9 @@ pub fn format_status(status: &StatusResponse) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::client::http::{AgentInfoResponse, DaemonInfo, StatusResponse, WorkspaceResponse};
+    use crate::client::http::{
+        AgentInfoResponse, StatusResponse, TmuxBackendInfo, TmuxSessionInfo, WorkspaceResponse,
+    };
     use std::collections::HashMap;
 
     fn make_workspace(id: &str, backend: &str) -> WorkspaceResponse {
@@ -130,7 +115,6 @@ mod tests {
             workspace_id: workspace_id.to_string(),
             state: state.to_string(),
             lifecycle_state: state.to_string(),
-            display_name: None,
             task_id: None,
             mcp_agent_id: None,
             is_alive: state == "running" || state == "idle" || state == "processing",
@@ -196,7 +180,7 @@ mod tests {
             nats_initialized: true,
             nats_port: Some(4222),
             active_agents: 3,
-            daemon_info: None,
+            backend_info: None,
         };
         format_status(&status);
     }
@@ -207,66 +191,47 @@ mod tests {
             nats_initialized: false,
             nats_port: None,
             active_agents: 0,
-            daemon_info: None,
+            backend_info: None,
         };
         format_status(&status);
     }
 
     #[test]
-    fn test_format_status_with_daemon_info() {
+    fn test_format_status_with_backend_info() {
         let status = StatusResponse {
             nats_initialized: true,
             nats_port: Some(4222),
             active_agents: 2,
-            daemon_info: Some(DaemonInfo {
-                binary_available: true,
-                binary_path: Some("/usr/bin/rmux".to_string()),
-                connected: true,
-                tracked_pane_count: 3,
-                tracked_workspace_count: 2,
-                total_sessions: 2,
-                total_daemon_panes: 5,
-                ergatai_sessions: vec!["session-1".to_string(), "session-2".to_string()],
+            backend_info: Some(TmuxBackendInfo {
+                version: "3.4".to_string(),
+                sessions: vec![
+                    TmuxSessionInfo {
+                        name: "ergatai-ws1".to_string(),
+                        panes: 3,
+                        created: "2024-01-01".to_string(),
+                    },
+                    TmuxSessionInfo {
+                        name: "ergatai-ws2".to_string(),
+                        panes: 2,
+                        created: "2024-01-02".to_string(),
+                    },
+                ],
+                total_panes: 5,
             }),
         };
         format_status(&status);
     }
 
     #[test]
-    fn test_format_status_daemon_no_binary_path() {
-        let status = StatusResponse {
-            nats_initialized: true,
-            nats_port: Some(4222),
-            active_agents: 1,
-            daemon_info: Some(DaemonInfo {
-                binary_available: false,
-                binary_path: None,
-                connected: false,
-                tracked_pane_count: 0,
-                tracked_workspace_count: 0,
-                total_sessions: 0,
-                total_daemon_panes: 0,
-                ergatai_sessions: vec![],
-            }),
-        };
-        format_status(&status);
-    }
-
-    #[test]
-    fn test_format_status_daemon_empty_sessions() {
+    fn test_format_status_backend_empty_sessions() {
         let status = StatusResponse {
             nats_initialized: true,
             nats_port: Some(4222),
             active_agents: 0,
-            daemon_info: Some(DaemonInfo {
-                binary_available: true,
-                binary_path: Some("/bin/rmux".to_string()),
-                connected: true,
-                tracked_pane_count: 1,
-                tracked_workspace_count: 1,
-                total_sessions: 1,
-                total_daemon_panes: 1,
-                ergatai_sessions: vec![],
+            backend_info: Some(TmuxBackendInfo {
+                version: "3.4".to_string(),
+                sessions: vec![],
+                total_panes: 0,
             }),
         };
         format_status(&status);
@@ -287,7 +252,6 @@ mod tests {
             workspace_id: "test-ws".to_string(),
             state: "running".to_string(),
             lifecycle_state: "running".to_string(),
-            display_name: None,
             task_id: None,
             mcp_agent_id: None,
             is_alive: true,

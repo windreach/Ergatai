@@ -6,7 +6,7 @@
 //! output is captured via `Pane::screenshot()`, and lifecycle is managed via
 //! `Pane::close()` / `Pane::shell()`.
 //!
-//! # Advantages over LocalPtyBackend
+//! # Advantages over TmuxBackend
 //!
 //! - **Native Rust SDK** — no shelling out to `tmux` CLI commands
 //! - **Structured API** — typed handles, builders, and results
@@ -52,8 +52,10 @@ const MAX_MESSAGE_SIZE: usize = 64 * 1024;
 const RMUX_DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Default terminal dimensions.
-const DEFAULT_WIDTH: u16 = 200;
-const DEFAULT_HEIGHT: u16 = 50;
+/// Reduced from 200x50 to 120x40 to improve TUI rendering performance.
+/// Smaller terminal = fewer cells to render per frame = smoother animations.
+const DEFAULT_WIDTH: u16 = 120;
+const DEFAULT_HEIGHT: u16 = 40;
 
 /// Delay before injecting instructions after agent start.
 const INSTRUCTION_DELAY: Duration = Duration::from_secs(2);
@@ -167,6 +169,22 @@ impl RmuxBackend {
             .collect::<Vec<_>>()
             .join("-");
         format!("{}-{}", self.session_prefix, safe_id)
+    }
+
+    /// Reverse of `session_name`: strip the configured prefix from a session
+    /// name to recover the original workspace_id.
+    ///
+    /// Returns `None` if the session name does not start with `{prefix}-`,
+    /// which means the session was not created by this backend and should
+    /// not be treated as a workspace we manage.
+    fn workspace_id_from_session(&self, session_name: &str) -> Option<String> {
+        let prefix = format!("{}-", self.session_prefix);
+        let stripped = session_name.strip_prefix(&prefix)?;
+        if stripped.is_empty() {
+            None
+        } else {
+            Some(stripped.to_string())
+        }
     }
 
     /// Get or lazily initialize the rmux daemon connection.
@@ -333,10 +351,12 @@ impl RmuxBackend {
 
         for child_pid_str in children_data.split_whitespace() {
             if let Ok(child_pid) = child_pid_str.parse::<u32>() {
-                // Check if this child is named "opencode"
+                // Check if this child is named "opencode" or "opencode.exe"
                 let comm_path = format!("/proc/{}/comm", child_pid);
                 if let Ok(comm) = std::fs::read_to_string(&comm_path) {
-                    if comm.trim() == "opencode" {
+                    let name = comm.trim();
+                    // Match both "opencode" and "opencode.exe" (the ELF binary name)
+                    if name == "opencode" || name == "opencode.exe" {
                         // Found opencode process, read the env var
                         return Self::read_proc_environ(child_pid, var_name);
                     }
@@ -1400,7 +1420,7 @@ impl AgentRuntimeBackend for RmuxBackend {
     /// `AgentHandle` that stores the `Pane` object in `self.panes` so that
     /// `inject_message()` can later deliver messages to it.
     ///
-    /// Unlike `LocalPtyBackend`, this does NOT filter by session prefix —
+    /// Unlike `TmuxBackend`, this does NOT filter by session prefix —
     /// it discovers agents in ANY rmux session, enabling dynamic discovery
     /// of manually-started agents.
     async fn discover_agents(&self) -> ErgataiResult<Vec<(String, AgentHandle)>> {
@@ -1506,7 +1526,9 @@ impl AgentRuntimeBackend for RmuxBackend {
             );
 
             let workspace = WorkspaceHandle {
-                id: session_name.clone(),
+                id: self
+                    .workspace_id_from_session(&session_name)
+                    .unwrap_or_else(|| session_name.clone()),
                 backend: "rmux".to_string(),
                 metadata: {
                     let mut m = HashMap::new();
@@ -2188,6 +2210,41 @@ mod tests {
     fn test_session_name_sanitizes() {
         let backend = RmuxBackend::new("ergatai");
         assert_eq!(backend.session_name("a|b:c.d"), "ergatai-a-b-c-d");
+    }
+
+    #[test]
+    fn test_workspace_id_from_session_strips_prefix() {
+        let backend = RmuxBackend::new("ergatai");
+        assert_eq!(
+            backend.workspace_id_from_session("ergatai-start-opencode-1"),
+            Some("start-opencode-1".to_string())
+        );
+        assert_eq!(
+            backend.workspace_id_from_session("ergatai-task-123"),
+            Some("task-123".to_string())
+        );
+    }
+
+    #[test]
+    fn test_workspace_id_from_session_no_match() {
+        let backend = RmuxBackend::new("ergatai");
+        // Different prefix — not our session
+        assert_eq!(backend.workspace_id_from_session("other-task-123"), None);
+        // Empty after stripping
+        assert_eq!(backend.workspace_id_from_session("ergatai-"), None);
+        // Exact prefix with no suffix
+        assert_eq!(backend.workspace_id_from_session("ergatai"), None);
+    }
+
+    #[test]
+    fn test_session_name_roundtrip() {
+        let backend = RmuxBackend::new("ergatai");
+        let workspace_id = "start-opencode-1";
+        let session = backend.session_name(workspace_id);
+        assert_eq!(
+            backend.workspace_id_from_session(&session),
+            Some(workspace_id.to_string())
+        );
     }
 
     #[test]
