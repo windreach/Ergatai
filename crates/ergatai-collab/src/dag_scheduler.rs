@@ -846,6 +846,10 @@ impl DagScheduler {
                             );
                         }
                     }
+                    // IMPORTANT: `graph` lock MUST be dropped before calling
+                    // `finalize_if_terminal()`, because `finalize_if_terminal()`
+                    // internally re-acquires `graph.lock()`. Holding both would
+                    // deadlock (tokio::sync::Mutex is not reentrant).
                     drop(graph);
                     scheduler.finalize_if_terminal().await;
                     break;

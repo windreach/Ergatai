@@ -393,10 +393,17 @@ pub fn parse_dag_yaml(
         .tasks
         .into_iter()
         .map(|task| {
-            let uuid = name_to_uuid
-                .get(&task.name)
-                .cloned()
-                .expect("name_to_uuid populated above");
+            // Lookup UUID from the name→UUID map. The map was populated above
+            // from the same `yaml_dag.tasks` iterator, so a miss here indicates
+            // an internal logic error — return an explicit error rather than
+            // panicking, so that future refactors cannot introduce a silent
+            // panic at this call site.
+            let uuid = name_to_uuid.get(&task.name).cloned().ok_or_else(|| {
+                ErgataiError::internal(format!(
+                    "BUG: UUID not found for task '{}' — name_to_uuid map is out of sync",
+                    task.name
+                ))
+            })?;
 
             // 合并 depends_on + parent
             let mut depends_on = task.depends_on;

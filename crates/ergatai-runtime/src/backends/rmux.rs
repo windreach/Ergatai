@@ -607,19 +607,30 @@ impl RmuxBackend {
     /// state via `pane.info()`, extracts the PID if running, then reads
     /// `/proc/{pid}/stat` to determine the Linux process state (Running,
     /// Sleeping, Zombie, etc.).
+    ///
+    /// # Lock discipline
+    ///
+    /// The `panes` read lock is held only long enough to clone the `Pane`
+    /// handles (which are cheap `Clone + Send + Sync` references to daemon
+    /// state). The lock is released **before** any `.await` on daemon I/O,
+    /// so slow daemon responses cannot block `register_agent()` or
+    /// `unregister_agent()` (which require the write lock).
     pub async fn health_check_agents(&self) -> Vec<(String, super::proc_linux::ProcessState)> {
-        let panes = self.panes.read().await;
-        let mut results = Vec::with_capacity(panes.len());
+        // Phase 1: snapshot pane handles under the read lock, then release it.
+        // `Pane` is `Clone` (a lightweight handle to the daemon-side pane).
+        let pane_snapshot: Vec<(String, Pane)> = {
+            let panes = self.panes.read().await;
+            panes.iter().map(|(id, pane)| (id.clone(), pane.clone())).collect()
+        }; // read lock released here
 
-        for (agent_id, pane) in panes.iter() {
-            let pid = Self::extract_pane_pid(pane).await;
-            let state = if let Some(pid) = pid {
-                super::proc_linux::read_proc_state(pid)
-                    .unwrap_or(super::proc_linux::ProcessState::Unknown)
-            } else {
-                super::proc_linux::ProcessState::Unknown
-            };
-            results.push((agent_id.clone(), state));
+        // Phase 2: perform async I/O without holding any lock.
+        let mut results = Vec::with_capacity(pane_snapshot.len());
+        for (agent_id, pane) in pane_snapshot {
+            let pid = Self::extract_pane_pid(&pane).await;
+            let state = pid
+                .and_then(|p| super::proc_linux::read_proc_state(p).ok())
+                .unwrap_or(super::proc_linux::ProcessState::Unknown);
+            results.push((agent_id, state));
         }
 
         results
