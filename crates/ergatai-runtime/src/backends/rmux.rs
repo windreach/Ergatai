@@ -620,7 +620,10 @@ impl RmuxBackend {
         // `Pane` is `Clone` (a lightweight handle to the daemon-side pane).
         let pane_snapshot: Vec<(String, Pane)> = {
             let panes = self.panes.read().await;
-            panes.iter().map(|(id, pane)| (id.clone(), pane.clone())).collect()
+            panes
+                .iter()
+                .map(|(id, pane)| (id.clone(), pane.clone()))
+                .collect()
         }; // read lock released here
 
         // Phase 2: perform async I/O without holding any lock.
