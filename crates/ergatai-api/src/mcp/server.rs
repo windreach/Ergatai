@@ -182,9 +182,8 @@ struct RegisterAgentNameParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct SubmitOrchestrationParams {
-    /// DAG definition in YAML or Markdown format.
+    /// DAG definition in YAML format.
     ///
-    /// YAML format (recommended):
     /// ```yaml
     /// tasks:
     ///   - name: Task A
@@ -195,17 +194,15 @@ struct SubmitOrchestrationParams {
     ///     depends_on: [Task A]
     ///     timeout: 300
     /// ```
-    ///
-    /// Markdown format (legacy):
-    /// ```markdown
-    /// ## Task A
-    /// - **agent**: agent-a
-    /// - **task**: tasks/a.md
-    /// ```
     dag_definition: String,
     /// Optional context variables
     #[serde(default)]
     context: Option<serde_json::Value>,
+    /// Optional parameter values for template expansion (maps `{{var}}` in
+    /// task `input` / `condition` to concrete values). Must match the
+    /// `parameters` schema declared in the YAML, if any.
+    #[serde(default)]
+    parameters: Option<HashMap<String, serde_json::Value>>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -965,7 +962,7 @@ impl ErgataiMcpServer {
     /// Submit a DAG workflow for multi-agent collaboration.
     ///
     /// # DAG Definition Format
-    /// Accepts YAML (recommended) or legacy Markdown. Auto-detected.
+    /// Accepts YAML format with strict validation.
     ///
     /// ```yaml
     /// tasks:
@@ -1011,7 +1008,7 @@ impl ErgataiMcpServer {
     /// # Tip
     /// Use the `validate_dag_yaml` tool to dry-run your YAML before submitting.
     #[tool(
-        description = "Submit a DAG workflow for multi-agent collaboration. Accepts YAML (recommended) or Markdown. Strict validation: `priority` ∈ {low,medium,high}; timeouts > 0; non-empty task names; `communication` ∈ {open,adjacent,star:{hub}} with hub existing in tasks; template vars must match declared parameters; top-level unknown fields rejected (task-level allowed as metadata). Use `validate_dag_yaml` to dry-run first."
+        description = "Submit a DAG workflow for multi-agent collaboration. Accepts YAML with strict validation: `priority` ∈ {low,medium,high}; timeouts > 0; non-empty task names; `communication` ∈ {open,adjacent,star:{hub}} with hub existing in tasks; template vars must match declared parameters; top-level unknown fields rejected (task-level allowed as metadata). Use `validate_dag_yaml` to dry-run first."
     )]
     async fn submit_orchestration(
         &self,
@@ -1019,6 +1016,7 @@ impl ErgataiMcpServer {
     ) -> Result<CallToolResult, ErrorData> {
         let dag_definition = &params.0.dag_definition;
         let context_value = &params.0.context;
+        let parameters = params.0.parameters;
 
         info!(
             "Submitting DAG orchestration ({} bytes)",
@@ -1035,9 +1033,9 @@ impl ErgataiMcpServer {
             }
         }
 
-        // Parse DAG definition (YAML or Markdown) → TaskGraph
+        // Parse DAG definition (YAML) → TaskGraph
         let graph =
-            ergatai_core::orchestration::parse_dag_auto(dag_definition, None).map_err(|e| {
+            ergatai_core::orchestration::parse_dag_auto(dag_definition, parameters).map_err(|e| {
                 ErrorData::invalid_params(format!("Failed to parse DAG definition: {}", e), None)
             })?;
 
@@ -1109,7 +1107,7 @@ impl ErgataiMcpServer {
         params: Parameters<ValidateDagParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let dag_definition = &params.0.dag_definition;
-        let parameters = params.0.parameters.clone();
+        let parameters = params.0.parameters;
 
         info!(
             "Validating DAG definition ({} bytes)",

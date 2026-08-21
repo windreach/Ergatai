@@ -6,7 +6,7 @@
 
 **Multi-Agent Collaboration Middleware**
 
-*Tell your AI agents what to do — together.*
+*Your AI agents share a codebase. Ergatai makes sure they don't step on each other.*
 
 </div>
 
@@ -19,6 +19,14 @@
 [![Docs](https://img.shields.io/badge/docs-CLAUDE.md-blue.svg)](CLAUDE.md)
 
 </div>
+
+<br/>
+
+## Why Ergatai
+
+You already have Claude Code, Cursor, and Codex. Each is great on its own. But when you try to use two of them on the same project, they overwrite each other's changes, duplicate work, and have no idea what the other is doing.
+
+Existing solutions ask you to build your own agents from scratch. We think that's backwards. Ergatai connects the agents you already use — open-source or closed-source — through MCP, with file locking and DAG orchestration so they actually collaborate instead of collide.
 
 <br/>
 
@@ -92,13 +100,13 @@ Each agent needs a unique path suffix (`/mcp/alice`, `/mcp/bob`, etc.).
 
 | Capability | Description |
 |------------|-------------|
-| **Agent Messaging** | Agents send and receive messages through Ergatai's relay |
-| **DAG Orchestration** | Submit markdown-formatted workflows with task dependencies |
-| **Safe Concurrency** | Token-based READ/WRITE/ADMIN locks with kernel enforcement |
-| **Agent Discovery** | Automatic registration when agents connect via MCP |
+| **Agent Messaging** | Agents send and receive messages through Ergatai's relay (NATS JetStream with rate limiting) |
+| **DAG Orchestration** | Submit YAML workflows with task dependencies and strict validation |
+| **Safe Concurrency** | Two-tier token system (SystemToken + FileToken) with kernel-level enforcement |
+| **Agent Discovery** | Automatic registration via rmux panes, MCP connections, or named registration |
 | **Agent Agnostic** | Works with any MCP-compatible agent — Claude, Cursor, Codex, and more |
 | **Local First** | All execution runs locally; no data leaves your machine |
-| **Crash Recovery** | Heartbeat monitoring reclaims stale locks automatically |
+| **Crash Recovery** | DAG state persisted to disk; heartbeat monitoring reclaims stale locks automatically |
 
 <br/>
 

@@ -515,18 +515,14 @@ pub fn is_yaml_format(content: &str) -> bool {
     false
 }
 
-/// 自动检测格式并解析 DAG 定义
+/// 解析 DAG 定义（YAML 格式）
 ///
-/// 优先尝试 YAML 解析，如果不符合 YAML 格式则回退到 Markdown 解析。
+/// 解析 YAML 格式的 DAG 定义并应用所有严格校验规则。
 pub fn parse_dag_auto(
     content: &str,
     params: Option<HashMap<String, serde_json::Value>>,
 ) -> ErgataiResult<TaskGraph> {
-    if is_yaml_format(content) {
-        parse_dag_yaml(content, params)
-    } else {
-        crate::dag_parser::parse_dag_markdown(content)
-    }
+    parse_dag_yaml(content, params)
 }
 
 /// 解析和验证参数
@@ -632,7 +628,7 @@ fn yaml_to_json(value: &serde_yaml::Value) -> serde_json::Value {
     }
 }
 
-/// 验证 scope glob 模式（与 dag_parser.rs 中的逻辑一致）
+/// 验证 scope glob 模式（必须是相对路径，且 glob 语法合法）
 fn validate_scope_pattern(pattern: &str) -> ErgataiResult<()> {
     if pattern.contains("..") {
         return Err(ErgataiError::InvalidPath(
@@ -1091,16 +1087,6 @@ tasks:
     agent: agent-a
 "#;
         let graph = parse_dag_auto(yaml, None).unwrap();
-        assert_eq!(graph.nodes.len(), 1);
-    }
-
-    #[test]
-    fn test_parse_dag_auto_markdown() {
-        let md = r#"
-## Task A
-- **agent**: agent-a
-"#;
-        let graph = parse_dag_auto(md, None).unwrap();
         assert_eq!(graph.nodes.len(), 1);
     }
 

@@ -3,20 +3,21 @@
 //! A directed acyclic graph where nodes are tasks and edges are dependencies.
 //! More flexible than tree: supports parallel branches, convergence, and complex dependencies.
 //!
-//! Example:
-//! ```markdown
-//! ## Task A
-//! - **agent**: agent-a
-//! - **task**: tasks/a.md
+//! Example (YAML):
+//! ```yaml
+//! tasks:
+//!   - name: Task A
+//!     agent: agent-a
+//!     task: tasks/a.md
 //!
-//! ## Task B
-//! - **agent**: agent-b
-//! - **task**: tasks/b.md
+//!   - name: Task B
+//!     agent: agent-b
+//!     task: tasks/b.md
 //!
-//! ## Task C
-//! - **agent**: agent-c
-//! - **task**: tasks/c.md
-//! - **depends_on**: [Task A, Task B]
+//!   - name: Task C
+//!     agent: agent-c
+//!     task: tasks/c.md
+//!     depends_on: [Task A, Task B]
 //! ```
 
 use std::collections::HashMap;
