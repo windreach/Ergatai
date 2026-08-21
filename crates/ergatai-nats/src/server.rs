@@ -289,6 +289,16 @@ pub fn cleanup_test_servers() {
 pub async fn shared_test_server() -> ErgataiResult<&'static NatsServer> {
     use tokio::sync::OnceCell;
 
+    // Pre-flight: check nats-server binary is available before attempting
+    // to initialise the shared server.  Returning an error (rather than
+    // panicking inside `OnceCell::get_or_init`) lets individual tests
+    // skip gracefully when the binary is missing (e.g. in CI).
+    if ergatai_binary::find_nats_binary().is_err() {
+        return Err(ErgataiError::internal(
+            "nats-server binary not found — skipping test (set ERGATAI_NATS_BINARY or install nats-server)",
+        ));
+    }
+
     // Use OnceCell to ensure only one server is started, even with concurrent calls.
     // This avoids the race condition where multiple threads pass the initial check,
     // each starts a server, and all but one are leaked.
@@ -312,7 +322,8 @@ pub async fn shared_test_server() -> ErgataiResult<&'static NatsServer> {
                 Ok(s) => s,
                 Err(e) => {
                     tracing::error!(error = %e, "Failed to start shared test NATS server");
-                    // Panic to fail fast - tests require NATS
+                    // Panic to fail fast — binary was verified above, so a
+                    // failure here means the server could not bind/start.
                     panic!("Failed to start shared test NATS server: {}", e);
                 }
             };
