@@ -325,47 +325,6 @@ impl RmuxBackend {
         }
     }
 
-    /// Read an environment variable from a running process via /proc/{pid}/environ.
-    ///
-    /// Linux-specific: reads the null-delimited environment block from procfs.
-    /// Returns `None` if the process doesn't exist, permission is denied,
-    /// or the variable is not set.
-    fn read_proc_environ(pid: u32, var_name: &str) -> Option<String> {
-        let path = format!("/proc/{}/environ", pid);
-        let data = std::fs::read(&path).ok()?;
-        let prefix = format!("{}=", var_name);
-        data.split(|b| *b == 0)
-            .filter_map(|entry| std::str::from_utf8(entry).ok())
-            .find_map(|entry| entry.strip_prefix(&prefix).map(|v| v.to_string()))
-    }
-
-    /// Find an environment variable from a child process named "opencode".
-    ///
-    /// The startup script (bash) exec's opencode, so the bash process becomes
-    /// the parent. We scan /proc/{pid}/task/{pid}/children to find the opencode
-    /// process and read its environment.
-    fn find_opencode_child_environ(pid: u32, var_name: &str) -> Option<String> {
-        // Read the children PIDs from /proc/{pid}/task/{pid}/children
-        let children_path = format!("/proc/{}/task/{}/children", pid, pid);
-        let children_data = std::fs::read_to_string(&children_path).ok()?;
-
-        for child_pid_str in children_data.split_whitespace() {
-            if let Ok(child_pid) = child_pid_str.parse::<u32>() {
-                // Check if this child is named "opencode" or "opencode.exe"
-                let comm_path = format!("/proc/{}/comm", child_pid);
-                if let Ok(comm) = std::fs::read_to_string(&comm_path) {
-                    let name = comm.trim();
-                    // Match both "opencode" and "opencode.exe" (the ELF binary name)
-                    if name == "opencode" || name == "opencode.exe" {
-                        // Found opencode process, read the env var
-                        return Self::read_proc_environ(child_pid, var_name);
-                    }
-                }
-            }
-        }
-        None
-    }
-
     // ── Advanced rmux-specific capabilities (not on trait) ──
 
     /// Wait until specific text appears in the agent's visible terminal output.
@@ -1475,19 +1434,19 @@ impl AgentRuntimeBackend for RmuxBackend {
 
             // Try to read RMUX_PANE from the pane's child process environment.
             // This gives us the deterministic pane identifier (e.g., "%15").
-            let rmux_pane = child_pid.and_then(|pid| Self::read_proc_environ(pid, "RMUX_PANE"));
+            let rmux_pane = child_pid.and_then(|pid| super::proc_linux::read_proc_environ(pid, "RMUX_PANE"));
 
             // Try to read ERGATAI_AGENT_ID from the pane's descendant processes.
             // The startup script sets ERGATAI_AGENT_ID, then exec's opencode.
             // We need to find the opencode process (child of bash) to read this env var.
             let ergatai_agent_id = child_pid.and_then(|pid| {
                 // First try the direct child (bash process)
-                if let Some(id) = Self::read_proc_environ(pid, "ERGATAI_AGENT_ID") {
+                if let Some(id) = super::proc_linux::read_proc_environ(pid, "ERGATAI_AGENT_ID") {
                     tracing::info!(pid = pid, agent_id = %id, "Found ERGATAI_AGENT_ID in direct child");
                     return Some(id);
                 }
                 // If not found, look for opencode child process
-                let result = Self::find_opencode_child_environ(pid, "ERGATAI_AGENT_ID");
+                let result = super::proc_linux::find_child_environ(pid, "ERGATAI_AGENT_ID");
                 if let Some(ref id) = result {
                     tracing::info!(parent_pid = pid, agent_id = %id, "Found ERGATAI_AGENT_ID in opencode child");
                 } else {

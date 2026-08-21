@@ -33,6 +33,7 @@
 mod finder;
 mod nats;
 mod rmux;
+mod tmux;
 
 pub use finder::BinaryLocator;
 pub use nats::find_nats_binary;
@@ -40,3 +41,4 @@ pub use rmux::{
     configure_rmux_daemon, ensure_rmux_daemon, get_daemon_path, is_daemon_running,
     is_rmux_available,
 };
+pub use tmux::{find_tmux_binary, is_tmux_available};

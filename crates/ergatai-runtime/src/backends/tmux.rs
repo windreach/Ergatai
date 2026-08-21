@@ -10,6 +10,8 @@
 //! - **Health check**: reads `/proc/{pid}/stat` via shared `proc_linux` module
 
 use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -44,6 +46,25 @@ const INSTRUCTION_DELAY: Duration = Duration::from_secs(2);
 
 /// Poll interval for `wait_for_exit`.
 const EXIT_POLL_INTERVAL: Duration = Duration::from_secs(5);
+
+// ── tmux binary resolution ──
+
+/// Cached tmux binary path. Resolved once via `ergatai_binary::find_tmux_binary()`
+/// (env var → bundled → sibling → PATH). Avoids repeated multi-layer searches.
+static TMUX_PATH: OnceLock<PathBuf> = OnceLock::new();
+
+/// Get the tmux binary path, resolving and caching on first call.
+fn tmux_binary() -> ErgataiResult<&'static PathBuf> {
+    // Fast path: already resolved.
+    if let Some(path) = TMUX_PATH.get() {
+        return Ok(path);
+    }
+    // Slow path: resolve via BinaryLocator (env → bundled → sibling → PATH)
+    // and cache. `get_or_init` is stable; if two threads race, both compute
+    // the same path and one wins — harmless since the result is identical.
+    let path = ergatai_binary::find_tmux_binary()?;
+    Ok(TMUX_PATH.get_or_init(|| path))
+}
 
 // ── TmuxBackend ──
 
@@ -83,7 +104,12 @@ impl TmuxBackend {
     }
 
     /// Run a tmux command with timeout and retry logic.
+    ///
+    /// Resolves the tmux binary path once via [`ergatai_binary::find_tmux_binary`]
+    /// (env var → bundled → sibling → PATH) and caches it. Subsequent calls
+    /// reuse the cached path without re-searching.
     async fn run_tmux_cmd(args: &[&str]) -> ErgataiResult<std::process::Output> {
+        let tmux_path = tmux_binary()?;
         let mut last_err = None;
         for attempt in 0..=TMUX_CMD_RETRIES {
             if attempt > 0 {
@@ -97,7 +123,7 @@ impl TmuxBackend {
 
             let result = tokio::time::timeout(
                 TMUX_CMD_TIMEOUT,
-                tokio::process::Command::new("tmux").args(args).output(),
+                tokio::process::Command::new(tmux_path).args(args).output(),
             )
             .await;
 
@@ -174,6 +200,57 @@ impl TmuxBackend {
             .ok_or_else(|| ErgataiError::internal("Missing session in workspace handle metadata"))
     }
 
+    /// Best-effort exit code retrieval from a dead pane via tmux format variables.
+    ///
+    /// Uses `display-message -p '#{pane_exit_status}'` to query the pane's exit code.
+    /// Requires tmux >= 3.3 (which introduced `pane_exit_status`). Returns 0 on
+    /// older versions or if the pane is already cleaned up.
+    async fn read_exit_code_from_tmux(&self, pane_id: &str) -> i32 {
+        // Try reading the status file first (may have been written by a prior hook)
+        let sanitized = pane_id.replace('%', "-");
+        let status_file = format!("/tmp/ergatai-exit-{}.status", sanitized);
+        if let Some(code) = Self::read_exit_code_file(&status_file).await {
+            let _ = tokio::fs::remove_file(&status_file).await;
+            return code;
+        }
+
+        // Query tmux directly — works briefly after pane death before cleanup
+        match Self::run_tmux_cmd(&[
+            "display-message",
+            "-t",
+            pane_id,
+            "-p",
+            "#{pane_exit_status}",
+        ])
+        .await
+        {
+            Ok(output) if output.status.success() => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                stdout.trim().parse::<i32>().unwrap_or(0)
+            }
+            _ => 0,
+        }
+    }
+
+    /// Read exit code from the status file written by the pane-died hook.
+    ///
+    /// Includes a small retry loop to handle the race between `wait-for` returning
+    /// and the filesystem flush completing in the hook's `run-shell`.
+    async fn read_exit_code_file(path: &str) -> Option<i32> {
+        for _ in 0..10 {
+            if let Ok(contents) = tokio::fs::read_to_string(path).await {
+                let trimmed = contents.trim();
+                if !trimmed.is_empty() {
+                    if let Ok(code) = trimmed.parse::<i32>() {
+                        return Some(code);
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        None
+    }
+
     /// Polling fallback for wait_for_exit (used when event-driven path fails).
     async fn wait_for_exit_poll(
         &self,
@@ -183,7 +260,7 @@ impl TmuxBackend {
         let start = Instant::now();
         loop {
             match self.is_alive(handle).await {
-                Ok(false) => return Ok(WaitResult::Exited { code: 0 }),
+                Ok(false) => return Ok(exit_code_to_wait_result(0)),
                 Ok(true) => {}
                 Err(e) => return Ok(WaitResult::Error(e.to_string())),
             }
@@ -317,6 +394,328 @@ impl TmuxBackend {
             total_panes,
         }
     }
+
+    // ── Multi-agent workspace helpers ──
+
+    /// Count the number of panes in a tmux session.
+    ///
+    /// Returns 0 if the session doesn't exist or the query fails.
+    /// Used by `start_agent` to determine whether this is the first agent
+    /// (1 pane = default, use it) or a subsequent agent (2+ panes, split new).
+    async fn count_panes_in_session(session: &str) -> usize {
+        match Self::run_tmux_cmd(&[
+            "list-panes", "-t", session, "-F", "#{pane_id}",
+        ])
+        .await
+        {
+            Ok(o) if o.status.success() => {
+                String::from_utf8_lossy(&o.stdout).lines().count()
+            }
+            _ => 0,
+        }
+    }
+
+    /// Find a pane in the given session that has a running foreground process.
+    ///
+    /// Used for workspace reuse: when reconnecting to a pre-existing session,
+    /// we want to reattach to a pane that already has an agent running rather
+    /// than spawning into the default (possibly idle shell) pane.
+    ///
+    /// Returns the pane_id of the first running pane found, or `None` if all
+    /// panes are dead or the session doesn't exist.
+    async fn find_running_pane(session: &str) -> ErgataiResult<Option<String>> {
+        let output = match Self::run_tmux_cmd(&[
+            "list-panes",
+            "-t",
+            session,
+            "-F",
+            "#{pane_id}|#{pane_current_command}|#{pane_pid}",
+        ])
+        .await
+        {
+            Ok(o) if o.status.success() => o,
+            _ => return Ok(None),
+        };
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            let parts: Vec<&str> = line.splitn(3, '|').collect();
+            if parts.len() < 3 {
+                continue;
+            }
+            let pane_id = parts[0].trim();
+            let command = parts[1].trim();
+            let pid: u32 = parts[2].trim().parse().unwrap_or(0);
+
+            // Skip panes running just a shell (idle, no agent).
+            // A pane running bash/sh with no child is an idle shell.
+            if pid > 0 && !matches!(command, "bash" | "sh" | "zsh" | "fish" | "dash") {
+                return Ok(Some(pane_id.to_string()));
+            }
+            // Also check if the shell has a child process (agent running inside it).
+            if pid > 0 {
+                #[cfg(target_os = "linux")]
+                {
+                    use super::proc_linux::read_proc_state;
+                    // Check if there's a child process in Running/Sleeping state.
+                    if let Some(child_pid) = super::proc_linux::find_child_pid(pid) {
+                        if let Ok(state) = read_proc_state(child_pid) {
+                            if matches!(
+                                state,
+                                super::proc_linux::ProcessState::Running
+                                    | super::proc_linux::ProcessState::Sleeping
+                            ) {
+                                return Ok(Some(pane_id.to_string()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    // ── Graceful stop ──
+
+    /// Gracefully stop a pane: send an exit command, wait for grace period, then force-kill.
+    ///
+    /// `exit_command` can be:
+    /// - A key name like `"C-c"` (Ctrl-C) or `"C-\\"` (Ctrl-Backslash / SIGQUIT)
+    /// - A text string like `"exit\n"` or `"/exit"` (sent as send-keys text + Enter)
+    ///
+    /// After sending the exit command, waits up to `grace_period` for the pane to die.
+    /// If the pane is still alive after the grace period, force-kills via `kill-pane`.
+    pub async fn graceful_stop_pane(
+        _session: &str,
+        pane_id: &str,
+        exit_command: &str,
+        grace_period: Duration,
+    ) -> ErgataiResult<()> {
+        // Determine if exit_command is a tmux key name or text to type.
+        let is_key = exit_command.starts_with("C-")
+            || exit_command.starts_with("M-")
+            || matches!(
+                exit_command,
+                "Enter" | "Escape" | "Tab" | "BSpace" | "Up" | "Down" | "Left" | "Right"
+            );
+
+        if is_key {
+            Self::run_tmux_cmd(&["send-keys", "-t", pane_id, exit_command]).await?;
+        } else {
+            // Send as text + Enter.
+            let sanitized = sanitize_message(exit_command);
+            Self::run_tmux_cmd(&["send-keys", "-l", "-t", pane_id, &sanitized]).await?;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            Self::run_tmux_cmd(&["send-keys", "-t", pane_id, "Enter"]).await?;
+        }
+
+        // Wait for the pane to die within the grace period.
+        let poll_interval = Duration::from_millis(200);
+        let deadline = Instant::now() + grace_period;
+        while Instant::now() < deadline {
+            // Check if pane is still alive.
+            let alive = Self::run_tmux_cmd(&["list-panes", "-t", pane_id])
+                .await
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            if !alive {
+                debug!(pane_id = pane_id, "Pane exited gracefully");
+                return Ok(());
+            }
+            tokio::time::sleep(poll_interval).await;
+        }
+
+        // Grace period expired — force kill.
+        warn!(
+            pane_id = pane_id,
+            grace_period = ?grace_period,
+            "Pane did not exit gracefully, force-killing"
+        );
+        let _ = Self::run_tmux_cmd(&["kill-pane", "-t", pane_id]).await;
+        Ok(())
+    }
+
+    /// Gracefully stop an agent using its handle.
+    ///
+    /// Convenience wrapper around [`graceful_stop_pane`] that extracts pane_id from the handle.
+    pub async fn graceful_stop_agent(
+        &self,
+        handle: &AgentHandle,
+        exit_command: &str,
+        grace_period: Duration,
+    ) -> ErgataiResult<()> {
+        let pane_id = Self::pane_id(handle)?;
+        let session = Self::session_name_from_handle(&handle.workspace)?;
+        Self::graceful_stop_pane(&session, &pane_id, exit_command, grace_period).await
+    }
+
+    // ── Smart completion detection ──
+
+    /// Poll a pane's visible terminal for specific text.
+    ///
+    /// Captures the pane content repeatedly until `text` is found or `timeout` expires.
+    /// Returns `true` if the text was found, `false` on timeout.
+    pub async fn wait_for_text(
+        session: &str,
+        pane_id: &str,
+        text: &str,
+        timeout: Duration,
+    ) -> ErgataiResult<bool> {
+        let poll_interval = Duration::from_millis(500);
+        let deadline = Instant::now() + timeout;
+
+        while Instant::now() < deadline {
+            if let Ok(Some(captured)) = Self::capture_pane_by_id(session, pane_id).await {
+                if captured.contains(text) {
+                    return Ok(true);
+                }
+            }
+            tokio::time::sleep(poll_interval).await;
+        }
+        Ok(false)
+    }
+
+    /// Race multiple completion patterns against a pane's visible terminal.
+    ///
+    /// Returns the first matching pattern, or `None` if the timeout expires
+    /// without any match. Useful for detecting agent readiness:
+    ///
+    /// ```ignore
+    /// let ready = backend.expect_completion(
+    ///     "ergatai-task1", "%5",
+    ///     &["How can I help you", "$ ", "Ready"],
+    ///     Duration::from_secs(30),
+    /// ).await?;
+    /// ```
+    pub async fn expect_completion(
+        session: &str,
+        pane_id: &str,
+        patterns: &[&str],
+        timeout: Duration,
+    ) -> ErgataiResult<Option<String>> {
+        let poll_interval = Duration::from_millis(500);
+        let deadline = Instant::now() + timeout;
+
+        while Instant::now() < deadline {
+            if let Ok(Some(captured)) = Self::capture_pane_by_id(session, pane_id).await {
+                for pattern in patterns {
+                    if captured.contains(pattern) {
+                        return Ok(Some(pattern.to_string()));
+                    }
+                }
+            }
+            tokio::time::sleep(poll_interval).await;
+        }
+        Ok(None)
+    }
+
+    // ── Daemon-driven pane operations (by session + pane_id) ──
+    // These work across Ergatai restarts since they don't rely on local handles.
+
+    /// Inject a message into any pane identified by session name and pane_id.
+    ///
+    /// Unlike [`inject_message`](AgentRuntimeBackend::inject_message), this does not
+    /// require an `AgentHandle` — it works with just the tmux identifiers. This is
+    /// useful for re-injecting into agents discovered via `discover_agents()`.
+    pub async fn inject_message_to_pane(
+        _session: &str,
+        pane_id: &str,
+        message: &str,
+    ) -> ErgataiResult<()> {
+        Self::send_to_pane(pane_id, message).await
+    }
+
+    /// Stop (close) a pane by session name and pane_id.
+    pub async fn stop_pane_by_id(
+        _session: &str,
+        pane_id: &str,
+    ) -> ErgataiResult<()> {
+        let _ = Self::run_tmux_cmd(&["kill-pane", "-t", pane_id]).await;
+        Ok(())
+    }
+
+    /// Force-kill a pane (alias for [`stop_pane_by_id`]).
+    pub async fn kill_pane_by_id(
+        session: &str,
+        pane_id: &str,
+    ) -> ErgataiResult<()> {
+        Self::stop_pane_by_id(session, pane_id).await
+    }
+
+    /// Capture pane output by session name and pane_id.
+    pub async fn capture_pane_by_id(
+        _session: &str,
+        pane_id: &str,
+    ) -> ErgataiResult<Option<String>> {
+        let output = Self::run_tmux_cmd(&["capture-pane", "-t", pane_id, "-p"]).await?;
+        if !output.status.success() {
+            return Ok(None);
+        }
+        let raw = String::from_utf8_lossy(&output.stdout).to_string();
+        Ok(Some(strip_ansi(&raw)))
+    }
+
+    // ── Enhanced diagnostics ──
+
+    /// Get detailed per-pane information for all panes in managed sessions.
+    ///
+    /// Returns a vector of [`TmuxPaneInfo`] structs with PID, command, cwd,
+    /// and other details. Used by `/api/v1/status` and health monitoring.
+    pub async fn tmux_status_detailed(&self) -> Vec<TmuxPaneInfo> {
+        let sessions_output = match Self::run_tmux_cmd(&[
+            "list-sessions", "-F", "#{session_name}",
+        ])
+        .await
+        {
+            Ok(o) if o.status.success() => o,
+            _ => return Vec::new(),
+        };
+
+        let stdout = String::from_utf8_lossy(&sessions_output.stdout);
+        let prefix = format!("{}-", self.session_prefix);
+        let sessions: Vec<String> = stdout
+            .lines()
+            .filter(|l| l.starts_with(&prefix))
+            .map(|l| l.to_string())
+            .collect();
+
+        let mut panes = Vec::new();
+
+        for session in &sessions {
+            let pane_output = match Self::run_tmux_cmd(&[
+                "list-panes",
+                "-t",
+                session,
+                "-F",
+                "#{pane_id}|#{pane_pid}|#{pane_current_command}|#{pane_current_path}|#{pane_width}|#{pane_height}",
+            ])
+            .await
+            {
+                Ok(o) if o.status.success() => o,
+                _ => continue,
+            };
+
+            let pane_stdout = String::from_utf8_lossy(&pane_output.stdout);
+            for line in pane_stdout.lines() {
+                let parts: Vec<&str> = line.splitn(6, '|').collect();
+                if parts.len() < 6 {
+                    continue;
+                }
+                panes.push(TmuxPaneInfo {
+                    session: session.clone(),
+                    pane_id: parts[0].to_string(),
+                    pid: parts[1].parse().unwrap_or(0),
+                    command: parts[2].to_string(),
+                    cwd: parts[3].to_string(),
+                    width: parts[4].parse().unwrap_or(0),
+                    height: parts[5].parse().unwrap_or(0),
+                });
+            }
+        }
+
+        panes
+    }
 }
 
 /// Snapshot of tmux server state — returned by `TmuxBackend::tmux_status()`.
@@ -336,6 +735,27 @@ pub struct TmuxSessionInfo {
     pub name: String,
     pub panes: usize,
     pub created: String,
+}
+
+/// Detailed information about a single tmux pane.
+///
+/// Returned by [`TmuxBackend::tmux_status_detailed`] for enhanced diagnostics.
+#[derive(Debug, Clone, Serialize)]
+pub struct TmuxPaneInfo {
+    /// tmux session name this pane belongs to
+    pub session: String,
+    /// tmux pane ID (e.g., "%5")
+    pub pane_id: String,
+    /// PID of the pane's foreground process
+    pub pid: u32,
+    /// Currently running command (e.g., "opencode", "bash")
+    pub command: String,
+    /// Current working directory of the pane
+    pub cwd: String,
+    /// Pane width in columns
+    pub width: u32,
+    /// Pane height in rows
+    pub height: u32,
 }
 
 #[async_trait]
@@ -360,6 +780,8 @@ impl AgentRuntimeBackend for TmuxBackend {
     }
 
     async fn initialize(&self) -> ErgataiResult<()> {
+        let tmux_path = tmux_binary()?;
+        info!(path = %tmux_path.display(), "tmux binary resolved");
         let output = Self::run_tmux_cmd(&["-V"]).await?;
         if !output.status.success() {
             return Err(ErgataiError::internal(
@@ -373,32 +795,44 @@ impl AgentRuntimeBackend for TmuxBackend {
 
     async fn create_workspace(&self, spec: WorkspaceSpec) -> ErgataiResult<WorkspaceHandle> {
         let session_name = self.session_name(&spec.id);
+        let work_dir = spec.work_dir.to_string_lossy().to_string();
 
         info!(
             session = session_name,
             width = self.width,
             height = self.height,
+            cwd = work_dir,
             "Creating tmux session workspace"
         );
 
-        // Capture pane_id from new-session output
-        let result = Self::run_tmux_cmd(&[
+        // Build new-session args with optional -c for working directory.
+        // Bind `.to_string()` results to locals so they outlive the `args` borrow.
+        let width_str = self.width.to_string();
+        let height_str = self.height.to_string();
+        let args = vec![
             "new-session",
             "-d",
             "-s",
             &session_name,
             "-x",
-            &self.width.to_string(),
+            &width_str,
             "-y",
-            &self.height.to_string(),
+            &height_str,
+            "-c",
+            &work_dir,
             "-P",
             "-F",
             "#{pane_id}",
-        ])
-        .await;
+        ];
+
+        // Capture pane_id from new-session output
+        let result = Self::run_tmux_cmd(&args).await;
 
         let mut metadata = HashMap::new();
         metadata.insert("session".to_string(), session_name.clone());
+        // Track that this workspace was freshly created (for reuse detection).
+        metadata.insert("fresh".to_string(), "true".to_string());
+        metadata.insert("work_dir".to_string(), work_dir.clone());
 
         match result {
             Ok(output) => {
@@ -411,17 +845,29 @@ impl AgentRuntimeBackend for TmuxBackend {
                     return Err(e);
                 }
                 debug!("Session {} already exists, reusing", session_name);
-                // For reused sessions, find the first pane
+                // For reused sessions, this is NOT a fresh workspace.
+                metadata.insert("fresh".to_string(), "false".to_string());
+                // Find the first pane (anchor for future splits) and any running panes.
                 if let Ok(output) = Self::run_tmux_cmd(&[
                     "list-panes",
                     "-t",
                     &session_name,
                     "-F",
-                    "#{pane_id}",
+                    "#{pane_id}|#{pane_current_command}|#{pane_pid}",
                 ]).await {
                     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                    if let Some(pane_id) = stdout.lines().next().map(|l| l.trim().to_string()) {
-                        metadata.insert("default_pane_id".to_string(), pane_id);
+                    let mut first_pane = None;
+                    for line in stdout.lines() {
+                        let parts: Vec<&str> = line.splitn(3, '|').collect();
+                        if parts.len() < 3 { continue; }
+                        if first_pane.is_none() {
+                            first_pane = Some(parts[0].trim().to_string());
+                        }
+                    }
+                    if let Some(pane_id) = first_pane {
+                        metadata.insert("default_pane_id".to_string(), pane_id.clone());
+                        // Set as anchor pane for future splits.
+                        metadata.insert("anchor_pane".to_string(), pane_id);
                     }
                 }
             }
@@ -459,19 +905,70 @@ impl AgentRuntimeBackend for TmuxBackend {
             ));
         }
 
-        // Use the stored default pane ID from workspace metadata
-        let pane_id = handle
-            .metadata
-            .get("default_pane_id")
-            .cloned()
-            .ok_or_else(|| ErgataiError::internal("Missing default_pane_id in workspace metadata"))?;
-
+        let is_fresh = handle.metadata.get("fresh").map(|v| v == "true").unwrap_or(true);
         let persist = handle.metadata.get("persist")
             .map(|v| v == "true")
             .unwrap_or(false);
 
+        // Determine which pane to use for this agent.
+        // Query tmux to count existing panes — more reliable than metadata flags
+        // which may not propagate correctly across multiple start_agent calls.
+        let existing_pane_count = Self::count_panes_in_session(&session).await;
+        let is_first_agent = existing_pane_count <= 1;
+
+        let (pane_id, is_first_agent) = if !is_fresh && is_first_agent {
+            // ── Workspace reuse: first agent in a pre-existing session ──
+            // Find an existing running pane to reattach to.
+            match Self::find_running_pane(&session).await? {
+                Some(existing_pane) => {
+                    debug!(pane_id = %existing_pane, "Reattaching to existing pane in reused workspace");
+                    (existing_pane, true)
+                }
+                None => {
+                    // No running pane — use the default pane from new-session/list-panes.
+                    let default_pane = handle.metadata.get("default_pane_id").cloned()
+                        .ok_or_else(|| ErgataiError::internal("Missing default_pane_id in reused workspace"))?;
+                    (default_pane, true)
+                }
+            }
+        } else if !is_first_agent {
+            // ── Multi-agent: 2nd+ agent — split from anchor pane ──
+            // Use the first pane in the session as the split target.
+            let anchor = handle.metadata.get("anchor_pane").cloned()
+                .or_else(|| handle.metadata.get("default_pane_id").cloned())
+                .ok_or_else(|| ErgataiError::internal("Missing anchor pane for multi-agent split"))?;
+            let mut split_args = vec![
+                "split-window", "-h",
+                "-t", &anchor,
+                "-P", "-F", "#{pane_id}",
+            ];
+            // Apply cwd from workspace metadata.
+            if let Some(dir) = handle.metadata.get("work_dir") {
+                split_args.push("-c");
+                split_args.push(dir);
+            }
+            let output = Self::run_tmux_cmd(&split_args).await?;
+            let new_pane = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if new_pane.is_empty() {
+                return Err(ErgataiError::internal(
+                    "split-window returned empty pane_id".to_string(),
+                ));
+            }
+            debug!(
+                anchor = %anchor,
+                new_pane = %new_pane,
+                "Split new pane from anchor for multi-agent"
+            );
+            (new_pane, false)
+        } else {
+            // ── Fresh workspace: first agent uses the default pane ──
+            let default_pane = handle.metadata.get("default_pane_id").cloned()
+                .ok_or_else(|| ErgataiError::internal("Missing default_pane_id in workspace metadata"))?;
+            (default_pane, true)
+        };
+
         // Non-persist: exec replaces shell with agent process
-        //   → agent exits → pane dies → pane-died hook → session destroyed
+        //   → agent exits → pane dies → pane-died hook → pane cleanup
         // Persist: keep shell alive after agent exits so user can continue working
         let send_command = if persist {
             command.to_string()
@@ -494,9 +991,21 @@ impl AgentRuntimeBackend for TmuxBackend {
         )
         .await?;
 
+        // Set pane title (requires tmux >= 3.2 for -T flag on select-pane).
+        // Best-effort: older tmux versions ignore the flag silently.
+        let agent_id = format!("agent-{}", uuid::Uuid::new_v4());
+        let title = handle.metadata.get("title")
+            .cloned()
+            .unwrap_or_else(|| agent_id.clone());
+        let _ = Self::run_tmux_cmd(&[
+            "select-pane", "-t", &pane_id, "-T", &title,
+        ]).await;
+
         info!(
             pane_id = pane_id,
             session = session,
+            title = title,
+            is_first = is_first_agent,
             "Agent started in tmux pane"
         );
 
@@ -506,8 +1015,12 @@ impl AgentRuntimeBackend for TmuxBackend {
             info!(pane_id = pane_id, "Instruction injected ({}B)", instr.len());
         }
 
-        // Set auto-kill hooks only for non-persist sessions
-        if !persist {
+        // Set auto-kill hooks only for non-persist, first-agent (single-agent) sessions.
+        // Multi-agent sessions: don't kill the whole session on one pane's death or detach.
+        // Note: if a second agent is later added to a session that already has these hooks,
+        // the hooks will kill the whole session on first agent exit — callers should use
+        // persist=true for multi-agent workloads.
+        if !persist && is_first_agent {
             // Kill session when user detaches
             let _ = Self::run_tmux_cmd(&[
                 "set-hook",
@@ -526,14 +1039,22 @@ impl AgentRuntimeBackend for TmuxBackend {
             ]).await;
         }
 
-        let agent_id = format!("agent-{}", uuid::Uuid::new_v4());
+        // For multi-agent: mark this workspace as having an anchor pane
+        // so subsequent start_agent calls will split instead of reusing default.
+        // The anchor is stored in the workspace handle's metadata (caller should
+        // update it). We also store it in the agent metadata for discoverability.
         let mut metadata = HashMap::new();
         metadata.insert("pane_id".to_string(), pane_id.clone());
         metadata.insert("session".to_string(), session.clone());
+        metadata.insert("title".to_string(), title);
         // Store workspace ID as ergatai_agent_id initially.
         // discover_agents() will later read ERGATAI_AGENT_ID from the child
         // process and update this to the correct MCP binding identifier.
         metadata.insert("ergatai_agent_id".to_string(), handle.id.clone());
+        if is_first_agent {
+            // First agent becomes the anchor for future splits.
+            metadata.insert("anchor_pane".to_string(), pane_id.clone());
+        }
 
         Ok(AgentHandle {
             workspace: handle.clone(),
@@ -573,8 +1094,18 @@ impl AgentRuntimeBackend for TmuxBackend {
 
     async fn stop_agent(&self, handle: &AgentHandle) -> ErgataiResult<()> {
         let pane_id = Self::pane_id(handle)?;
-        info!(pane_id = pane_id, "Stopping agent (killing pane)");
+        let session = Self::session_name_from_handle(&handle.workspace)?;
+        info!(pane_id = pane_id, "Stopping agent (graceful: C-c then kill)");
 
+        // Graceful: send Ctrl-C, wait up to 2s for pane to exit, then force-kill.
+        Self::graceful_stop_pane(&session, &pane_id, "C-c", Duration::from_secs(2)).await
+    }
+
+    async fn kill_agent(&self, handle: &AgentHandle) -> ErgataiResult<()> {
+        let pane_id = Self::pane_id(handle)?;
+        info!(pane_id = pane_id, "Force-killing agent pane");
+
+        // Force: immediate kill-pane, no grace period.
         if let Err(e) =
             Self::run_tmux_cmd_checked(&["kill-pane", "-t", &pane_id], "Failed to kill pane").await
         {
@@ -584,36 +1115,56 @@ impl AgentRuntimeBackend for TmuxBackend {
         Ok(())
     }
 
-    async fn kill_agent(&self, handle: &AgentHandle) -> ErgataiResult<()> {
-        self.stop_agent(handle).await
-    }
-
     async fn wait_for_exit(
         &self,
         handle: &AgentHandle,
         timeout: Option<Duration>,
     ) -> ErgataiResult<WaitResult> {
         let pane_id = Self::pane_id(handle)?;
-        let channel = format!("ergatai-exit-{}", pane_id.replace('%', "-"));
+        let session = Self::session_name_from_handle(&handle.workspace)?;
+        let sanitized = pane_id.replace('%', "-");
+        let channel = format!("ergatai-exit-{}", sanitized);
+        let status_file = format!("/tmp/ergatai-exit-{}.status", sanitized);
+        // Resolve tmux binary path for use inside the shell hook.
+        // The hook runs via tmux's `run-shell`, which invokes /bin/sh, so we
+        // embed the absolute path rather than relying on $PATH inside the shell.
+        let tmux_bin = tmux_binary()?.to_string_lossy();
 
-        // 1. Install global pane-died hook that signals the per-pane channel.
-        //    The hook uses #{pane_id} which tmux expands at fire time.
+        // 1. Install per-session pane-died hook that:
+        //    - Captures exit status via tmux `pane_exit_status` format variable
+        //    - Writes it to a temp file for retrieval after wait-for returns
+        //    - Signals the per-pane wait-for channel
+        //    Using `-t <session>` instead of `-g` avoids clobbering global hooks.
         //    set-hook is idempotent — re-setting replaces the previous hook.
-        //    We use a single hook that signals ALL pane deaths; the channel
-        //    name encodes the pane_id so only the correct waiter is woken.
+        //    Note: `pane_exit_status` requires tmux >= 3.3. On older versions
+        //    the variable expands to empty and we fall back to exit code 0.
+        let hook_cmd = format!(
+            "run-shell \"\
+                code=0; \
+                if c=$({tmux_bin} display-message -t '{pane_id}' -p '#{{pane_exit_status}}' 2>/dev/null) && [ -n \\\"$c\\\" ]; then \
+                    code=$c; \
+                fi; \
+                echo \\\"$code\\\" > {status_file}; \
+                {tmux_bin} wait-for -S {channel} 2>/dev/null || true\
+            \""
+        );
         Self::run_tmux_cmd(&[
             "set-hook",
-            "-g",
+            "-t",
+            &session,
             "pane-died",
-            &format!(
-                "run-shell \"tmux wait-for -S ergatai-exit-#{pane_id} 2>/dev/null || true\""
-            ),
+            &hook_cmd,
         ])
         .await?;
 
         // 2. Check if already dead (handles race: pane died before hook was set)
         match self.is_alive(handle).await {
-            Ok(false) => return Ok(WaitResult::Exited { code: 0 }),
+            Ok(false) => {
+                // Pane already dead — try to read exit code from tmux directly.
+                // The hook may not have run yet, so we query tmux format directly.
+                let code = self.read_exit_code_from_tmux(&pane_id).await;
+                return Ok(exit_code_to_wait_result(code));
+            }
             Ok(true) => {}
             Err(e) => return Ok(WaitResult::Error(e.to_string())),
         }
@@ -627,7 +1178,15 @@ impl AgentRuntimeBackend for TmuxBackend {
         .await;
 
         match result {
-            Ok(Ok(_)) => Ok(WaitResult::Exited { code: 0 }),
+            Ok(Ok(_)) => {
+                // Read exit code from the status file written by the hook.
+                // Small retry loop handles the race between wait-for returning
+                // and the filesystem flush completing.
+                let code = Self::read_exit_code_file(&status_file).await.unwrap_or(0);
+                // Clean up temp file (best-effort)
+                let _ = tokio::fs::remove_file(&status_file).await;
+                Ok(exit_code_to_wait_result(code))
+            }
             Ok(Err(e)) => {
                 warn!(pane_id = pane_id, error = %e, "wait-for failed, falling back to poll");
                 // Fallback: poll if wait-for itself failed
@@ -803,8 +1362,8 @@ impl AgentRuntimeBackend for TmuxBackend {
                 // This is the identifier used in MCP URL paths (e.g., /mcp/agent-2).
                 // Fall back to workspace_id if ERGATAI_AGENT_ID is not set.
                 let ergatai_agent_id = if pid > 0 {
-                    read_proc_environ(pid, "ERGATAI_AGENT_ID")
-                        .or_else(|| find_child_environ(pid, "ERGATAI_AGENT_ID"))
+                    super::proc_linux::read_proc_environ(pid, "ERGATAI_AGENT_ID")
+                        .or_else(|| super::proc_linux::find_child_environ(pid, "ERGATAI_AGENT_ID"))
                         .unwrap_or_else(|| workspace_id.clone())
                 } else {
                     workspace_id.clone()
@@ -841,43 +1400,19 @@ impl AgentRuntimeBackend for TmuxBackend {
 
 // ── Helper functions ──
 
-/// Read an environment variable from a process's `/proc/{pid}/environ`.
+/// Convert a shell exit code to a `WaitResult`.
 ///
-/// Linux-specific: reads the null-delimited environment block from procfs.
-/// Returns `None` if the process doesn't exist, permission is denied,
-/// or the variable is not set.
-fn read_proc_environ(pid: u32, var_name: &str) -> Option<String> {
-    if pid == 0 {
-        return None;
-    }
-    let data = std::fs::read(format!("/proc/{}/environ", pid)).ok()?;
-    let prefix = format!("{}=", var_name);
-    data.split(|b| *b == 0)
-        .filter_map(|entry| std::str::from_utf8(entry).ok())
-        .find_map(|entry| entry.strip_prefix(&prefix).map(|v| v.to_string()))
-}
-
-/// Find an environment variable from a child process (e.g., opencode).
-///
-/// The startup script (bash) exec's opencode, so we scan
-/// /proc/{pid}/task/{pid}/children to find the opencode process and read its env.
-fn find_child_environ(pid: u32, var_name: &str) -> Option<String> {
-    let children_path = format!("/proc/{}/task/{}/children", pid, pid);
-    let children_data = std::fs::read_to_string(&children_path).ok()?;
-
-    for child_pid_str in children_data.split_whitespace() {
-        if let Ok(child_pid) = child_pid_str.parse::<u32>() {
-            let comm_path = format!("/proc/{}/comm", child_pid);
-            if let Ok(comm) = std::fs::read_to_string(&comm_path) {
-                let name = comm.trim();
-                // Match both "opencode" and "opencode.exe" (the ELF binary name)
-                if name == "opencode" || name == "opencode.exe" {
-                    return read_proc_environ(child_pid, var_name);
-                }
-            }
+/// Shell convention: if a process was killed by signal N, the exit code is 128 + N.
+/// This allows us to distinguish normal exits from signal-induced deaths and
+/// return `WaitResult::Signaled` when appropriate.
+fn exit_code_to_wait_result(code: i32) -> WaitResult {
+    if code > 128 {
+        WaitResult::Signaled {
+            signal: code - 128,
         }
+    } else {
+        WaitResult::Exited { code }
     }
-    None
 }
 
 /// Read `TMUX_PANE` environment variable from a process's `/proc/{pid}/environ`.
@@ -886,7 +1421,7 @@ fn find_child_environ(pid: u32, var_name: &str) -> Option<String> {
 /// Reading it from `/proc` gives us the deterministic pane identifier
 /// (e.g., `%15`) that survives discovery rescans — unlike sequential `pane_N` IDs.
 fn read_tmux_pane_env(pid: u32) -> Option<String> {
-    read_proc_environ(pid, "TMUX_PANE")
+    super::proc_linux::read_proc_environ(pid, "TMUX_PANE")
 }
 
 /// Sanitize a message for safe tmux injection.

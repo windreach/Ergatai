@@ -13,11 +13,30 @@
 
 use anyhow::{Context, Result};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::process::Command;
 use tokio::sync::RwLock;
 use tracing::{debug, info, trace, warn};
+
+// ── tmux binary resolution ──
+
+/// Cached tmux binary path. Resolved once via `ergatai_binary::find_tmux_binary()`.
+static TMUX_PATH: OnceLock<PathBuf> = OnceLock::new();
+
+/// Get the tmux binary path, resolving and caching on first call.
+fn tmux_binary() -> Result<&'static PathBuf> {
+    // Fast path: already resolved.
+    if let Some(path) = TMUX_PATH.get() {
+        return Ok(path);
+    }
+    // Slow path: resolve via BinaryLocator and cache.
+    let path = ergatai_binary::find_tmux_binary()
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    Ok(TMUX_PATH.get_or_init(|| path))
+}
 
 // ── Configuration constants (override via environment variables) ──
 
@@ -167,6 +186,7 @@ fn validate_command(command: &str) -> Result<()> {
 
 /// Run a tmux command with timeout and retry logic.
 async fn run_tmux_cmd(args: &[&str]) -> Result<std::process::Output> {
+    let tmux_path = tmux_binary()?;
     let mut last_err = None;
     for attempt in 0..=TMUX_CMD_RETRIES {
         if attempt > 0 {
@@ -179,7 +199,8 @@ async fn run_tmux_cmd(args: &[&str]) -> Result<std::process::Output> {
         }
 
         let result =
-            tokio::time::timeout(TMUX_CMD_TIMEOUT, Command::new("tmux").args(args).output()).await;
+            tokio::time::timeout(TMUX_CMD_TIMEOUT, Command::new(tmux_path).args(args).output())
+                .await;
 
         match result {
             Ok(Ok(output)) => return Ok(output),
@@ -728,10 +749,25 @@ impl Drop for TmuxManager {
             );
 
             // Try to clean up the tmux session synchronously
-            // Use std::process::Command since we're in a synchronous Drop context
-            let result = std::process::Command::new("tmux")
-                .args(["kill-session", "-t", &self.default_session])
-                .output();
+            // Use std::process::Command since we're in a synchronous Drop context.
+            // Try the cached path first (already resolved from async usage);
+            // fall back to ergatai_binary::find_tmux_binary() if not yet cached.
+            let tmux_path = TMUX_PATH
+                .get()
+                .cloned()
+                .or_else(|| ergatai_binary::find_tmux_binary().ok());
+            let result = match tmux_path {
+                Some(path) => std::process::Command::new(&path)
+                    .args(["kill-session", "-t", &self.default_session])
+                    .output(),
+                None => {
+                    warn!(
+                        session = %self.default_session,
+                        "tmux binary not found; cannot clean up session on drop"
+                    );
+                    return;
+                }
+            };
 
             match result {
                 Ok(output) if output.status.success() => {

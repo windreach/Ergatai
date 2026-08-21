@@ -830,6 +830,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "ergatai-agent",
+ "ergatai-binary",
  "ergatai-dag",
  "ergatai-error",
  "ergatai-lock",

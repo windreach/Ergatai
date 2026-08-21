@@ -7,5 +7,6 @@
 
 pub mod direct_process;
 pub mod proc_linux;
+#[cfg(feature = "rmux")]
 pub mod rmux;
 pub mod tmux;

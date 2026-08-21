@@ -370,15 +370,25 @@ impl AgentRuntime {
         use crate::backends::tmux::TmuxBackend;
 
         let backend_any = self.backend.as_any();
-        let tmux_backend = match backend_any.downcast_ref::<TmuxBackend>() {
-            Some(b) => b,
-            None => {
+
+        // Try TmuxBackend first (default).
+        let health = if let Some(tmux_backend) = backend_any.downcast_ref::<TmuxBackend>() {
+            tmux_backend.health_check_agents().await
+        } else {
+            // Try RmuxBackend (deprecated but still in use behind feature flag).
+            #[cfg(feature = "rmux")]
+            if let Some(rmux_backend) = backend_any.downcast_ref::<crate::backends::rmux::RmuxBackend>() {
+                rmux_backend.health_check_agents().await
+            } else {
+                debug!("health check not supported by backend, skipping prune");
+                return Vec::new();
+            }
+            #[cfg(not(feature = "rmux"))]
+            {
                 debug!("health check not supported by backend, skipping prune");
                 return Vec::new();
             }
         };
-
-        let health = tmux_backend.health_check_agents().await;
 
         let mut pruned = Vec::new();
         let mut streaks = self.unhealthy_streaks.lock().await;

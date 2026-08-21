@@ -1,3 +1,7 @@
+// rmux backend is deprecated and gated behind the `rmux` cargo feature.
+// Run with: cargo test -p ergatai-runtime --features rmux
+#![cfg(feature = "rmux")]
+
 //! Integration test for rmux backend — tests the full agent lifecycle.
 //!
 //! This test:

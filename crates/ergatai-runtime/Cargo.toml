@@ -7,6 +7,12 @@ license = "Apache-2.0"
 repository = "https://github.com/windreach/Ergatai"
 description = "Pluggable agent runtime backends for Ergatai"
 
+[features]
+default = []
+## Enable the deprecated rmux backend (pulls in rmux-sdk).
+## The default backend is tmux (ergatai-binary is always included for binary detection).
+rmux = ["dep:rmux-sdk"]
+
 [dependencies]
 ergatai-error = { path = "../ergatai-error" }
 ergatai-binary = { path = "../ergatai-binary" }
@@ -17,7 +23,7 @@ serde_json.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 chrono.workspace = true
-rmux-sdk = { version = "0.10.0", default-features = false }
+rmux-sdk = { version = "0.10.0", default-features = false, optional = true }
 
 [dev-dependencies]
 tempfile = "3.10"

@@ -9,6 +9,7 @@ description = "Multi-agent collaboration and DAG scheduling for Ergatai"
 
 [dependencies]
 ergatai-error = { path = "../ergatai-error" }
+ergatai-binary = { path = "../ergatai-binary" }
 ergatai-nats = { path = "../ergatai-nats" }
 ergatai-dag = { path = "../ergatai-dag" }
 ergatai-lock = { path = "../ergatai-lock" }

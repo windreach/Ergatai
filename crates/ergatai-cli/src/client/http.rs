@@ -223,6 +223,7 @@ pub struct TmuxBackendInfo {
 pub struct TmuxSessionInfo {
     pub name: String,
     pub panes: usize,
+    #[allow(dead_code)]
     pub created: String,
 }
 
