@@ -209,6 +209,18 @@ struct SubmitOrchestrationParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct ValidateDagParams {
+    /// DAG definition in YAML format to validate (without executing).
+    /// The YAML goes through the same strict validation as `submit_orchestration`,
+    /// but nothing is scheduled or run.
+    dag_definition: String,
+    /// Optional parameter values for template expansion (maps `{{var}}` in
+    /// task `input` / `condition` to concrete values).
+    #[serde(default)]
+    parameters: Option<HashMap<String, serde_json::Value>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct CheckDagStatusParams {
     /// DAG ID to check
     dag_id: String,
@@ -980,8 +992,26 @@ impl ErgataiMcpServer {
     /// - `open` (default) — any participant can message any other
     /// - `adjacent` — only agents connected by a dependency edge can talk
     /// - `star:{hub_agent}` — all traffic routes through the named hub
+    ///
+    /// # YAML Validation Rules (strict — invalid YAML is rejected)
+    /// - **Top-level fields**: unknown keys are rejected (e.g. `communcation:` typo → error).
+    ///   Task-level unknown keys are collected as metadata (allowed).
+    /// - **`name`** (per task): required, non-empty.
+    /// - **`priority`** (DAG or task level): must be `low` | `medium` | `high` (case-insensitive).
+    /// - **`timeout` / `max_agent_calls` / `stall_timeout_secs` / `node_timeout_secs`**:
+    ///   must be > 0 when specified (0 is rejected, not treated as "unlimited").
+    /// - **`communication`**: must be `open` | `adjacent` | `star:{hub}`; the hub agent
+    ///   must appear as the `agent` of at least one task.
+    /// - **Template variables** (`{{var}}` in `input` / `condition`): must reference a
+    ///   declared `parameters` entry. If no parameters are declared, templates are
+    ///   left unchecked (backward compatible).
+    /// - **`depends_on`**: referenced task names must exist.
+    /// - **`scope`**: invalid glob patterns are rejected (not silently dropped).
+    ///
+    /// # Tip
+    /// Use the `validate_dag_yaml` tool to dry-run your YAML before submitting.
     #[tool(
-        description = "Submit a DAG workflow for multi-agent collaboration. Accepts YAML (recommended) or Markdown. Supports per-task `complexity: low|medium|high` and top-level `communication: open|adjacent|star:{hub}`."
+        description = "Submit a DAG workflow for multi-agent collaboration. Accepts YAML (recommended) or Markdown. Strict validation: `priority` ∈ {low,medium,high}; timeouts > 0; non-empty task names; `communication` ∈ {open,adjacent,star:{hub}} with hub existing in tasks; template vars must match declared parameters; top-level unknown fields rejected (task-level allowed as metadata). Use `validate_dag_yaml` to dry-run first."
     )]
     async fn submit_orchestration(
         &self,
@@ -1046,6 +1076,83 @@ impl ErgataiMcpServer {
             "submitted_nodes": submitted.len(),
             "progress": progress,
             "graph_status": status,
+        });
+
+        Ok(CallToolResult::success(vec![ContentBlock::text(
+            serde_json::to_string_pretty(&result).unwrap_or_default(),
+        )]))
+    }
+
+    /// Validate a DAG YAML definition without executing it.
+    ///
+    /// Runs the same strict validation as `submit_orchestration` but stops before
+    /// scheduling any work. Use this to sanity-check your YAML before submitting.
+    ///
+    /// # Returns (on success)
+    /// - `valid: true`
+    /// - `task_count` — number of tasks parsed
+    /// - `agents` — unique list of agent ids referenced
+    /// - `communication` — resolved policy (or `"open"` if unspecified)
+    /// - `dag_timeout` / `dag_max_agent_calls` — budget fields if set
+    /// - `tasks` — per-task summary (name, agent, priority, complexity, depends_on)
+    ///
+    /// # Returns (on failure)
+    /// MCP error response with the first validation error encountered.
+    /// Common errors: unknown top-level field, invalid `priority`/`communication`,
+    /// zero timeout, empty task name, unresolved template variable, missing
+    /// dependency, invalid scope glob.
+    #[tool(
+        description = "Dry-run validate a DAG YAML definition. Returns success + summary or the first validation error. Use before `submit_orchestration` to avoid wasting a round-trip on invalid YAML."
+    )]
+    async fn validate_dag_yaml(
+        &self,
+        params: Parameters<ValidateDagParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let dag_definition = &params.0.dag_definition;
+        let parameters = params.0.parameters.clone();
+
+        info!(
+            "Validating DAG definition ({} bytes)",
+            dag_definition.len()
+        );
+
+        // Parse (applies all strict validation rules)
+        let graph =
+            ergatai_core::orchestration::parse_dag_auto(dag_definition, parameters).map_err(
+                |e| ErrorData::invalid_params(format!("DAG validation failed: {}", e), None),
+            )?;
+
+        // Build success summary
+        let mut agents: Vec<&str> = graph.nodes.iter().map(|n| n.agent.as_str()).collect();
+        agents.sort_unstable();
+        agents.dedup();
+
+        let task_summaries: Vec<serde_json::Value> = graph
+            .nodes
+            .iter()
+            .map(|n| {
+                serde_json::json!({
+                    "name": n.task,
+                    "agent": n.agent,
+                    "priority": n.priority,
+                    "complexity": format!("{:?}", n.complexity).to_lowercase(),
+                    "depends_on_count": n.depends_on.len(),
+                    "timeout": n.timeout,
+                    "scope": n.scope,
+                })
+            })
+            .collect();
+
+        let result = serde_json::json!({
+            "valid": true,
+            "task_count": graph.nodes.len(),
+            "agents": agents,
+            "communication": graph.communication.as_deref().unwrap_or("open"),
+            "dag_timeout": graph.timeout,
+            "dag_max_agent_calls": graph.max_agent_calls,
+            "dag_stall_timeout_secs": graph.stall_timeout_secs,
+            "dag_node_timeout_secs": graph.node_timeout_secs,
+            "tasks": task_summaries,
         });
 
         Ok(CallToolResult::success(vec![ContentBlock::text(
