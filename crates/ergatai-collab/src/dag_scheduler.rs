@@ -138,17 +138,20 @@ impl DagScheduler {
         };
 
         // Build the collaboration session from the graph before moving it into the Arc.
+        // NOTE: `parse_dag_yaml` 已对 `communication` 做前置校验，这里 MeshPolicy::parse
+        // 对 YAML 来源的 DAG 应该必然成功。仅对程序化构造的 TaskGraph 做兜底（error 级别告警）。
         let policy = graph
             .communication
             .as_deref()
             .map(|s| match MeshPolicy::parse(s) {
                 Ok(p) => p,
                 Err(e) => {
-                    tracing::warn!(
+                    tracing::error!(
                         communication = %s,
                         error = %e,
                         dag_id = %dag_id,
-                        "Invalid communication policy; falling back to Open"
+                        "BUG: invalid communication policy slipped past parse-time validation; \
+                         falling back to Open"
                     );
                     MeshPolicy::Open
                 }

@@ -39,7 +39,12 @@ use crate::dag_topology::{TaskComplexity, TaskGraph, TaskNode, TaskStatus};
 // ── YAML Schema (serde 反序列化目标) ──
 
 /// YAML 顶层结构
+///
+/// `deny_unknown_fields` 让 serde 在遇到未声明的顶层字段时报错（如
+/// `communcation: open` 拼错），避免用户配置被静默忽略。
+/// 注意：`YamlTask` 因使用 `flatten` 收集 metadata，不兼容此属性。
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[allow(dead_code)] // Schema fields: name/description are optional metadata, consumed by serde
 struct YamlDag {
     /// DAG 名称（可选）
@@ -128,6 +133,127 @@ fn default_agent() -> String {
     "agent".to_string()
 }
 
+/// 验证 `communication` 字段的格式和语义。
+///
+/// 接受: `open` / `adjacent` / `star:{hub_agent}`（hub 非空且必须出现在
+/// 某个 task 的 `agent` 字段中）。非法值立即返回 Err，避免下游静默降级。
+fn validate_communication(
+    communication: Option<&str>,
+    tasks: &[YamlTask],
+) -> ErgataiResult<()> {
+    // 先 trim 再判空 —— `""` 和 `"  "` 行为一致（都视为默认 Open）
+    let policy = match communication.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(s) => s,
+        None => return Ok(()), // 默认 Open，无需校验
+    };
+
+    // open / adjacent
+    if policy.eq_ignore_ascii_case("open") || policy.eq_ignore_ascii_case("adjacent") {
+        return Ok(());
+    }
+
+    // star:{hub}
+    if let Some(hub) = policy.strip_prefix("star:") {
+        let hub = hub.trim();
+        if hub.is_empty() {
+            return Err(ErgataiError::InvalidArgument(
+                "communication 'star:' requires a non-empty hub agent id (e.g. 'star:architect')"
+                    .to_string(),
+            ));
+        }
+        // hub 必须出现在某个 task 的 agent 字段中
+        let agent_exists = tasks.iter().any(|t| t.agent == hub);
+        if !agent_exists {
+            // 用 join 代替 Debug 格式化，输出更人类友好
+            let known: Vec<&str> = tasks.iter().map(|t| t.agent.as_str()).collect();
+            return Err(ErgataiError::InvalidArgument(format!(
+                "communication 'star:{}' references unknown agent. Known agents: [{}]",
+                hub,
+                known.join(", ")
+            )));
+        }
+        return Ok(());
+    }
+
+    Err(ErgataiError::InvalidArgument(format!(
+        "Unknown communication policy {:?}. Expected: open | adjacent | star:{{hub_agent}}",
+        policy
+    )))
+}
+
+/// 验证 `priority` 字段的值是否合法。
+///
+/// 允许: `low` / `medium` / `high`（case-insensitive），或 `None`。
+/// 失败时返回原始非法值，由调用方组装上下文信息（避免循环内重复分配）。
+fn validate_priority(value: Option<&str>) -> Result<(), &str> {
+    let v = match value.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(s) => s,
+        None => return Ok(()),
+    };
+    // case-insensitive 比较，避免 to_lowercase() 的 String 分配
+    if v.eq_ignore_ascii_case("low")
+        || v.eq_ignore_ascii_case("medium")
+        || v.eq_ignore_ascii_case("high")
+    {
+        return Ok(());
+    }
+    Err(v)
+}
+
+/// 从模板字符串（`{{var}}`）中提取所有变量名。
+///
+/// 简单的字符串扫描：寻找所有 `{{...}}` 片段，提取 `.` 前的第一段作为变量名。
+/// 例: `"{{user.name}} has {{count}}"` → `["user", "count"]`
+fn extract_template_vars(template: &str) -> Vec<String> {
+    let mut vars = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut rest = template;
+    while let Some(start) = rest.find("{{") {
+        if let Some(end_offset) = rest[start..].find("}}") {
+            let inner = &rest[start + 2..start + end_offset];
+            // 取顶层变量名（`user.name` → `user`）
+            let top = inner.split('.').next().unwrap_or(inner).trim();
+            if !top.is_empty() && seen.insert(top.to_string()) {
+                vars.push(top.to_string());
+            }
+            rest = &rest[start + end_offset + 2..];
+        } else {
+            break;
+        }
+    }
+    vars
+}
+
+/// 验证 `input` 和 `condition` 中的模板变量都已声明。
+///
+/// 没有 `{{...}}` 的字符串跳过。如果没有声明任何参数，模板变量检查跳过
+/// （允许自由格式模板）。
+fn validate_template_vars(tasks: &[YamlTask], declared_params: &[YamlParameter]) -> ErgataiResult<()> {
+    // 没有声明参数时跳过检查 — 允许自由格式
+    if declared_params.is_empty() {
+        return Ok(());
+    }
+    let declared: std::collections::HashSet<&str> =
+        declared_params.iter().map(|p| p.name.as_str()).collect();
+
+    for task in tasks {
+        for (field_name, template) in [("input", &task.input), ("condition", &task.condition)] {
+            if let Some(tpl) = template {
+                for var in extract_template_vars(tpl) {
+                    if !declared.contains(var.as_str()) {
+                        return Err(ErgataiError::InvalidArgument(format!(
+                            "Task '{}' {} references undeclared variable '{{{{{}}}}}'. Declared parameters: {:?}",
+                            task.name, field_name, var,
+                            declared.iter().collect::<Vec<_>>()
+                        )));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 // ── 公开 API ──
 
 /// 解析 YAML 格式的 DAG 定义为 TaskGraph
@@ -164,6 +290,12 @@ pub fn parse_dag_yaml(
     // 检查重复任务名
     let mut seen_names = std::collections::HashSet::new();
     for task in &yaml_dag.tasks {
+        // Task 7: name 不能为空字符串
+        if task.name.trim().is_empty() {
+            return Err(ErgataiError::InvalidArgument(
+                "Task name cannot be empty".to_string(),
+            ));
+        }
         if !seen_names.insert(&task.name) {
             return Err(ErgataiError::InvalidArgument(format!(
                 "Duplicate task name: '{}'",
@@ -171,6 +303,59 @@ pub fn parse_dag_yaml(
             )));
         }
     }
+
+    // Task 2 + 3: communication 字段强校验（格式 + hub 存在性）
+    validate_communication(yaml_dag.communication.as_deref(), &yaml_dag.tasks)?;
+
+    // Task 4: priority 字段值限定（DAG 级 + 每个 task）
+    // validate_priority 返回非法值，由调用方组装上下文（避免循环内每次分配 String）
+    validate_priority(yaml_dag.priority.as_deref()).map_err(|bad| {
+        ErgataiError::InvalidArgument(format!(
+            "DAG has invalid priority {:?}. Expected: low | medium | high",
+            bad
+        ))
+    })?;
+    for task in &yaml_dag.tasks {
+        validate_priority(task.priority.as_deref()).map_err(|bad| {
+            ErgataiError::InvalidArgument(format!(
+                "Task '{}' has invalid priority {:?}. Expected: low | medium | high",
+                task.name, bad
+            ))
+        })?;
+    }
+
+    // Task 5: timeout / max_agent_calls / stall_timeout / node_timeout 拒绝 0 值
+    if let Some(0) = yaml_dag.timeout {
+        return Err(ErgataiError::InvalidArgument(
+            "DAG `timeout` must be > 0 when specified (seconds)".to_string(),
+        ));
+    }
+    if let Some(0) = yaml_dag.max_agent_calls {
+        return Err(ErgataiError::InvalidArgument(
+            "DAG `max_agent_calls` must be > 0 when specified".to_string(),
+        ));
+    }
+    if let Some(0) = yaml_dag.stall_timeout_secs {
+        return Err(ErgataiError::InvalidArgument(
+            "DAG `stall_timeout_secs` must be > 0 when specified".to_string(),
+        ));
+    }
+    if let Some(0) = yaml_dag.node_timeout_secs {
+        return Err(ErgataiError::InvalidArgument(
+            "DAG `node_timeout_secs` must be > 0 when specified".to_string(),
+        ));
+    }
+    for task in &yaml_dag.tasks {
+        if let Some(0) = task.timeout {
+            return Err(ErgataiError::InvalidArgument(format!(
+                "Task '{}' `timeout` must be > 0 when specified",
+                task.name
+            )));
+        }
+    }
+
+    // Task 8: 模板变量必须引用已声明的 parameter
+    validate_template_vars(&yaml_dag.tasks, &yaml_dag.parameters)?;
 
     // 验证 depends_on 引用的任务名存在
     let task_names: std::collections::HashSet<&str> =
@@ -251,21 +436,23 @@ pub fn parse_dag_yaml(
                 metadata.insert(key.clone(), str_value);
             }
 
-            // 验证 scope
-            let scope = task.scope.and_then(|s| {
-                match validate_scope_pattern(&s) {
-                    Ok(_) => Some(s),
-                    Err(e) => {
-                        tracing::warn!(scope = %s, error = %e, "Invalid scope pattern in YAML DAG, ignoring");
-                        None
-                    }
-                }
-            });
+            // 验证 scope —— Task 6: 失败直接报错，不再静默丢弃
+            let scope = if let Some(s) = task.scope {
+                validate_scope_pattern(&s).map_err(|e| {
+                    ErgataiError::InvalidArgument(format!(
+                        "Task '{}' has invalid scope {:?}: {}",
+                        task.name, s, e
+                    ))
+                })?;
+                Some(s)
+            } else {
+                None
+            };
 
             // Priority propagation: node's own priority takes precedence over DAG-level
             let priority = task.priority.or_else(|| dag_priority.clone());
 
-            TaskNode {
+            Ok(TaskNode {
                 id: uuid,
                 agent: task.agent,
                 task: task.name,
@@ -282,9 +469,9 @@ pub fn parse_dag_yaml(
                 metadata,
                 condition: task.condition,
                 complexity: task.complexity.unwrap_or_default(),
-            }
+            })
         })
-        .collect();
+        .collect::<ErgataiResult<Vec<_>>>()?;
 
     let mut graph = TaskGraph::new(nodes);
     graph.timeout = yaml_dag.timeout;
@@ -293,7 +480,11 @@ pub fn parse_dag_yaml(
     graph.node_timeout_secs = yaml_dag.node_timeout_secs;
     graph.priority = dag_priority;
     graph.parameters = resolved_params;
-    graph.communication = yaml_dag.communication;
+    // 规范化 communication：纯空白视为未指定（与 validate_communication 的 trim 行为一致）
+    graph.communication = yaml_dag
+        .communication
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
     graph.validate()?;
 
     Ok(graph)
@@ -616,8 +807,255 @@ tasks:
   - name: Task A
     scope: "../secret/**"
 "#;
+        // Task 6: 非法 scope 现在应报错（不再静默丢弃）
+        let result = parse_dag_yaml(yaml, None);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("invalid scope"),
+            "unexpected error: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn test_yaml_valid_scope() {
+        let yaml = r#"
+tasks:
+  - name: Task A
+    scope: "src/**/*.rs"
+"#;
         let graph = parse_dag_yaml(yaml, None).unwrap();
-        assert_eq!(graph.nodes[0].scope, None); // 非法 scope 被忽略
+        assert_eq!(graph.nodes[0].scope, Some("src/**/*.rs".to_string()));
+    }
+
+    // ── 新增校验（Tasks 1-8）──────────────────────────────────────
+
+    #[test]
+    fn test_yaml_unknown_top_level_field_rejected() {
+        // Task 1: deny_unknown_fields
+        let yaml = r#"
+name: dag
+communcation: open
+tasks:
+  - name: Task A
+"#;
+        let result = parse_dag_yaml(yaml, None);
+        assert!(result.is_err(), "typo 'communcation' should be rejected");
+    }
+
+    #[test]
+    fn test_yaml_communication_invalid_rejected() {
+        // Task 2: 非法 communication 值
+        let yaml = r#"
+communication: random_mode
+tasks:
+  - name: Task A
+"#;
+        let result = parse_dag_yaml(yaml, None);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("communication"), "error: {err_msg}");
+    }
+
+    #[test]
+    fn test_yaml_communication_star_missing_hub() {
+        // Task 3: star: 后无 hub
+        let yaml = r#"
+communication: "star:"
+tasks:
+  - name: Task A
+"#;
+        let result = parse_dag_yaml(yaml, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_yaml_communication_star_unknown_hub() {
+        // Task 3: star hub 不存在于 tasks
+        let yaml = r#"
+communication: "star:architect"
+tasks:
+  - name: Task A
+    agent: coder
+"#;
+        let result = parse_dag_yaml(yaml, None);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("architect"), "error: {err_msg}");
+    }
+
+    #[test]
+    fn test_yaml_communication_star_valid_hub() {
+        // Task 3: 合法的 star hub
+        let yaml = r#"
+communication: "star:architect"
+tasks:
+  - name: Task A
+    agent: architect
+  - name: Task B
+    agent: coder
+"#;
+        let graph = parse_dag_yaml(yaml, None).unwrap();
+        assert_eq!(graph.communication.as_deref(), Some("star:architect"));
+    }
+
+    #[test]
+    fn test_yaml_communication_whitespace_treated_as_default() {
+        // `communication: "  "` 与 `communication: ""` 行为一致 —— 都视为默认 Open
+        // （trim 后为空，不报错，也不写入 graph.communication）
+        let yaml = r#"
+communication: "   "
+tasks:
+  - name: Task A
+"#;
+        let graph = parse_dag_yaml(yaml, None).unwrap();
+        assert!(graph.communication.is_none());
+    }
+
+    #[test]
+    fn test_yaml_priority_invalid() {
+        // Task 4: 非法 priority
+        let yaml = r#"
+priority: urgent
+tasks:
+  - name: Task A
+"#;
+        let result = parse_dag_yaml(yaml, None);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("priority"), "error: {err_msg}");
+
+        // 任务级 priority 也检查
+        let yaml2 = r#"
+tasks:
+  - name: Task A
+    priority: super_high
+"#;
+        let result2 = parse_dag_yaml(yaml2, None);
+        assert!(result2.is_err());
+    }
+
+    #[test]
+    fn test_yaml_priority_valid_case_insensitive() {
+        // Task 4: 合法 priority（大小写不敏感）
+        let yaml = r#"
+priority: HIGH
+tasks:
+  - name: Task A
+    priority: Low
+  - name: Task B
+    priority: MEDIUM
+"#;
+        let graph = parse_dag_yaml(yaml, None).unwrap();
+        assert_eq!(graph.nodes.len(), 2);
+    }
+
+    #[test]
+    fn test_yaml_timeout_zero_rejected() {
+        // Task 5: timeout=0 被拒
+        let yaml = r#"
+timeout: 0
+tasks:
+  - name: Task A
+"#;
+        let result = parse_dag_yaml(yaml, None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("timeout"));
+
+        // max_agent_calls=0 被拒
+        let yaml2 = r#"
+max_agent_calls: 0
+tasks:
+  - name: Task A
+"#;
+        let result2 = parse_dag_yaml(yaml2, None);
+        assert!(result2.is_err());
+
+        // stall_timeout_secs=0 被拒
+        let yaml3 = r#"
+stall_timeout_secs: 0
+tasks:
+  - name: Task A
+"#;
+        assert!(parse_dag_yaml(yaml3, None).is_err());
+
+        // node_timeout_secs=0 被拒
+        let yaml4 = r#"
+node_timeout_secs: 0
+tasks:
+  - name: Task A
+"#;
+        assert!(parse_dag_yaml(yaml4, None).is_err());
+
+        // 节点级 timeout=0 也被拒
+        let yaml5 = r#"
+tasks:
+  - name: Task A
+    timeout: 0
+"#;
+        assert!(parse_dag_yaml(yaml5, None).is_err());
+    }
+
+    #[test]
+    fn test_yaml_empty_name_rejected() {
+        // Task 7: 空字符串 name
+        let yaml = r#"
+tasks:
+  - name: ""
+"#;
+        let result = parse_dag_yaml(yaml, None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("empty"));
+
+        // 纯空格 name 也拒
+        let yaml2 = r#"
+tasks:
+  - name: "   "
+"#;
+        assert!(parse_dag_yaml(yaml2, None).is_err());
+    }
+
+    #[test]
+    fn test_yaml_template_var_undeclared_rejected() {
+        // Task 8: 模板变量引用未声明参数
+        let yaml = r#"
+parameters:
+  - name: user_query
+tasks:
+  - name: Task A
+    input: "{{user_query}} from {{unknown_var}}"
+"#;
+        let result = parse_dag_yaml(yaml, None);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("unknown_var"), "error: {err_msg}");
+    }
+
+    #[test]
+    fn test_yaml_template_var_valid() {
+        // Task 8: 合法的模板变量引用
+        let yaml = r#"
+parameters:
+  - name: user_query
+  - name: target_file
+tasks:
+  - name: Task A
+    input: "{{user_query}} on {{target_file}}"
+"#;
+        let graph = parse_dag_yaml(yaml, None).unwrap();
+        assert_eq!(graph.nodes.len(), 1);
+    }
+
+    #[test]
+    fn test_yaml_no_parameters_skips_template_check() {
+        // Task 8: 没有声明参数时跳过模板变量检查（允许自由格式）
+        let yaml = r#"
+tasks:
+  - name: Task A
+    input: "{{anything}} goes"
+"#;
+        let graph = parse_dag_yaml(yaml, None).unwrap();
+        assert_eq!(graph.nodes.len(), 1);
     }
 
     #[test]
@@ -738,8 +1176,8 @@ tasks:
 
     #[test]
     fn yaml_roundtrip_preserves_budget_and_stall_fields() {
+        // `dag_id` 不是 YamlDag 字段；deny_unknown_fields 会拒绝，所以去掉。
         let yaml = r#"
-dag_id: test-dag
 description: test
 max_agent_calls: 50
 stall_timeout_secs: 300
@@ -755,7 +1193,6 @@ tasks:
     #[test]
     fn yaml_roundtrip_defaults_budget_fields_to_none() {
         let yaml = r#"
-dag_id: test-dag
 description: test
 tasks:
   - name: a
