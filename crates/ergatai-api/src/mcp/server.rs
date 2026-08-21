@@ -1034,8 +1034,8 @@ impl ErgataiMcpServer {
         }
 
         // Parse DAG definition (YAML) → TaskGraph
-        let graph =
-            ergatai_core::orchestration::parse_dag_auto(dag_definition, parameters).map_err(|e| {
+        let graph = ergatai_core::orchestration::parse_dag_auto(dag_definition, parameters)
+            .map_err(|e| {
                 ErrorData::invalid_params(format!("Failed to parse DAG definition: {}", e), None)
             })?;
 
@@ -1109,16 +1109,13 @@ impl ErgataiMcpServer {
         let dag_definition = &params.0.dag_definition;
         let parameters = params.0.parameters;
 
-        info!(
-            "Validating DAG definition ({} bytes)",
-            dag_definition.len()
-        );
+        info!("Validating DAG definition ({} bytes)", dag_definition.len());
 
         // Parse (applies all strict validation rules)
-        let graph =
-            ergatai_core::orchestration::parse_dag_auto(dag_definition, parameters).map_err(
-                |e| ErrorData::invalid_params(format!("DAG validation failed: {}", e), None),
-            )?;
+        let graph = ergatai_core::orchestration::parse_dag_auto(dag_definition, parameters)
+            .map_err(|e| {
+                ErrorData::invalid_params(format!("DAG validation failed: {}", e), None)
+            })?;
 
         // Build success summary
         let mut agents: Vec<&str> = graph.nodes.iter().map(|n| n.agent.as_str()).collect();

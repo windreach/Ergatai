@@ -137,10 +137,7 @@ fn default_agent() -> String {
 ///
 /// 接受: `open` / `adjacent` / `star:{hub_agent}`（hub 非空且必须出现在
 /// 某个 task 的 `agent` 字段中）。非法值立即返回 Err，避免下游静默降级。
-fn validate_communication(
-    communication: Option<&str>,
-    tasks: &[YamlTask],
-) -> ErgataiResult<()> {
+fn validate_communication(communication: Option<&str>, tasks: &[YamlTask]) -> ErgataiResult<()> {
     // 先 trim 再判空 —— `""` 和 `"  "` 行为一致（都视为默认 Open）
     let policy = match communication.map(str::trim).filter(|s| !s.is_empty()) {
         Some(s) => s,
@@ -228,7 +225,10 @@ fn extract_template_vars(template: &str) -> Vec<String> {
 ///
 /// 没有 `{{...}}` 的字符串跳过。如果没有声明任何参数，模板变量检查跳过
 /// （允许自由格式模板）。
-fn validate_template_vars(tasks: &[YamlTask], declared_params: &[YamlParameter]) -> ErgataiResult<()> {
+fn validate_template_vars(
+    tasks: &[YamlTask],
+    declared_params: &[YamlParameter],
+) -> ErgataiResult<()> {
     // 没有声明参数时跳过检查 — 允许自由格式
     if declared_params.is_empty() {
         return Ok(());

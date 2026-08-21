@@ -801,7 +801,9 @@ impl DagScheduler {
             let graph = self.graph.lock().await;
             graph.stall_timeout_secs
         };
-        let Some(timeout_secs) = stall_timeout else { return; };
+        let Some(timeout_secs) = stall_timeout else {
+            return;
+        };
 
         let scheduler = self.clone();
         let handle = tokio::spawn(async move {
@@ -2456,8 +2458,7 @@ mod tests {
         // No deadline set → should return None
         assert!(scheduler.check_deadline().is_none());
         // Set deadline to past
-        scheduler.deadline =
-            Some(std::time::Instant::now() - std::time::Duration::from_secs(10));
+        scheduler.deadline = Some(std::time::Instant::now() - std::time::Duration::from_secs(10));
         // Should return Some(reason) with "exceeded deadline" in message
         let reason = scheduler.check_deadline().unwrap();
         assert!(
@@ -2535,7 +2536,7 @@ mod tests {
                     if n.status == TaskStatus::Failed {
                         // Verify the stall reason was recorded in metadata.
                         assert!(
-                            n.metadata.get("stall_error").is_some(),
+                            n.metadata.contains_key("stall_error"),
                             "stalled node should have stall_error in metadata"
                         );
                         return;
@@ -2633,7 +2634,10 @@ mod tests {
         assert_eq!(adjust_timeout_by_complexity(0, TaskComplexity::Low), 0);
 
         // Default complexity is Medium.
-        assert_eq!(adjust_timeout_by_complexity(60, TaskComplexity::default()), 60);
+        assert_eq!(
+            adjust_timeout_by_complexity(60, TaskComplexity::default()),
+            60
+        );
     }
 
     /// End-to-end: a YAML DAG with `node_timeout_secs` + per-task complexity
@@ -2674,11 +2678,23 @@ tasks:
         }
 
         // low_task: 60 × 0.5 = 30
-        let low_id = graph.nodes.iter().find(|n| n.agent == "agent-a").unwrap().id.clone();
+        let low_id = graph
+            .nodes
+            .iter()
+            .find(|n| n.agent == "agent-a")
+            .unwrap()
+            .id
+            .clone();
         assert_eq!(adjusted[&low_id], 30, "low_task budget should be 30s");
 
         // high_task: 60 × 2.0 = 120
-        let high_id = graph.nodes.iter().find(|n| n.agent == "agent-b").unwrap().id.clone();
+        let high_id = graph
+            .nodes
+            .iter()
+            .find(|n| n.agent == "agent-b")
+            .unwrap()
+            .id
+            .clone();
         assert_eq!(adjusted[&high_id], 120, "high_task budget should be 120s");
     }
 
@@ -2712,11 +2728,23 @@ tasks:
             );
         }
 
-        let low_id = graph.nodes.iter().find(|n| n.agent == "a").unwrap().id.clone();
+        let low_id = graph
+            .nodes
+            .iter()
+            .find(|n| n.agent == "a")
+            .unwrap()
+            .id
+            .clone();
         // 40 × 0.5 = 20 (per-node timeout used, not DAG default)
         assert_eq!(adjusted[&low_id], 20);
 
-        let high_id = graph.nodes.iter().find(|n| n.agent == "b").unwrap().id.clone();
+        let high_id = graph
+            .nodes
+            .iter()
+            .find(|n| n.agent == "b")
+            .unwrap()
+            .id
+            .clone();
         // 100 × 2.0 = 200 (DAG default used since no per-node timeout)
         assert_eq!(adjusted[&high_id], 200);
     }
