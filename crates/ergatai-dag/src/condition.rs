@@ -37,6 +37,11 @@ impl Condition {
     fn eval_expression(expr: &str) -> bool {
         let expr = expr.trim();
 
+        // Strip balanced outer parentheses so `(expr)` evaluates like `expr`.
+        // Without this, `(1 == 1 && 2 == 2)` falls through to parse_bool and
+        // returns false — a subtle bug that breaks grouped sub-expressions.
+        let expr = Self::strip_outer_parens(expr);
+
         // Handle logical OR (lowest precedence)
         if let Some(pos) = Self::find_operator(expr, "||") {
             let left = Self::eval_expression(&expr[..pos]);
@@ -144,6 +149,39 @@ impl Condition {
         }
     }
 
+    /// Strip balanced outer parentheses if the entire expression is wrapped.
+    ///
+    /// `"(a && b)"` → `"a && b"`, but `"(a) && (b)"` is unchanged (no single
+    /// pair wraps everything).
+    fn strip_outer_parens(expr: &str) -> &str {
+        if !expr.starts_with('(') || !expr.ends_with(')') {
+            return expr;
+        }
+        // Walk the string; if the matching ')' for the opening '(' is the
+        // very last character, the outer parens are balanced and can be stripped.
+        let bytes = expr.as_bytes();
+        let mut depth = 0i32;
+        for (i, &b) in bytes.iter().enumerate() {
+            match b {
+                b'(' => depth += 1,
+                b')' => {
+                    depth -= 1;
+                    if depth == 0 && i < bytes.len() - 1 {
+                        // The first '(' closed before the end — outer parens
+                        // don't wrap the whole expression.
+                        return expr;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if depth == 0 {
+            &expr[1..expr.len() - 1]
+        } else {
+            expr
+        }
+    }
+
     /// Compare two values, returning None if they're not comparable
     fn compare_values(left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
         match (left, right) {
@@ -214,5 +252,67 @@ mod tests {
         ctx.set_global("status", "success");
         assert!(Condition::new("{{global.status}} == \"success\"").evaluate(&ctx));
         assert!(!Condition::new("{{global.status}} == \"failure\"").evaluate(&ctx));
+    }
+
+    #[test]
+    fn test_inequality_operator() {
+        let ctx = DagContext::empty();
+        assert!(Condition::new("1 != 2").evaluate(&ctx));
+        assert!(!Condition::new("1 != 1").evaluate(&ctx));
+    }
+
+    #[test]
+    fn test_boolean_literals() {
+        let ctx = DagContext::empty();
+        assert!(Condition::new("true == true").evaluate(&ctx));
+        assert!(Condition::new("false == false").evaluate(&ctx));
+        assert!(!Condition::new("true == false").evaluate(&ctx));
+    }
+
+    #[test]
+    fn test_not_operator() {
+        // The evaluator does not support a `!` prefix operator; `!false` is
+        // parsed as the string value "!false" which is not a truthy literal.
+        let ctx = DagContext::empty();
+        assert!(!Condition::new("!false").evaluate(&ctx));
+        // Use comparison instead for logical negation
+        assert!(Condition::new("1 != 2").evaluate(&ctx));
+    }
+
+    #[test]
+    fn test_nested_logical() {
+        let ctx = DagContext::empty();
+        assert!(Condition::new("(1 == 1 && 2 == 2) || 3 == 4").evaluate(&ctx));
+        assert!(!Condition::new("(1 == 2 && 2 == 2) || 3 == 4").evaluate(&ctx));
+    }
+
+    #[test]
+    fn test_float_comparison() {
+        let ctx = DagContext::empty();
+        assert!(Condition::new("1.5 < 2.5").evaluate(&ctx));
+        assert!(Condition::new("2.5 > 1.5").evaluate(&ctx));
+    }
+
+    #[test]
+    fn test_empty_condition_default_false() {
+        let ctx = DagContext::empty();
+        // Empty expression evaluates to false (parse_bool treats "" as false)
+        assert!(!Condition::new("").evaluate(&ctx));
+    }
+
+    #[test]
+    fn test_template_variable_missing_key() {
+        let ctx = DagContext::empty();
+        // Missing variable should evaluate to false or handle gracefully
+        let result = Condition::new("{{global.nonexistent}} == \"value\"").evaluate(&ctx);
+        // Should not panic; result depends on null handling
+        assert!(!result);
+    }
+
+    #[test]
+    fn test_mixed_numeric_string_comparison() {
+        let ctx = DagContext::empty();
+        // Numbers and strings should not be equal
+        assert!(!Condition::new("1 == \"1\"").evaluate(&ctx));
     }
 }

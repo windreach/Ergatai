@@ -684,4 +684,80 @@ mod tests {
             "Reply sends should not be recorded"
         );
     }
+
+    #[tokio::test]
+    async fn test_get_batch_info_empty() {
+        let aggregator = BatchAggregator::new();
+        let info = aggregator.get_batch_info("agent-a").await;
+        assert!(info.is_empty(), "No batches initially");
+    }
+
+    #[tokio::test]
+    async fn test_get_batch_info_with_active_batch() {
+        let aggregator = BatchAggregator::new();
+
+        // Create a batch by sending to 2+ agents
+        aggregator.record_send("agent-a", "agent-b", false).await;
+        aggregator.record_send("agent-a", "agent-c", false).await;
+
+        let info = aggregator.get_batch_info("agent-a").await;
+        assert_eq!(info.len(), 1, "Should have one active batch");
+        assert!(info[0].targets.contains(&"agent-b".to_string()));
+        assert!(info[0].targets.contains(&"agent-c".to_string()));
+        assert_eq!(info[0].replies_collected, 0);
+        assert!(!info[0].flushed);
+    }
+
+    #[tokio::test]
+    async fn test_multiple_agents_independent_batches() {
+        let aggregator = BatchAggregator::new();
+
+        // Agent A sends to B and C (batch for A)
+        aggregator.record_send("agent-a", "agent-b", false).await;
+        aggregator.record_send("agent-a", "agent-c", false).await;
+
+        // Agent X sends to Y and Z (batch for X)
+        aggregator.record_send("agent-x", "agent-y", false).await;
+        aggregator.record_send("agent-x", "agent-z", false).await;
+
+        let info_a = aggregator.get_batch_info("agent-a").await;
+        let info_x = aggregator.get_batch_info("agent-x").await;
+        assert_eq!(info_a.len(), 1);
+        assert_eq!(info_x.len(), 1);
+        assert!(info_a[0].targets.contains(&"agent-b".to_string()));
+        assert!(info_x[0].targets.contains(&"agent-y".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_on_reply_collects_multiple_replies() {
+        let aggregator = BatchAggregator::new();
+
+        // Create batch: A → B, C
+        aggregator.record_send("agent-a", "agent-b", false).await;
+        aggregator.record_send("agent-a", "agent-c", false).await;
+
+        // B replies — should be accepted (Some(true))
+        let r1 = aggregator.on_reply("agent-b", "agent-a", "reply from B").await;
+        assert_eq!(r1, Some(true), "First reply should be accepted");
+
+        // C replies — should also be accepted (finalizes the batch)
+        let r2 = aggregator.on_reply("agent-c", "agent-a", "reply from C").await;
+        assert_eq!(r2, Some(true), "Second reply should also be accepted");
+
+        // After flush, further replies should be delivered individually (Some(false))
+        let r3 = aggregator.on_reply("agent-b", "agent-a", "follow-up from B").await;
+        assert_eq!(
+            r3,
+            Some(false),
+            "Reply after flush should indicate individual delivery"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_on_reply_unknown_batch_returns_none() {
+        let aggregator = BatchAggregator::new();
+        // Reply from agent that's not in any batch
+        let result = aggregator.on_reply("stranger", "agent-a", "hi").await;
+        assert_eq!(result, None);
+    }
 }

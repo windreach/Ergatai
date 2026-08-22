@@ -866,4 +866,102 @@ mod tests {
         let active = manager.list_active_conversations().await;
         assert_eq!(active.len(), 1);
     }
+
+    #[test]
+    fn test_is_terminal_states() {
+        let conv = Conversation::new("a", "b");
+        assert!(!conv.is_terminal());
+
+        let mut conv_completed = Conversation::new("a", "b");
+        conv_completed.state = ConversationState::Terminated {
+            reason: TerminationReason::Completed,
+        };
+        assert!(conv_completed.is_terminal());
+
+        let mut conv_failed = Conversation::new("a", "b");
+        conv_failed.state = ConversationState::Terminated {
+            reason: TerminationReason::Failed,
+        };
+        assert!(conv_failed.is_terminal());
+
+        let mut conv_timeout = Conversation::new("a", "b");
+        conv_timeout.state = ConversationState::Terminated {
+            reason: TerminationReason::TimedOut,
+        };
+        assert!(conv_timeout.is_terminal());
+
+        let mut conv_canceled = Conversation::new("a", "b");
+        conv_canceled.state = ConversationState::Terminated {
+            reason: TerminationReason::Canceled,
+        };
+        assert!(conv_canceled.is_terminal());
+    }
+
+    #[test]
+    fn test_other_participant_extended() {
+        let conv = Conversation::new("alice", "bob");
+        assert_eq!(conv.other_participant("alice"), Some("bob"));
+        assert_eq!(conv.other_participant("bob"), Some("alice"));
+        // Unknown participant
+        assert_eq!(conv.other_participant("charlie"), None);
+    }
+
+    #[test]
+    fn test_conversation_id_deterministic() {
+        // Same pair should produce the same ID regardless of order
+        let c1 = Conversation::new("alice", "bob");
+        let c2 = Conversation::new("bob", "alice");
+        assert_eq!(c1.id, c2.id, "Conversation ID should be order-independent");
+    }
+
+    #[tokio::test]
+    async fn test_get_conversation_not_found() {
+        let manager = ConversationManager::new(ConversationConfig::default());
+        let result = manager.get_conversation("nonexistent").await;
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_list_all_includes_terminated() {
+        let manager = ConversationManager::new(ConversationConfig::default());
+
+        // Create and terminate a conversation
+        manager
+            .check_and_record("a", "b", "hello")
+            .await
+            .unwrap();
+        manager
+            .terminate_conversation("conv-a-b", TerminationReason::Completed)
+            .await
+            .unwrap();
+
+        let all = manager.list_all_conversations().await;
+        assert_eq!(all.len(), 1);
+        assert!(all[0].is_terminal());
+
+        // Active list should be empty
+        let active = manager.list_active_conversations().await;
+        assert_eq!(active.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_conversation_turn_count_increments() {
+        let manager = ConversationManager::new(ConversationConfig::default());
+
+        manager
+            .check_and_record("a", "b", "msg1")
+            .await
+            .unwrap();
+        let conv = manager.get_conversation("conv-a-b").await.unwrap();
+        assert_eq!(conv.turn_count, 1);
+        assert_eq!(conv.message_count, 1);
+
+        manager
+            .check_and_record("b", "a", "msg2")
+            .await
+            .unwrap();
+        let conv = manager.get_conversation("conv-a-b").await.unwrap();
+        assert_eq!(conv.turn_count, 2);
+        assert_eq!(conv.message_count, 2);
+    }
 }

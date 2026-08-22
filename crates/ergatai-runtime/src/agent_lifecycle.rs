@@ -422,4 +422,156 @@ mod tests {
             assert_eq!(timeout_type, decoded);
         }
     }
+
+    #[test]
+    fn test_exit_outcome_variants() {
+        // Verify ExitOutcome can represent all termination modes
+        let outcomes = vec![
+            ExitOutcome::Exited {
+                exit_code: Some(0),
+            },
+            ExitOutcome::Exited { exit_code: None },
+            ExitOutcome::Error {
+                error: "panic".into(),
+                retryable: false,
+            },
+            ExitOutcome::Error {
+                error: "transient".into(),
+                retryable: true,
+            },
+            ExitOutcome::TimedOut {
+                timeout_type: TimeoutType::Heartbeat,
+                last_heartbeat: Utc::now(),
+            },
+            ExitOutcome::Signaled { signal: 9 },
+        ];
+
+        for outcome in outcomes {
+            let json = serde_json::to_string(&outcome).unwrap();
+            let decoded: ExitOutcome = serde_json::from_str(&json).unwrap();
+            assert_eq!(outcome, decoded);
+        }
+    }
+
+    #[test]
+    fn test_processing_phase_transitions() {
+        // Verify that Processing states carry their phase and task id
+        let processing = AgentLifecycleState::Processing {
+            task_id: "task-789".to_string(),
+            phase: ProcessingPhase::Writing,
+            started_at: Utc::now(),
+        };
+        assert!(processing.is_alive());
+        assert!(!processing.is_terminal());
+        assert_eq!(processing.task_id(), Some("task-789"));
+    }
+
+    #[test]
+    fn test_stopping_state_is_alive_but_not_terminal() {
+        let stopping = AgentLifecycleState::Stopping {
+            reason: StopReason::TaskCompleted,
+            initiated_at: Utc::now(),
+            timeout_secs: Some(30),
+        };
+        // Stopping is still "alive" (shutting down) but not yet terminal
+        assert!(stopping.is_alive());
+        assert!(!stopping.is_terminal());
+    }
+
+    #[test]
+    fn test_terminated_outcomes_cover_all_exit_outcomes() {
+        // Any ExitOutcome wrapped in Terminated is terminal and not alive
+        let outcomes = vec![
+            ExitOutcome::Exited { exit_code: Some(0) },
+            ExitOutcome::Error {
+                error: "e".into(),
+                retryable: false,
+            },
+            ExitOutcome::TimedOut {
+                timeout_type: TimeoutType::MaxRuntime,
+                last_heartbeat: Utc::now(),
+            },
+            ExitOutcome::Signaled { signal: 15 },
+        ];
+        for outcome in outcomes {
+            let terminated = AgentLifecycleState::Terminated {
+                outcome: outcome.clone(),
+                terminated_at: Utc::now(),
+                duration_secs: 42,
+            };
+            assert!(terminated.is_terminal(), "Terminated should be terminal");
+            assert!(!terminated.is_alive(), "Terminated should not be alive");
+        }
+    }
+
+    #[test]
+    fn test_initializing_context_source() {
+        let state = AgentLifecycleState::Initializing {
+            started_at: Utc::now(),
+            context_source: Some("mcp".to_string()),
+        };
+        assert_eq!(state.state_name(), "initializing");
+        assert!(state.is_alive());
+        assert!(!state.is_terminal());
+    }
+
+    #[test]
+    fn test_idle_state_is_alive() {
+        let idle = AgentLifecycleState::Idle {
+            ready_since: Utc::now(),
+            capabilities: vec!["code".to_string(), "search".to_string()],
+        };
+        assert!(idle.is_alive());
+        assert!(!idle.is_terminal());
+        assert_eq!(idle.task_id(), None);
+    }
+
+    #[test]
+    fn test_starting_state_is_alive() {
+        let starting = AgentLifecycleState::Starting {
+            workspace_id: "ws-1".to_string(),
+            command: "opencode".to_string(),
+            started_at: Utc::now(),
+        };
+        assert!(starting.is_alive());
+        assert!(!starting.is_terminal());
+        assert_eq!(starting.task_id(), None);
+    }
+
+    #[test]
+    fn test_created_state_is_initial() {
+        // Created is the initial state — agent exists but hasn't started yet.
+        // It's not terminal (no outcome), but also not "running alive".
+        let created = AgentLifecycleState::Created;
+        assert!(!created.is_terminal());
+        assert_eq!(created.state_name(), "created");
+        assert_eq!(created.task_id(), None);
+    }
+
+    #[test]
+    fn test_terminated_with_error_retryable_flag() {
+        let retryable = AgentLifecycleState::Terminated {
+            outcome: ExitOutcome::Error {
+                error: "flaky".into(),
+                retryable: true,
+            },
+            terminated_at: Utc::now(),
+            duration_secs: 10,
+        };
+        let non_retryable = AgentLifecycleState::Terminated {
+            outcome: ExitOutcome::Error {
+                error: "fatal".into(),
+                retryable: false,
+            },
+            terminated_at: Utc::now(),
+            duration_secs: 10,
+        };
+        // Both are terminal
+        assert!(retryable.is_terminal());
+        assert!(non_retryable.is_terminal());
+        // But their serialized forms differ
+        let j1 = serde_json::to_string(&retryable).unwrap();
+        let j2 = serde_json::to_string(&non_retryable).unwrap();
+        assert_ne!(j1, j2);
+    }
 }

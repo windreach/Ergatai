@@ -2908,4 +2908,164 @@ tasks:
         // is not a valid transition in the TaskGraph, so it stays Pending).
         assert_eq!(g.find_node("n1").unwrap().status, TaskStatus::Pending);
     }
+
+    #[tokio::test]
+    async fn test_check_communication_open_policy_allows_all() {
+        // Default (Open) policy: all participants can talk to each other
+        let mut graph = TaskGraph::new(vec![
+            TaskNode::new("n1", "agent-a", "Task A"),
+            TaskNode::new("n2", "agent-b", "Task B"),
+        ]);
+        graph.communication = Some("open".to_string());
+        let scheduler = DagScheduler::new(PathBuf::from("/tmp"), graph);
+
+        let result = scheduler.check_communication("agent-a", "agent-b").await;
+        assert!(matches!(result, CommunicationCheck::Allowed));
+
+        // Reverse direction also allowed under Open
+        let result = scheduler.check_communication("agent-b", "agent-a").await;
+        assert!(matches!(result, CommunicationCheck::Allowed));
+    }
+
+    #[tokio::test]
+    async fn test_check_communication_adjacent_policy_respects_edges() {
+        // Adjacent policy: only DAG-connected agents can talk
+        let mut graph = TaskGraph::new(vec![
+            TaskNode::new("n1", "agent-a", "Task A"),
+            TaskNode::new("n2", "agent-b", "Task B").with_dependencies(vec!["n1".into()]),
+            TaskNode::new("n3", "agent-c", "Task C"), // disconnected
+        ]);
+        graph.communication = Some("adjacent".to_string());
+        let scheduler = DagScheduler::new(PathBuf::from("/tmp"), graph);
+
+        // a ↔ b are connected via dependency
+        let result = scheduler.check_communication("agent-a", "agent-b").await;
+        assert!(matches!(result, CommunicationCheck::Allowed));
+
+        // a ↔ c are NOT connected
+        let result = scheduler.check_communication("agent-a", "agent-c").await;
+        assert!(matches!(result, CommunicationCheck::Denied(_)));
+    }
+
+    #[tokio::test]
+    async fn test_check_communication_non_participant_is_not_applicable() {
+        // Agents outside the DAG are not subject to the policy
+        let mut graph = TaskGraph::new(vec![
+            TaskNode::new("n1", "agent-a", "Task A"),
+            TaskNode::new("n2", "agent-b", "Task B"),
+        ]);
+        graph.communication = Some("adjacent".to_string());
+        let scheduler = DagScheduler::new(PathBuf::from("/tmp"), graph);
+
+        // "outsider" is not a participant
+        let result = scheduler.check_communication("outsider", "agent-a").await;
+        assert!(matches!(result, CommunicationCheck::NotApplicable));
+
+        let result = scheduler.check_communication("agent-a", "outsider").await;
+        assert!(matches!(result, CommunicationCheck::NotApplicable));
+    }
+
+    #[tokio::test]
+    async fn test_fail_all_remaining_nodes() {
+        let mut graph = TaskGraph::new(vec![
+            TaskNode::new("n1", "agent-a", "Task A"),
+            TaskNode::new("n2", "agent-b", "Task B"),
+            TaskNode::new("n3", "agent-c", "Task C"),
+        ]);
+        // Set max_retries = 0 so on_node_failed transitions directly to Failed
+        // (otherwise it goes to Pending for retry).
+        for node in graph.nodes.iter_mut() {
+            node.max_retries = 0;
+        }
+        let scheduler = DagScheduler::new(PathBuf::from("/tmp"), graph);
+
+        // Set n1 to Running, n2 to Pending, n3 already completed
+        {
+            let mut g = scheduler.graph.lock().await;
+            for node in g.nodes.iter_mut() {
+                match node.id.as_str() {
+                    "n1" => node.status = TaskStatus::Running,
+                    "n2" => node.status = TaskStatus::Pending,
+                    "n3" => node.status = TaskStatus::Completed,
+                    _ => {}
+                }
+            }
+        }
+
+        scheduler
+            .fail_all_remaining_nodes("DAG timeout exceeded")
+            .await
+            .unwrap();
+
+        let g = scheduler.graph.lock().await;
+        assert_eq!(g.find_node("n1").unwrap().status, TaskStatus::Failed);
+        // n2 was Pending (not Running), so on_node_failed skips it.
+        // fail_all_remaining_nodes only transitions Running nodes via on_node_failed.
+        // Pending nodes are left as-is since they haven't started yet.
+        assert_eq!(g.find_node("n2").unwrap().status, TaskStatus::Pending);
+        // Completed nodes should not be affected
+        assert_eq!(g.find_node("n3").unwrap().status, TaskStatus::Completed);
+    }
+
+    #[tokio::test]
+    async fn test_rollback_running_nodes() {
+        let graph = TaskGraph::new(vec![
+            TaskNode::new("n1", "agent-a", "Task A"),
+            TaskNode::new("n2", "agent-b", "Task B"),
+            TaskNode::new("n3", "agent-c", "Task C"),
+        ]);
+        let temp_dir = tempfile::tempdir().unwrap();
+        // Create the .ergatai/dags/ directory that save_graph_unlocked expects
+        std::fs::create_dir_all(temp_dir.path().join(".ergatai").join("dags")).unwrap();
+        let scheduler = DagScheduler::new(temp_dir.path().to_path_buf(), graph);
+
+        {
+            let mut g = scheduler.graph.lock().await;
+            for node in g.nodes.iter_mut() {
+                match node.id.as_str() {
+                    "n1" => {
+                        node.status = TaskStatus::Running;
+                        node.retry_count = 3;
+                    }
+                    "n2" => node.status = TaskStatus::Running,
+                    "n3" => node.status = TaskStatus::Completed,
+                    _ => {}
+                }
+            }
+        }
+
+        scheduler.rollback_running_nodes().await.unwrap();
+
+        let g = scheduler.graph.lock().await;
+        // Running nodes should be rolled back to Pending with retry_count reset
+        let n1 = g.find_node("n1").unwrap();
+        assert_eq!(n1.status, TaskStatus::Pending);
+        assert_eq!(n1.retry_count, 0);
+        let n2 = g.find_node("n2").unwrap();
+        assert_eq!(n2.status, TaskStatus::Pending);
+        // Completed nodes should not be affected
+        assert_eq!(g.find_node("n3").unwrap().status, TaskStatus::Completed);
+    }
+
+    #[tokio::test]
+    async fn test_collaboration_session_reflects_policy() {
+        let mut graph = TaskGraph::new(vec![
+            TaskNode::new("n1", "agent-a", "Task A"),
+            TaskNode::new("n2", "agent-b", "Task B"),
+            TaskNode::new("n3", "agent-c", "Task C"),
+        ]);
+        graph.communication = Some("star:agent-a".to_string());
+        let scheduler = DagScheduler::new(PathBuf::from("/tmp"), graph);
+
+        let session = scheduler.collaboration().await;
+        assert!(session.participants.contains("agent-a"));
+        assert!(session.participants.contains("agent-b"));
+        // Star policy: hub (agent-a) can talk to everyone
+        assert!(session.allows("agent-a", "agent-b"));
+        assert!(session.allows("agent-a", "agent-c"));
+        // Anyone can talk TO the hub
+        assert!(session.allows("agent-b", "agent-a"));
+        // Non-hub ↔ non-hub should be denied
+        assert!(!session.allows("agent-b", "agent-c"));
+    }
 }
